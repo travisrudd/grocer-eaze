@@ -29,6 +29,7 @@ const recipeSourceLinks = [
 const proteinOptions = ["Beef", "Pork", "Fish", "Shrimp"];
 const storeNames = ["Whole Foods", "Jewel-Osco", "Trader Joe’s"];
 const defaultRecipeFilters = { query: "", kind: "All meals", maxTime: "Any time", source: "All sources", protein: "All proteins", favoritesOnly: false };
+const recipeBatchSize = 12;
 const onboardingSteps = [
   { eyebrow: "STEP 1 OF 4", title: "Start with your household.", body: "Choose your dates, meals, budget, and dietary needs. Family preferences are included automatically." },
   { eyebrow: "STEP 2 OF 4", title: "Browse a catalog built for you.", body: "Filter a large recipe collection, save favorites, and add each recipe to lunch, dinner, or school lunch." },
@@ -78,7 +79,7 @@ function Toggle({ label, checked, onChange, note }: { label: string; checked: bo
 }
 
 function Stars({ value, onChange, label }: { value: number; onChange: (value: number) => void; label: string }) {
-  return <div className="stars" aria-label={label}>{[1, 2, 3, 4, 5].map((star) => <button key={star} type="button" onClick={() => onChange(star)} aria-label={`${star} out of 5`}>{star <= value ? "★" : "☆"}</button>)}</div>;
+  return <div className="stars" role="group" aria-label={label}>{[1, 2, 3, 4, 5].map((star) => <button key={star} type="button" aria-pressed={star === value} onClick={() => onChange(star)} aria-label={`${star} out of 5`}>{star <= value ? "★" : "☆"}</button>)}</div>;
 }
 
 export default function Home() {
@@ -125,6 +126,8 @@ export default function Home() {
   const [billingBusy, setBillingBusy] = useState(false);
   const [recipeIdeas, setRecipeIdeas] = useState<Meal[]>([]);
   const [recipePage, setRecipePage] = useState(1);
+  const [visibleRecipeCount, setVisibleRecipeCount] = useState(recipeBatchSize);
+  const [catalogBeforeSimilar, setCatalogBeforeSimilar] = useState<Meal[] | null>(null);
   const [recipeLoading, setRecipeLoading] = useState(false);
   const [recipeNotice, setRecipeNotice] = useState("");
   const [plannerNotice, setPlannerNotice] = useState("");
@@ -235,8 +238,18 @@ export default function Home() {
       && (recipeFilters.source === "All sources" || meal.sourceName === recipeFilters.source)
       && (recipeFilters.protein === "All proteins" || meal.title.toLowerCase().includes(recipeFilters.protein.toLowerCase()))
       && (!effectiveGlutenFree || meal.tags?.includes("Gluten-free"))
+      && (!effectiveLowDairy || meal.tags?.includes("Low dairy"))
+      && (!mediterranean || meal.tags?.includes("Mediterranean"))
       && (!recipeFilters.favoritesOnly || favorites.includes(meal.title));
-  }), [recipeIdeas, recipeFilters, favorites, effectiveGlutenFree]);
+  }), [recipeIdeas, recipeFilters, favorites, effectiveGlutenFree, effectiveLowDairy, mediterranean]);
+  const visibleRecipeIdeas = filteredRecipeIdeas.slice(0, visibleRecipeCount);
+  const recipeFiltersActive = recipeFilters.query !== ""
+    || recipeFilters.kind !== defaultRecipeFilters.kind
+    || recipeFilters.maxTime !== defaultRecipeFilters.maxTime
+    || recipeFilters.source !== defaultRecipeFilters.source
+    || recipeFilters.protein !== defaultRecipeFilters.protein
+    || recipeFilters.favoritesOnly;
+  const shortLocation = location.split(",").slice(0, 2).join(",").trim() || location;
 
   useEffect(() => {
     let id = window.localStorage.getItem("grocer-eaze-owner");
@@ -327,8 +340,87 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [undoAction]);
 
+  useEffect(() => {
+    const validViews: View[] = ["plan", "meals", "list", "account", "family", "plans", "admin"];
+    const syncViewFromUrl = () => {
+      const nextView = window.location.hash.replace("#", "") as View;
+      if (validViews.includes(nextView)) {
+        setView(nextView);
+        window.scrollTo({ top: 0 });
+      }
+    };
+    syncViewFromUrl();
+    window.addEventListener("popstate", syncViewFromUrl);
+    window.addEventListener("hashchange", syncViewFromUrl);
+    return () => {
+      window.removeEventListener("popstate", syncViewFromUrl);
+      window.removeEventListener("hashchange", syncViewFromUrl);
+    };
+  }, []);
+
+  useEffect(() => {
+    const titles: Record<View, string> = {
+      plan: "Plan meals",
+      meals: "Recipe catalog",
+      list: "Grocery list",
+      account: "Account",
+      family: "Family preferences",
+      plans: "Membership plans",
+      admin: "Admin",
+    };
+    document.title = `${titles[view]} | Grocer-Eaze`;
+  }, [view]);
+
+  useEffect(() => {
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
+    if (!dialog) return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    const backgroundElements = Array.from(document.querySelectorAll<HTMLElement>("header, main, footer"));
+    const previousAriaHidden = backgroundElements.map((element) => element.getAttribute("aria-hidden"));
+    document.body.style.overflow = "hidden";
+    backgroundElements.forEach((element) => {
+      element.setAttribute("inert", "");
+      element.setAttribute("aria-hidden", "true");
+    });
+    dialog.focus();
+    const handleDialogKeys = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (ratingMeal) setRatingMeal(null);
+        else finishOnboarding();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])'));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleDialogKeys);
+    return () => {
+      document.removeEventListener("keydown", handleDialogKeys);
+      document.body.style.overflow = previousOverflow;
+      backgroundElements.forEach((element, index) => {
+        element.removeAttribute("inert");
+        const previousValue = previousAriaHidden[index];
+        if (previousValue === null) element.removeAttribute("aria-hidden");
+        else element.setAttribute("aria-hidden", previousValue);
+      });
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
+    };
+  }, [onboardingStep, ratingMeal]);
+
   async function startAuth() {
     setAuthBusy(true); setAccountStatus("");
+    if (!authForm.name.trim()) { setAuthBusy(false); setAccountStatus("Enter your name to continue."); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(authForm.email.trim())) { setAuthBusy(false); setAccountStatus("Enter a valid email address to continue."); return; }
     const result = await fetch("/api/auth/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(authForm) });
     const data = await result.json(); setAuthBusy(false);
     if (!result.ok) { setAccountStatus(data.error || "Could not send a code."); return; }
@@ -357,7 +449,7 @@ export default function Home() {
   }
 
   async function openBilling(kind: "checkout" | "portal", plan?: "monthly" | "yearly") {
-    if (!user) { setView("account"); setAccountStatus("Create or sign in to your account before choosing a plan."); return; }
+    if (!user) { navigateTo("account"); setAccountStatus("Create or sign in to your account before choosing a plan."); return; }
     setBillingBusy(true); setAccountStatus("");
     const result = await fetch(`/api/billing/${kind}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(plan ? { plan } : {}) });
     const data = await result.json(); setBillingBusy(false);
@@ -373,7 +465,9 @@ export default function Home() {
     const timer = window.setTimeout(async () => {
       const response = await fetch(`/api/location/search?q=${encodeURIComponent(locationQuery)}`);
       const data = await response.json();
-      setLocationResults(data.results || []);
+      const results = data.results || [];
+      setLocationResults(results);
+      setLocationStatus(results.length ? "Choose a suggested location." : "No location matches yet. Try a neighborhood, city, or ZIP.");
     }, 350);
     return () => window.clearTimeout(timer);
   }, [locationQuery, location]);
@@ -463,10 +557,12 @@ export default function Home() {
       setRecipeIdeas(uniqueIdeas);
       setRecipeFilters({ ...defaultRecipeFilters });
       setRecipePage(1);
+      setVisibleRecipeCount(recipeBatchSize);
+      setCatalogBeforeSimilar(null);
       const fallbackActive = payloads.some((data) => data.demo);
       setRecipeNotice(`${uniqueIdeas.length} recipes ready to browse.${fallbackActive ? " The live recipe provider is unavailable, so backup recipes are included." : ""}`);
       if (ownerId) await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, planStartDate, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, maxTime, skill, exclusions } }) });
-      setSimilarTo(queryOverride || ""); setView("meals"); window.scrollTo({ top: 0, behavior: "smooth" });
+      setSimilarTo(queryOverride || ""); navigateTo("meals");
     } catch (error) {
       setPlannerNotice(error instanceof Error ? error.message : "Recipes are temporarily unavailable. Please try again.");
     } finally { setPlanning(false); }
@@ -493,6 +589,7 @@ export default function Home() {
       const existing = new Set(recipeIdeas.map((meal) => `${meal.kind}:${meal.id}:${meal.title.toLowerCase()}`));
       const fresh = incoming.filter((meal: Meal) => !existing.has(`${meal.kind}:${meal.id}:${meal.title.toLowerCase()}`));
       setRecipeIdeas((current) => [...current, ...fresh]); setRecipePage((page) => page + 1);
+      setVisibleRecipeCount((current) => current + recipeBatchSize);
       setRecipeNotice(fresh.length ? `${fresh.length} more recipes added.${data.demo ? " Backup recipes are active while the live provider is unavailable." : ""}` : "No new matches in that batch. Try broader filters or load another batch.");
     } catch {
       setRecipeNotice("More recipes are temporarily unavailable.");
@@ -511,8 +608,10 @@ export default function Home() {
       const data = await response.json();
       if (!response.ok) { setRecipeNotice(data.error || "Similar recipes are temporarily unavailable."); return; }
       const similar = (data.recipes || []).map((recipe: Record<string, unknown>, index: number) => mapRecipe(recipe, index, meal.kind));
+      if (!similarTo) setCatalogBeforeSimilar(recipeIdeas);
       setRecipeIdeas([...new Map(similar.map((item: Meal) => [`${item.kind}:${item.title.toLowerCase()}`, item])).values()]);
       setRecipeFilters((current) => ({ ...current, query: "" }));
+      setVisibleRecipeCount(recipeBatchSize);
       setSimilarTo(meal.title);
       setRecipeNotice(`${similar.length} similar recipes ready to browse.`);
       document.querySelector(".recipe-library")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -644,13 +743,14 @@ export default function Home() {
       });
       return next.sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder) || a.kind.localeCompare(b.kind));
     });
-    setRecipeNotice("Open meal slots filled with preference and budget matches. You can still remove or replace any recipe.");
+    setRecipeNotice("Open meal slots filled with the best available preference and price matches. You can still remove or replace any recipe.");
   }
 
   function toggleSchoolLunches() {
     if (kidLunches) {
       setPlannedMeals((current) => current.filter((meal) => meal.kind !== "School lunch"));
       setRecipeFilters((current) => ({ ...current, kind: current.kind === "School lunch" ? "All meals" : current.kind }));
+      setVisibleRecipeCount(recipeBatchSize);
     }
     setKidLunches(!kidLunches);
   }
@@ -670,6 +770,7 @@ export default function Home() {
   async function toggleFavorite(meal: Meal) {
     const saved = favorites.includes(meal.title);
     setFavorites((current) => saved ? current.filter((item) => item !== meal.title) : [...current, meal.title]);
+    setRecipeNotice(saved ? `${meal.title} removed from favorites.` : `${meal.title} saved to favorites.`);
     if (ownerId) await fetch(`/api/favorites${saved ? `?recipeId=${encodeURIComponent(meal.id)}` : ""}`, { method: saved ? "DELETE" : "POST", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: saved ? undefined : JSON.stringify(meal) });
   }
 
@@ -677,6 +778,7 @@ export default function Home() {
     setRatings((current) => ({ ...current, [meal.id]: rating }));
     await fetch("/api/ratings", { method: "POST", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ recipeId: meal.id, ...rating }) });
     setRatingMeal(null);
+    setRecipeNotice(`Your rating for ${meal.title} was saved.`);
   }
 
   async function saveMember() {
@@ -768,7 +870,36 @@ export default function Home() {
 
   function navigateTo(nextView: View) {
     setView(nextView);
+    const nextHash = `#${nextView}`;
+    if (window.location.hash !== nextHash) window.history.pushState(null, "", nextHash);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function updateRecipeFilters(nextFilters: typeof defaultRecipeFilters) {
+    setRecipeFilters(nextFilters);
+    setVisibleRecipeCount(recipeBatchSize);
+    setRecipeNotice("");
+  }
+
+  function showMoreRecipes() {
+    if (visibleRecipeCount < filteredRecipeIdeas.length) {
+      const nextCount = Math.min(filteredRecipeIdeas.length, visibleRecipeCount + recipeBatchSize);
+      setVisibleRecipeCount(nextCount);
+      setRecipeNotice(`Showing ${nextCount} of ${filteredRecipeIdeas.length} matching recipes.`);
+      return;
+    }
+    void loadMoreRecipes();
+  }
+
+  function returnToFullCatalog() {
+    if (catalogBeforeSimilar) {
+      setRecipeIdeas(catalogBeforeSimilar);
+      setCatalogBeforeSimilar(null);
+      setSimilarTo("");
+      setRecipeFilters({ ...defaultRecipeFilters });
+      setVisibleRecipeCount(recipeBatchSize);
+      setRecipeNotice("Your full recipe catalog is back.");
+    }
   }
 
   function finishOnboarding() {
@@ -780,35 +911,37 @@ export default function Home() {
     setOnboardingStep(0);
   }
 
-  return <main>
+  return <div className="app">
+    <a className="skip-link" href="#page-content">Skip to main content</a>
     <header>
-      <button className="brand" onClick={() => navigateTo("plan")}><span className="brand-mark">g</span><span>Grocer<span>•</span>Eaze</span></button>
+      <button className="brand" aria-label="Grocer-Eaze home" onClick={() => navigateTo("plan")}><span className="brand-mark" aria-hidden="true"><span>g</span></span><span>Grocer<span>•</span>Eaze</span></button>
       <nav aria-label="Primary navigation">
-        <button className={view === "plan" ? "active" : ""} onClick={() => navigateTo("plan")}>Plan</button>
-        <button className={view === "meals" ? "active" : ""} disabled={!recipeIdeas.length && !plannedMeals.length} title={!recipeIdeas.length && !plannedMeals.length ? "Build a recipe catalog first" : undefined} onClick={() => navigateTo("meals")}>My meals</button>
-        <button className={view === "list" ? "active" : ""} disabled={!plannedMeals.length} title={!plannedMeals.length ? "Add meals to build a grocery list" : undefined} onClick={() => navigateTo("list")}>Grocery list</button>
-        <button className={view === "family" ? "active" : ""} onClick={() => navigateTo("family")}>Family</button>
-        {user?.role === "admin" && <button className={view === "admin" ? "active" : ""} onClick={() => { navigateTo("admin"); loadAdminUsers(); }}>Admin</button>}
+        <button className={view === "plan" ? "active" : ""} aria-current={view === "plan" ? "page" : undefined} onClick={() => navigateTo("plan")}>Plan</button>
+        <button className={view === "meals" ? "active" : ""} aria-current={view === "meals" ? "page" : undefined} onClick={() => navigateTo("meals")}>My meals</button>
+        <button className={view === "list" ? "active" : ""} aria-current={view === "list" ? "page" : undefined} onClick={() => navigateTo("list")}>Grocery list</button>
+        <button className={view === "family" ? "active" : ""} aria-current={view === "family" ? "page" : undefined} onClick={() => navigateTo("family")}>Family</button>
+        {user?.role === "admin" && <button className={view === "admin" ? "active" : ""} aria-current={view === "admin" ? "page" : undefined} onClick={() => { navigateTo("admin"); loadAdminUsers(); }}>Admin</button>}
       </nav>
-      <button className="avatar" aria-label="Open profile" onClick={() => navigateTo("account")}>{user ? user.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() : "ME"}</button>
+      <button className="avatar" aria-label="Open profile" aria-current={view === "account" ? "page" : undefined} onClick={() => navigateTo("account")}>{user ? user.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() : "ME"}</button>
     </header>
+    <main>
 
-    {view === "plan" && <div className="shell">
+    {view === "plan" && <div className="shell" id="page-content">
       <section className="hero"><p className="eyebrow">MEAL PLANNING, MADE HUMAN</p><h1><span>Better Food,</span><br /><em>Less Waste.</em></h1><p className="lede">A recipe catalog shaped around every person at your table, so you buy what you need and enjoy what you make.</p><div className="trust-row"><span><b>✓</b> Family preferences included</span><span><b>✓</b> Shop with a smarter list</span><span><b>✓</b> Use more, waste less</span></div></section>
       <section className="planner">
         <div className="planner-top"><div><span>1</span><strong>Build your plan</strong></div><p>About 60 seconds</p></div>
-        <div className="field"><label>How far ahead?</label><div className="segmented">{["Day", "Week", "Month"].map((item) => <button key={item} aria-pressed={range === item} onClick={() => setRange(item)} className={range === item ? "selected" : ""}>{item}</button>)}</div></div>
+        <div className="field"><label id="planning-range-label">How far ahead?</label><div className="segmented" role="group" aria-labelledby="planning-range-label">{["Day", "Week", "Month"].map((item) => <button key={item} aria-pressed={range === item} onClick={() => setRange(item)} className={range === item ? "selected" : ""}>{item}</button>)}</div></div>
         <div className="field"><label htmlFor="plan-start-date">When should this plan start?</label><input id="plan-start-date" className="text-input" type="date" min={todayInputDate()} value={planStartDate} suppressHydrationWarning onChange={(event) => updatePlanStartDate(event.target.value)} /><small className="field-help">Your schedule, reminders, and calendar exports will use this date.</small></div>
-        <div className="two-col"><div className="field"><label>Meals to plan</label><select value={mealType} onChange={(e) => setMealType(e.target.value)}><option>Lunch + dinner</option><option>Dinner only</option></select></div><div className="field"><label>People</label><div className="stepper"><button onClick={() => setPeople(Math.max(1, people - 1))}>−</button><strong>{people}</strong><button onClick={() => setPeople(Math.min(20, people + 1))}>+</button></div></div></div>
-        <div className="field"><label>Household profile</label><input className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /><small className="field-help">{members.length ? `${members.length} family member${members.length === 1 ? "" : "s"} included in preferences.` : "Add individual preferences on the Family page."}</small></div>
+        <div className="two-col"><div className="field"><label htmlFor="meal-type">Meals to plan</label><select id="meal-type" value={mealType} onChange={(e) => setMealType(e.target.value)}><option>Lunch + dinner</option><option>Dinner only</option></select></div><div className="field"><label id="people-label">People</label><div className="stepper" role="group" aria-labelledby="people-label"><button type="button" disabled={people <= 1} aria-label="Decrease number of people" onClick={() => setPeople(Math.max(1, people - 1))}>−</button><strong aria-live="polite">{people}</strong><button type="button" disabled={people >= 20} aria-label="Increase number of people" onClick={() => setPeople(Math.min(20, people + 1))}>+</button></div></div></div>
+        <div className="field"><label htmlFor="household-name">Household profile</label><input id="household-name" className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /><small className="field-help">{members.length ? `${members.length} family member${members.length === 1 ? "" : "s"} included in preferences.` : "Add individual preferences on the Family page."}</small></div>
         {familyRuleDetails.length ? <details className="family-rule-panel"><summary><span>Family search rules</span><small>{familyRuleDetails.length} active</small></summary><div>{familyRuleDetails.map((item) => <p key={`${item.member}-${item.rule}`}><strong>{item.member}</strong><span>{item.rule}</span></p>)}</div></details> : <button className="family-empty-link" onClick={() => navigateTo("family")}>+ Add family preferences to personalize the search</button>}
-        <div className="two-col"><div className="field"><label>Maximum cook time</label><select value={maxTime} onChange={(e) => setMaxTime(e.target.value)}><option>20 minutes</option><option>30 minutes</option><option>45 minutes</option><option>60 minutes</option></select></div><div className="field"><label>Cooking comfort</label><select value={skill} onChange={(e) => setSkill(e.target.value)}><option>Keep it simple</option><option>Comfortable</option><option>Adventurous</option></select></div></div>
-        <div className="field"><div className="label-line"><label>Grocery budget for this plan</label><strong>{budget >= 500 ? "$500+" : `$${budget}`}</strong></div><input aria-label="Grocery budget for this plan" type="range" min="50" max="500" step="10" value={budget} onChange={(e) => setBudget(Number(e.target.value))} /><div className="range-labels"><span>$50</span><span>$500+</span></div></div>
+        <div className="two-col"><div className="field"><label htmlFor="max-cook-time">Maximum cook time</label><select id="max-cook-time" value={maxTime} onChange={(e) => setMaxTime(e.target.value)}><option>20 minutes</option><option>30 minutes</option><option>45 minutes</option><option>60 minutes</option></select></div><div className="field"><label htmlFor="cooking-comfort">Cooking comfort</label><select id="cooking-comfort" value={skill} onChange={(e) => setSkill(e.target.value)}><option>Keep it simple</option><option>Comfortable</option><option>Adventurous</option></select></div></div>
+        <div className="field"><div className="label-line"><label htmlFor="grocery-budget">Grocery budget for this plan</label><strong>{budget >= 500 ? "$500+" : `$${budget}`}</strong></div><input id="grocery-budget" aria-label="Grocery budget for this plan" type="range" min="50" max="500" step="10" value={budget} onChange={(e) => setBudget(Number(e.target.value))} /><div className="range-labels"><span>$50</span><span>$500+</span></div></div>
         <div className="option-grid"><Toggle label="Plan for leftovers" checked={leftovers} onChange={() => setLeftovers(!leftovers)} note="Cook once, eat twice" /><Toggle label="School lunches" checked={kidLunches} onChange={toggleSchoolLunches} note={`${schoolLunchTarget || (range === "Month" ? 22 : range === "Week" ? 5 : 1)} packable weekday lunch${range === "Day" ? "" : "es"}`} /><Toggle label="Gluten-free" checked={glutenFree} onChange={() => setGlutenFree(!glutenFree)} note={familyGlutenFree ? "Also required by a family member" : undefined} /><Toggle label="Low dairy" checked={lowDairy} onChange={() => setLowDairy(!lowDairy)} note={familyLowDairy ? "Also preferred by a family member" : undefined} /><Toggle label="Mediterranean" checked={mediterranean} onChange={() => setMediterranean(!mediterranean)} /><Toggle label="One store only" checked={oneStore} onChange={() => setOneStore(!oneStore)} /></div>
-        {oneStore && <div className="field"><label>Preferred store</label><select value={selectedStore} onChange={(event) => setSelectedStore(event.target.value)}>{storeNames.map((store) => <option key={store}>{store}</option>)}</select></div>}
-        <div className="field"><label>Allergies or ingredients to avoid</label><input className="text-input" placeholder="e.g. shellfish, peanuts, mushrooms" value={exclusions} onChange={(e) => setExclusions(e.target.value)} /></div>
+        {oneStore && <div className="field"><label htmlFor="preferred-store">Preferred store</label><select id="preferred-store" value={selectedStore} onChange={(event) => setSelectedStore(event.target.value)}>{storeNames.map((store) => <option key={store}>{store}</option>)}</select></div>}
+        <div className="field"><label htmlFor="ingredient-exclusions">Allergies or ingredients to avoid</label><input id="ingredient-exclusions" className="text-input" placeholder="e.g. shellfish, peanuts, mushrooms" value={exclusions} onChange={(e) => setExclusions(e.target.value)} /></div>
         <div className="location-picker">
-          <label>Shopping location</label><div className="location-input"><span className="icon-centered">⌖</span><input value={locationQuery} onChange={(e) => setLocationQuery(e.target.value)} placeholder="Neighborhood, city, or ZIP" aria-label="Shopping location" /><button type="button" onClick={locateMe} aria-label="Use my current location" title="Use my current location">◎</button></div>
+          <label htmlFor="shopping-location">Shopping location</label><div className="location-input"><span className="icon-centered" aria-hidden="true">⌖</span><input id="shopping-location" value={locationQuery} onChange={(e) => setLocationQuery(e.target.value)} placeholder="Neighborhood, city, or ZIP" aria-label="Shopping location" /><button type="button" onClick={locateMe} aria-label="Use my current location" title="Use my current location">◎</button></div>
           {locationResults.length > 0 && <div className="location-results">{locationResults.map((result) => <button key={`${result.lat}-${result.lon}`} onClick={() => { setLocation(result.label); setLocationQuery(result.label); setLocationResults([]); setLocationStatus("Location updated."); }}>{result.label}</button>)}</div>}
           <small>{locationStatus || `Searching stores near ${location}`}</small>
         </div>
@@ -816,24 +949,25 @@ export default function Home() {
       </section>
     </div>}
 
-    {view === "meals" && <div className="dashboard catalog-dashboard">
-      <div className="page-heading catalog-heading"><div><p className="eyebrow">{people} PEOPLE · {household.toUpperCase()}</p><h2>{similarTo ? `More like ${similarTo}.` : "Build your plan from the catalog."}</h2><p>Browse, filter, and add each recipe to the meal where it belongs.</p></div><button className="outline" onClick={() => navigateTo("plan")}>Adjust full plan</button></div>
+    {view === "meals" && <div className="dashboard catalog-dashboard" id="page-content">
+      <div className="page-heading catalog-heading"><div><p className="eyebrow">{people} PEOPLE · {household.toUpperCase()}</p><h2>{similarTo ? `More like ${similarTo}.` : "Build your plan from the catalog."}</h2><p>Browse, filter, and add each recipe to the meal where it belongs.</p></div><div className="page-heading-actions">{similarTo && catalogBeforeSimilar && <button className="outline" onClick={returnToFullCatalog}>← Full catalog</button>}<button className="outline" onClick={() => navigateTo("plan")}>Adjust full plan</button></div></div>
 
       <section className="plan-progress" aria-label={`${filledCount} of ${totalTarget} meal slots filled`}>
-        <div className="progress-copy"><span>{filledCount} / {totalTarget}</span><div><strong>{planIsFull ? "Your schedule is full" : `${totalTarget - filledCount} meal slots left`}</strong><small>Starts {new Date(`${planStartDate}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })} · {selectedStore} estimate {selectedEstimate ? `$${selectedEstimate}` : "$0"} · {selectedEstimate <= budget ? `$${budget - selectedEstimate} under budget` : `$${selectedEstimate - budget} over budget`}</small></div>{planIsFull && <button className="progress-cta" onClick={() => navigateTo("list")}>Build grocery list →</button>}</div>
+        <div className="progress-copy"><span>{filledCount} / {totalTarget}</span><div><strong>{planIsFull ? "Your schedule is full" : `${totalTarget - filledCount} meal slots left`}</strong><small>Starts {new Date(`${planStartDate}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })} · {selectedStore} estimate {selectedEstimate ? `$${selectedEstimate}` : "$0"} · {selectedEstimate <= budget ? `$${budget - selectedEstimate} under budget` : `$${selectedEstimate - budget} over budget`}</small></div>{planIsFull ? <button className="progress-cta" onClick={() => navigateTo("list")}>Build grocery list →</button> : recipeIdeas.length > 0 && <button className="progress-cta" onClick={quickFillRemaining}>Quick-fill open slots</button>}</div>
         <div className="progress-track"><i style={{ width: `${Math.min(100, (filledCount / Math.max(1, totalTarget)) * 100)}%` }} /></div>
         <div className="progress-breakdown">{activeMealKinds.map((kind) => {
           const count = plannedMeals.filter((meal) => meal.kind === kind).length;
           const target = mealTargets[kind as keyof typeof mealTargets];
           return <span key={kind} className={count >= target ? "complete" : ""}>{kind} {count}/{target}</span>;
         })}</div>
+        {recipeNotice && <p className="progress-notice" role="status" aria-live="polite">{recipeNotice}</p>}
       </section>
 
       <section className="recipe-library">
-        <div className="library-heading"><div><p className="eyebrow">RECIPE CATALOG</p><h3>Find the right fit.</h3><span>{filteredRecipeIdeas.length} shown · {recipeIdeas.length} loaded · load more whenever you reach the end</span></div><strong>{location}</strong></div>
+        <div className="library-heading"><div><p className="eyebrow">RECIPE CATALOG</p><h3>Find the right fit.</h3><span>{visibleRecipeIdeas.length} showing · {filteredRecipeIdeas.length} matches · {recipeIdeas.length} loaded</span></div><strong className="catalog-location">⌖ Near {shortLocation}</strong></div>
         <div className="preference-filter-row" aria-label="Active meal preferences">
-          <button className={glutenFree ? "active" : ""} aria-pressed={glutenFree} onClick={() => setGlutenFree(!glutenFree)}>Gluten-free</button>
-          <button className={lowDairy ? "active" : ""} aria-pressed={lowDairy} onClick={() => setLowDairy(!lowDairy)}>Low dairy</button>
+          <button className={effectiveGlutenFree ? "active" : ""} aria-pressed={effectiveGlutenFree} disabled={familyGlutenFree} title={familyGlutenFree ? "Required by a family member" : undefined} onClick={() => setGlutenFree(!glutenFree)}>Gluten-free</button>
+          <button className={effectiveLowDairy ? "active" : ""} aria-pressed={effectiveLowDairy} disabled={familyLowDairy} title={familyLowDairy ? "Preferred by a family member" : undefined} onClick={() => setLowDairy(!lowDairy)}>Low dairy</button>
           <button className={mediterranean ? "active" : ""} aria-pressed={mediterranean} onClick={() => setMediterranean(!mediterranean)}>Mediterranean</button>
           <button className={kidLunches ? "active" : ""} aria-pressed={kidLunches} onClick={toggleSchoolLunches}>School lunches</button>
           {leftovers && <span>Leftovers planned</span>}
@@ -850,24 +984,24 @@ export default function Home() {
         <details className="catalog-filter-panel" open>
           <summary><span>Filter recipes</span><small>{filteredRecipeIdeas.length} matches</small></summary>
           <div className="recipe-filters">
-          <div className="filter-search"><span className="icon-centered">⌕</span><input aria-label="Filter recipes by name or ingredient" placeholder="Search recipes or ingredients" value={recipeFilters.query} onChange={(event) => setRecipeFilters({ ...recipeFilters, query: event.target.value })} /></div>
-          <select aria-label="Filter by meal type" value={recipeFilters.kind} onChange={(event) => setRecipeFilters({ ...recipeFilters, kind: event.target.value })}><option>All meals</option>{activeMealKinds.map((kind) => <option key={kind}>{kind}</option>)}</select>
-          <select aria-label="Filter by protein" value={recipeFilters.protein} onChange={(event) => setRecipeFilters({ ...recipeFilters, protein: event.target.value })}><option>All proteins</option>{proteinOptions.map((protein) => <option key={protein}>{protein}</option>)}</select>
-          <select aria-label="Filter by cook time" value={recipeFilters.maxTime} onChange={(event) => setRecipeFilters({ ...recipeFilters, maxTime: event.target.value })}><option>Any time</option><option value="20">20 minutes or less</option><option value="30">30 minutes or less</option><option value="45">45 minutes or less</option><option value="60">60 minutes or less</option></select>
-          <select aria-label="Filter by recipe source" value={recipeFilters.source} onChange={(event) => setRecipeFilters({ ...recipeFilters, source: event.target.value })}><option>All sources</option>{recipeSources.map((source) => <option key={source}>{source}</option>)}</select>
-          <button className={recipeFilters.favoritesOnly ? "active" : ""} onClick={() => setRecipeFilters({ ...recipeFilters, favoritesOnly: !recipeFilters.favoritesOnly })}>♡ Favorites</button>
-          <button onClick={() => setRecipeFilters({ ...defaultRecipeFilters })}>Clear</button>
+          <div className="filter-search"><span className="icon-centered" aria-hidden="true">⌕</span><input aria-label="Filter recipes by name or ingredient" placeholder="Search recipes or ingredients" value={recipeFilters.query} onChange={(event) => updateRecipeFilters({ ...recipeFilters, query: event.target.value })} /></div>
+          <select aria-label="Filter by meal type" value={recipeFilters.kind} onChange={(event) => updateRecipeFilters({ ...recipeFilters, kind: event.target.value })}><option>All meals</option>{activeMealKinds.map((kind) => <option key={kind}>{kind}</option>)}</select>
+          <select aria-label="Filter by protein" value={recipeFilters.protein} onChange={(event) => updateRecipeFilters({ ...recipeFilters, protein: event.target.value })}><option>All proteins</option>{proteinOptions.map((protein) => <option key={protein}>{protein}</option>)}</select>
+          <select aria-label="Filter by cook time" value={recipeFilters.maxTime} onChange={(event) => updateRecipeFilters({ ...recipeFilters, maxTime: event.target.value })}><option>Any time</option><option value="20">20 minutes or less</option><option value="30">30 minutes or less</option><option value="45">45 minutes or less</option><option value="60">60 minutes or less</option></select>
+          <select aria-label="Filter by recipe source" value={recipeFilters.source} onChange={(event) => updateRecipeFilters({ ...recipeFilters, source: event.target.value })}><option>All sources</option>{recipeSources.map((source) => <option key={source}>{source}</option>)}</select>
+          <button className={recipeFilters.favoritesOnly ? "active" : ""} aria-pressed={recipeFilters.favoritesOnly} onClick={() => updateRecipeFilters({ ...recipeFilters, favoritesOnly: !recipeFilters.favoritesOnly })}>♡ Favorites</button>
+          <button disabled={!recipeFiltersActive} onClick={() => updateRecipeFilters({ ...defaultRecipeFilters })}>Clear</button>
           </div>
         </details>
-        {filteredRecipeIdeas.length ? <div className="recipe-card-grid">{filteredRecipeIdeas.map((meal) => <article className="recipe-card" key={`idea-${meal.kind}-${meal.id}-${meal.title}`}>
-          <div className={`recipe-thumb ${meal.tone}`}>{meal.image ? <><img src={meal.image} alt={`${meal.title} recipe`} loading="lazy" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.nextElementSibling?.removeAttribute("hidden"); }} /><span hidden>{meal.emoji}</span></> : <span>{meal.emoji}</span>}<em>{meal.kind === "School lunch" ? "Kid-friendly lunch" : meal.kind}</em><button className={favorites.includes(meal.title) ? "saved" : ""} onClick={() => toggleFavorite(meal)} aria-label={`${favorites.includes(meal.title) ? "Remove" : "Add"} favorite`}>{favorites.includes(meal.title) ? "♥" : "♡"}</button></div>
+        {filteredRecipeIdeas.length ? <div className="recipe-card-grid">{visibleRecipeIdeas.map((meal) => <article className="recipe-card" key={`idea-${meal.kind}-${meal.id}-${meal.title}`}>
+          <div className={`recipe-thumb ${meal.tone}`}>{meal.image ? <><img src={meal.image} alt={`${meal.title} recipe`} loading="lazy" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.nextElementSibling?.removeAttribute("hidden"); }} /><span hidden aria-hidden="true">{meal.emoji}</span></> : <span aria-hidden="true">{meal.emoji}</span>}<em>{meal.kind === "School lunch" ? "Kid-friendly lunch" : meal.kind}</em><button className={favorites.includes(meal.title) ? "saved" : ""} onClick={() => toggleFavorite(meal)} aria-label={`${favorites.includes(meal.title) ? "Remove" : "Add"} ${meal.title} ${favorites.includes(meal.title) ? "from" : "to"} favorites`}>{favorites.includes(meal.title) ? "♥" : "♡"}</button></div>
           <div className="recipe-card-copy"><small>{meal.sourceName}</small><h4>{meal.title}</h4><p>{meal.readyMinutes} min · {meal.cost}</p><div className="recipe-tags">{meal.tags?.slice(0, 6).map((tag) => <span key={tag}>{tag}</span>)}</div><div className="catalog-secondary-actions">{meal.sourceUrl && <a href={meal.sourceUrl} target="_blank" rel="noreferrer">Recipe ↗</a>}<button onClick={() => findSimilar(meal)}>Find similar</button><button onClick={() => setRatingMeal(meal)}>Rate</button></div><div className="add-meal-actions">{activeMealKinds.map((kind) => {
             const target = mealTargets[kind as keyof typeof mealTargets];
             const full = plannedMeals.filter((item) => item.kind === kind).length >= target;
             return <button key={kind} className="add-meal-button" disabled={full} onClick={() => addToMeal(meal, kind)}>{full ? `${kind} full` : `+ Add to ${kind.toLowerCase()}`}</button>;
           })}</div></div>
-        </article>)}</div> : <p className="empty-state">No loaded recipes match these filters. Clear a filter or load more choices.</p>}
-        <div className="load-more-row"><button className="primary compact" disabled={recipeLoading} onClick={loadMoreRecipes}>{recipeLoading ? "Finding more recipes…" : "Load more recipes"}</button>{recipeNotice && <span aria-live="polite">{recipeNotice}</span>}</div>
+        </article>)}</div> : <div className="empty-state empty-state-action"><p>No loaded recipes match these filters.</p>{recipeFiltersActive ? <button className="outline" onClick={() => updateRecipeFilters({ ...defaultRecipeFilters })}>Clear filters</button> : <button className="outline" onClick={() => navigateTo("plan")}>Adjust plan preferences</button>}</div>}
+        <div className="load-more-row"><button className="primary compact" disabled={recipeLoading} onClick={showMoreRecipes}>{recipeLoading ? "Finding more recipes…" : visibleRecipeCount < filteredRecipeIdeas.length ? `Show ${recipeBatchSize} more recipes` : "Find more recipes"}</button><span>{visibleRecipeIdeas.length} of {filteredRecipeIdeas.length} matching recipes shown</span></div>
       </section>
 
       <section className="selection-board">
@@ -903,9 +1037,9 @@ export default function Home() {
       <div className={`action-bar confirm-bar ${planIsFull ? "ready" : ""}`}><p><strong>{planIsFull ? "Schedule complete." : `${filledCount} of ${totalTarget} meals selected.`}</strong> {planIsFull ? "Your recipe ingredients are ready to combine into one grocery list." : "Keep browsing to fill every meal slot."}</p><button className="primary compact" disabled={!planIsFull} onClick={() => navigateTo("list")}>{planIsFull ? "Confirm & build grocery list →" : `${totalTarget - filledCount} slots remaining`}</button></div>
     </div>}
 
-    {view === "list" && <div className="dashboard">
+    {view === "list" && <div className="dashboard" id="page-content">
       <div className="page-heading"><div><p className="eyebrow">GROCERIES · {plannedMeals.length} SELECTED MEALS</p><h2>Everything you need, sorted.</h2><p>{groceryGroups.reduce((sum, group) => sum + group.count, 0)} unique ingredients for {people} people near {location}. {selectedStore} estimate: ${selectedEstimate}.</p></div><button className="outline" onClick={() => navigateTo("meals")}>← Back to recipes</button></div>
-      <div className="list-layout">
+      {plannedMeals.length ? <div className="list-layout">
         <section className="grocery-panel">
           <div className="store-compare"><span className="mini-label">{oneStore ? "YOUR SELECTED STORE" : "COMPARE NEARBY STORES"}</span><div>{visibleStoreEstimates.map((store) => <button key={store.name} className={selectedStore === store.name ? "selected-store" : ""} onClick={() => setSelectedStore(store.name)}><strong>{store.name}</strong><span>${store.price}</span><small>{store.availability}% estimated availability</small></button>)}</div></div>
           <div className="grocery-head"><strong>{selectedStore}</strong><span>{plannedMeals.length} meals × {people} people · recipe-derived estimate</span></div>
@@ -929,36 +1063,63 @@ export default function Home() {
         <aside className="export-panel">
           <span className="mini-label">READY WHEN YOU ARE</span><h3>Take your plan with you</h3><p>Send lists, recipes, and reminders where you already use them.</p>
           {!ingredientsReviewed && <p className="review-required">Confirm the merged ingredient list to unlock exports.</p>}
-          <button disabled={!ingredientsReviewed} onClick={copyForReminders}><span className="icon-centered">✓</span><div><strong>Apple Reminders</strong><small>Copy this grocery list</small></div><b>Copy</b></button>
-          <div className="calendar-export"><label htmlFor="calendar-order">Calendar recipe order</label><select id="calendar-order" value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle within each meal type</option></select><button disabled={!ingredientsReviewed} onClick={downloadCalendar}><span className="icon-centered">31</span><div><strong>Google or Apple Calendar</strong><small>Recipes appear on their scheduled dates</small></div><b>Export</b></button></div>
-          <div className="email-export"><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" /><button disabled={!ingredientsReviewed} onClick={emailRecipes}><span className="icon-centered">@</span><div><strong>Email me recipes</strong><small>Send the complete plan</small></div><b>Email</b></button></div>
+          <button disabled={!ingredientsReviewed} onClick={copyForReminders}><span className="icon-centered" aria-hidden="true">✓</span><div><strong>Apple Reminders</strong><small>Copy this grocery list</small></div><b>Copy</b></button>
+          <div className="calendar-export"><label htmlFor="calendar-order">Calendar recipe order</label><select id="calendar-order" value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle within each meal type</option></select><button disabled={!ingredientsReviewed} onClick={downloadCalendar}><span className="icon-centered" aria-hidden="true">31</span><div><strong>Google or Apple Calendar</strong><small>Recipes appear on their scheduled dates</small></div><b>Export</b></button></div>
+          <div className="email-export"><input type="email" aria-label="Email address for recipe export" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" /><button disabled={!ingredientsReviewed} onClick={emailRecipes}><span className="icon-centered" aria-hidden="true">@</span><div><strong>Email me recipes</strong><small>Send the complete plan</small></div><b>Email</b></button></div>
           {exportStatus && <p className="export-status" aria-live="polite">{exportStatus}</p>}
         </aside>
-      </div>
+      </div> : <section className="empty-journey"><span className="empty-journey-icon icon-centered" aria-hidden="true">🛒</span><h3>Your grocery list starts with a meal.</h3><p>Browse the recipe catalog, add meals to your schedule, and Grocer-Eaze will combine the ingredients here.</p><div><button className="primary compact" onClick={() => navigateTo(recipeIdeas.length ? "meals" : "plan")}>{recipeIdeas.length ? "Choose recipes" : "Build my plan"}</button></div></section>}
     </div>}
 
-    {view === "family" && <div className="dashboard narrow"><div className="page-heading"><div><p className="eyebrow">HOUSEHOLD PREFERENCES</p><h2>Your family, thoughtfully fed.</h2><p>Allergies, avoided ingredients, and favorite proteins shape every catalog search.</p></div></div>{familyStatus && <p className="form-notice success" aria-live="polite">{familyStatus}</p>}<div className="family-grid"><section className="settings-card"><h3>Family members</h3>{members.length === 0 && <p className="empty-state">No family members yet. Add the first person below.</p>}{members.map((member) => <article className="member-card" key={member.id}><span className="member-avatar icon-centered">{member.name.slice(0, 1).toUpperCase()}</span><div><strong>{member.name}</strong><small>{member.role} · {member.allergies || "No listed allergies"}</small><p>{[member.preferences?.glutenFree && "Gluten-free", member.preferences?.lowDairy && "Low dairy", member.preferences?.kidFriendly && "Kid-friendly", member.preferences?.avoidOnions && "Avoid onions", ...(member.preferences?.proteins || []).map((protein) => `${protein} favorite`)].filter(Boolean).join(" · ") || "No preferences yet"}</p></div><div className="member-actions"><button onClick={() => editMember(member)}>Edit</button><button onClick={() => deleteMember(member.id)} aria-label={`Remove ${member.name}`}>Remove</button></div></article>)}</section><section className="settings-card"><h3>{editingMemberId ? "Edit family member" : "Add a family member"}</h3><div className="field"><label>Name</label><input className="text-input" value={memberDraft.name} onChange={(e) => setMemberDraft({ ...memberDraft, name: e.target.value })} /></div><div className="field"><label>Role</label><select value={memberDraft.role} onChange={(e) => setMemberDraft({ ...memberDraft, role: e.target.value })}><option>Adult</option><option>Teen</option><option>Child</option></select></div><div className="field"><label>Allergies / avoid</label><input className="text-input" placeholder="Peanuts, shellfish…" value={memberDraft.allergies} onChange={(e) => setMemberDraft({ ...memberDraft, allergies: e.target.value })} /></div><div className="field"><label>Favorite proteins</label><div className="preference-check-grid">{proteinOptions.map((protein) => <button type="button" key={protein} className={memberDraft.proteins.includes(protein) ? "selected" : ""} aria-pressed={memberDraft.proteins.includes(protein)} onClick={() => setMemberDraft({ ...memberDraft, proteins: memberDraft.proteins.includes(protein) ? memberDraft.proteins.filter((item) => item !== protein) : [...memberDraft.proteins, protein] })}>{protein}</button>)}</div></div><Toggle label="Avoid onions" checked={memberDraft.avoidOnions} onChange={() => setMemberDraft({ ...memberDraft, avoidOnions: !memberDraft.avoidOnions })} /><Toggle label="Gluten-free" checked={memberDraft.glutenFree} onChange={() => setMemberDraft({ ...memberDraft, glutenFree: !memberDraft.glutenFree })} /><Toggle label="Low dairy" checked={memberDraft.lowDairy} onChange={() => setMemberDraft({ ...memberDraft, lowDairy: !memberDraft.lowDairy })} /><Toggle label="Kid-friendly" checked={memberDraft.kidFriendly} onChange={() => setMemberDraft({ ...memberDraft, kidFriendly: !memberDraft.kidFriendly })} /><button className="primary" onClick={saveMember}>{editingMemberId ? "Save changes" : "Add family member"}</button>{editingMemberId && <button className="text-button" onClick={() => { setEditingMemberId(""); setMemberDraft({ name: "", role: "Adult", allergies: "", glutenFree: true, lowDairy: false, kidFriendly: false, avoidOnions: false, proteins: [] }); }}>Cancel editing</button>}</section></div></div>}
+    {view === "family" && <div className="dashboard narrow" id="page-content"><div className="page-heading"><div><p className="eyebrow">HOUSEHOLD PREFERENCES</p><h2>Your family, thoughtfully fed.</h2><p>Allergies, avoided ingredients, and favorite proteins shape every catalog search.</p></div></div>{familyStatus && <p className="form-notice success" aria-live="polite">{familyStatus}</p>}<div className="family-grid"><section className="settings-card"><h3>Family members</h3>{members.length === 0 && <p className="empty-state">No family members yet. Add the first person below.</p>}{members.map((member) => <article className="member-card" key={member.id}><span className="member-avatar icon-centered">{member.name.slice(0, 1).toUpperCase()}</span><div><strong>{member.name}</strong><small>{member.role} · {member.allergies || "No listed allergies"}</small><p>{[member.preferences?.glutenFree && "Gluten-free", member.preferences?.lowDairy && "Low dairy", member.preferences?.kidFriendly && "Kid-friendly", member.preferences?.avoidOnions && "Avoid onions", ...(member.preferences?.proteins || []).map((protein) => `${protein} favorite`)].filter(Boolean).join(" · ") || "No preferences yet"}</p></div><div className="member-actions"><button onClick={() => editMember(member)}>Edit</button><button onClick={() => deleteMember(member.id)} aria-label={`Remove ${member.name}`}>Remove</button></div></article>)}</section><section className="settings-card"><h3>{editingMemberId ? "Edit family member" : "Add a family member"}</h3><div className="field"><label htmlFor="family-member-name">Name</label><input id="family-member-name" className="text-input" value={memberDraft.name} onChange={(e) => setMemberDraft({ ...memberDraft, name: e.target.value })} /></div><div className="field"><label htmlFor="family-member-role">Role</label><select id="family-member-role" value={memberDraft.role} onChange={(e) => setMemberDraft({ ...memberDraft, role: e.target.value })}><option>Adult</option><option>Teen</option><option>Child</option></select></div><div className="field"><label htmlFor="family-member-allergies">Allergies / avoid</label><input id="family-member-allergies" className="text-input" placeholder="Peanuts, shellfish…" value={memberDraft.allergies} onChange={(e) => setMemberDraft({ ...memberDraft, allergies: e.target.value })} /></div><div className="field"><label>Favorite proteins</label><div className="preference-check-grid" role="group" aria-label="Favorite proteins">{proteinOptions.map((protein) => <button type="button" key={protein} className={memberDraft.proteins.includes(protein) ? "selected" : ""} aria-pressed={memberDraft.proteins.includes(protein)} onClick={() => setMemberDraft({ ...memberDraft, proteins: memberDraft.proteins.includes(protein) ? memberDraft.proteins.filter((item) => item !== protein) : [...memberDraft.proteins, protein] })}>{protein}</button>)}</div></div><Toggle label="Avoid onions" checked={memberDraft.avoidOnions} onChange={() => setMemberDraft({ ...memberDraft, avoidOnions: !memberDraft.avoidOnions })} /><Toggle label="Gluten-free" checked={memberDraft.glutenFree} onChange={() => setMemberDraft({ ...memberDraft, glutenFree: !memberDraft.glutenFree })} /><Toggle label="Low dairy" checked={memberDraft.lowDairy} onChange={() => setMemberDraft({ ...memberDraft, lowDairy: !memberDraft.lowDairy })} /><Toggle label="Kid-friendly" checked={memberDraft.kidFriendly} onChange={() => setMemberDraft({ ...memberDraft, kidFriendly: !memberDraft.kidFriendly })} /><button className="primary" onClick={saveMember}>{editingMemberId ? "Save changes" : "Add family member"}</button>{editingMemberId && <button className="text-button" onClick={() => { setEditingMemberId(""); setMemberDraft({ name: "", role: "Adult", allergies: "", glutenFree: true, lowDairy: false, kidFriendly: false, avoidOnions: false, proteins: [] }); }}>Cancel editing</button>}</section></div></div>}
 
-    {view === "account" && <div className="dashboard narrow"><div className="page-heading"><div><p className="eyebrow">PROFILE & SECURITY</p><h2>{user ? `Welcome, ${user.name}.` : "Create your account"}</h2><p>{user ? "Control your household, privacy, and plan." : "No password needed. We’ll verify your email with a one-time code."}</p></div></div>{!user ? <section className="settings-card auth-card"><div className="auth-trust"><span className="icon-centered">🔒</span><strong>Secure passwordless signup</strong><small>Only your name and verified email are required. Phone is optional.</small></div>{authStep === "details" ? <><div className="field"><label>Name</label><input className="text-input" autoComplete="name" value={authForm.name} onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })} /></div><div className="field"><label>Email</label><input className="text-input" type="email" autoComplete="email" value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} /></div><div className="field"><label>Phone <small>(optional)</small></label><input className="text-input" type="tel" autoComplete="tel" value={authForm.phone} onChange={(e) => setAuthForm({ ...authForm, phone: e.target.value })} /></div><button className="primary" disabled={authBusy} onClick={startAuth}>{authBusy ? "Sending code…" : "Continue with email"}</button></> : <><div className="field"><label>Six-digit verification code</label><input className="text-input code-input" inputMode="numeric" maxLength={6} value={authForm.code} onChange={(e) => setAuthForm({ ...authForm, code: e.target.value.replace(/\D/g, "") })} /></div><button className="primary" disabled={authBusy || authForm.code.length !== 6} onClick={verifyAuth}>{authBusy ? "Verifying…" : "Verify and create account"}</button><button className="text-button" onClick={() => setAuthStep("details")}>Use a different email</button></>}{accountStatus && <p className="checkout-note">{accountStatus}</p>}</section> : <div className="settings-stack"><section className="settings-card"><h3>Profile</h3><div className="account-identity"><span className="member-avatar icon-centered">{user.name[0].toUpperCase()}</span><div><strong>{user.name}</strong><small>{user.email}{user.phone ? ` · ${user.phone}` : ""}</small></div><em>{user.role}</em></div><div className="two-col"><div className="field"><label>Household name</label><input className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /></div><div className="field"><label>Email for recipes</label><input className="text-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div></div><button className="outline" onClick={async () => { await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, planStartDate, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, maxTime, skill, exclusions } }) }); setAccountStatus("Profile saved."); }}>Save profile</button>{accountStatus && <span className="success-note">{accountStatus}</span>}</section><section className="settings-card security-card"><div className="icon-centered">🔒</div><div><h3>Security</h3><p>Your email is verified. Your session is stored in a secure, HTTP-only cookie, protected data is checked on the server, and sensitive service keys never reach your browser.</p></div></section><section className="settings-card plan-row"><div><span className="mini-label">ACCESS STATUS</span><h3>{user.billingExempt ? "Billing exempt" : user.accessStatus === "complimentary" ? "Complimentary account" : user.subscriptionStatus === "active" ? "Active membership" : user.subscriptionStatus === "trialing" ? "30-day free trial" : "30-day free trial"}</h3><p>{user.complimentaryUntil ? `Complimentary through ${user.complimentaryUntil}` : user.subscriptionEndsAt ? `Current period ends ${new Date(user.subscriptionEndsAt).toLocaleDateString()}` : "Choose monthly or yearly billing when you’re ready."}</p></div>{user.subscriptionStatus ? <button className="primary compact" disabled={billingBusy} onClick={() => openBilling("portal")}>Manage billing</button> : <button className="primary compact" onClick={() => setView("plans")}>View plans</button>}</section><section className="settings-card danger-zone"><h3>Account controls</h3><button className="outline" onClick={async () => { await fetch("/api/auth/signout", { method: "POST" }); setUser(null); setAuthStep("details"); }}>Sign out</button></section></div>}</div>}
+    {view === "account" && <div className="dashboard narrow" id="page-content">
+      <div className="page-heading"><div><p className="eyebrow">PROFILE & SECURITY</p><h2>{user ? `Welcome, ${user.name}.` : "Create your account"}</h2><p>{user ? "Control your household, privacy, and plan." : "No password needed. We’ll verify your email with a one-time code."}</p></div></div>
+      {!user ? <section className="settings-card auth-card">
+        <div className="auth-trust"><span className="icon-centered" aria-hidden="true">🔒</span><strong>Secure passwordless signup</strong><small>Only your name and verified email are required. Phone is optional.</small></div>
+        {authStep === "details" ? <>
+          <div className="field"><label htmlFor="signup-name">Name</label><input id="signup-name" className="text-input" autoComplete="name" required value={authForm.name} onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })} /></div>
+          <div className="field"><label htmlFor="signup-email">Email</label><input id="signup-email" className="text-input" type="email" autoComplete="email" required value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} /></div>
+          <div className="field"><label htmlFor="signup-phone">Phone <small>(optional)</small></label><input id="signup-phone" className="text-input" type="tel" autoComplete="tel" value={authForm.phone} onChange={(e) => setAuthForm({ ...authForm, phone: e.target.value })} /></div>
+          <button className="primary" disabled={authBusy || !authForm.name.trim() || !authForm.email.trim()} onClick={startAuth}>{authBusy ? "Sending code…" : "Continue with email"}</button>
+        </> : <>
+          <div className="field"><label htmlFor="verification-code">Six-digit verification code</label><input id="verification-code" className="text-input code-input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={authForm.code} onChange={(e) => setAuthForm({ ...authForm, code: e.target.value.replace(/\D/g, "") })} /></div>
+          <button className="primary" disabled={authBusy || authForm.code.length !== 6} onClick={verifyAuth}>{authBusy ? "Verifying…" : "Verify and create account"}</button>
+          <button className="text-button" onClick={() => setAuthStep("details")}>Use a different email</button>
+        </>}
+        {accountStatus && <p className="checkout-note" role="status">{accountStatus}</p>}
+      </section> : <div className="settings-stack">
+        <section className="settings-card">
+          <h3>Profile</h3>
+          <div className="account-identity"><span className="member-avatar icon-centered">{user.name[0].toUpperCase()}</span><div><strong>{user.name}</strong><small>{user.email}{user.phone ? ` · ${user.phone}` : ""}</small></div><em>{user.role}</em></div>
+          <div className="two-col"><div className="field"><label htmlFor="profile-household">Household name</label><input id="profile-household" className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /></div><div className="field"><label htmlFor="profile-email">Email for recipes</label><input id="profile-email" className="text-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div></div>
+          <button className="outline" onClick={async () => { await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, planStartDate, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, maxTime, skill, exclusions } }) }); setAccountStatus("Profile saved."); }}>Save profile</button>{accountStatus && <span className="success-note" role="status">{accountStatus}</span>}
+        </section>
+        <section className="settings-card security-card"><div className="icon-centered" aria-hidden="true">🔒</div><div><h3>Security</h3><p>Your email is verified. Your session is stored in a secure, HTTP-only cookie, protected data is checked on the server, and sensitive service keys never reach your browser.</p></div></section>
+        <section className="settings-card plan-row"><div><span className="mini-label">ACCESS STATUS</span><h3>{user.billingExempt ? "Billing exempt" : user.accessStatus === "complimentary" ? "Complimentary account" : user.subscriptionStatus === "active" ? "Active membership" : user.subscriptionStatus === "trialing" ? "30-day free trial" : "30-day free trial"}</h3><p>{user.complimentaryUntil ? `Complimentary through ${user.complimentaryUntil}` : user.subscriptionEndsAt ? `Current period ends ${new Date(user.subscriptionEndsAt).toLocaleDateString()}` : "Choose monthly or yearly billing when you’re ready."}</p></div>{user.subscriptionStatus ? <button className="primary compact" disabled={billingBusy} onClick={() => openBilling("portal")}>Manage billing</button> : <button className="primary compact" onClick={() => navigateTo("plans")}>View plans</button>}</section>
+        <section className="settings-card danger-zone"><h3>Account controls</h3><button className="outline" onClick={async () => { await fetch("/api/auth/signout", { method: "POST" }); setUser(null); setAuthStep("details"); }}>Sign out</button></section>
+      </div>}
+    </div>}
 
-    {view === "admin" && user?.role === "admin" && <div className="dashboard"><div className="page-heading"><div><p className="eyebrow">SECURE ADMIN CONSOLE</p><h2>User access management</h2><p>Grant free access, exempt billing, suspend accounts, and manage administrators.</p></div></div><section className="admin-toolbar"><input className="text-input" placeholder="Search name or email" value={adminSearch} onChange={(e) => setAdminSearch(e.target.value)} /><button className="outline" onClick={() => loadAdminUsers()}>Search</button></section>{accountStatus && <p className="checkout-note">{accountStatus}</p>}<div className="admin-list">{adminUsers.map((account) => <article className="admin-user" key={account.id}><div><strong>{account.name}</strong><small>{account.email}{account.phone ? ` · ${account.phone}` : ""}</small></div><div className="access-badges"><span>{account.role}</span><span>{account.access_status}</span>{Boolean(account.billing_exempt) && <span>billing exempt</span>}</div><div className="admin-actions"><button onClick={() => adminAction(account.id, account.access_status === "complimentary" ? "revoke_complimentary" : "grant_complimentary")}>{account.access_status === "complimentary" ? "Remove free access" : "Give free access"}</button><button onClick={() => adminAction(account.id, account.billing_exempt ? "billing_required" : "billing_exempt")}>{account.billing_exempt ? "Require payment" : "Turn off payment"}</button><button onClick={() => adminAction(account.id, account.access_status === "suspended" ? "activate" : "suspend")}>{account.access_status === "suspended" ? "Reactivate" : "Suspend"}</button><button onClick={() => adminAction(account.id, account.role === "admin" ? "remove_admin" : "make_admin")}>{account.role === "admin" ? "Remove admin" : "Make admin"}</button></div></article>)}</div>{adminUsers.length === 0 && <p className="empty-state">No users to show yet. Search or wait for the first signup.</p>}</div>}
+    {view === "admin" && user?.role === "admin" && <div className="dashboard" id="page-content"><div className="page-heading"><div><p className="eyebrow">SECURE ADMIN CONSOLE</p><h2>User access management</h2><p>Grant free access, exempt billing, suspend accounts, and manage administrators.</p></div></div><section className="admin-toolbar"><input className="text-input" aria-label="Search users by name or email" placeholder="Search name or email" value={adminSearch} onChange={(e) => setAdminSearch(e.target.value)} /><button className="outline" onClick={() => loadAdminUsers()}>Search</button></section>{accountStatus && <p className="checkout-note" role="status">{accountStatus}</p>}<div className="admin-list">{adminUsers.map((account) => <article className="admin-user" key={account.id}><div><strong>{account.name}</strong><small>{account.email}{account.phone ? ` · ${account.phone}` : ""}</small></div><div className="access-badges"><span>{account.role}</span><span>{account.access_status}</span>{Boolean(account.billing_exempt) && <span>billing exempt</span>}</div><div className="admin-actions"><button onClick={() => adminAction(account.id, account.access_status === "complimentary" ? "revoke_complimentary" : "grant_complimentary")}>{account.access_status === "complimentary" ? "Remove free access" : "Give free access"}</button><button onClick={() => adminAction(account.id, account.billing_exempt ? "billing_required" : "billing_exempt")}>{account.billing_exempt ? "Require payment" : "Turn off payment"}</button><button onClick={() => adminAction(account.id, account.access_status === "suspended" ? "activate" : "suspend")}>{account.access_status === "suspended" ? "Reactivate" : "Suspend"}</button><button onClick={() => adminAction(account.id, account.role === "admin" ? "remove_admin" : "make_admin")}>{account.role === "admin" ? "Remove admin" : "Make admin"}</button></div></article>)}</div>{adminUsers.length === 0 && <p className="empty-state">No users to show yet. Search or wait for the first signup.</p>}</div>}
 
-    {view === "plans" && <div className="dashboard narrow"><div className="page-heading"><div><p className="eyebrow">SIMPLE PRICING</p><h2>Try everything free for 30 days.</h2><p>Secure checkout is handled by Stripe. Cancel any time before the trial ends.</p></div></div><div className="pricing-grid"><article className="price-card"><span>MONTHLY</span><h3><b>$10</b> / month</h3><p>Flexible month-to-month access.</p><button disabled={billingBusy} onClick={() => openBilling("checkout", "monthly")}>{billingBusy ? "Opening secure checkout…" : "Start 30-day trial"}</button></article><article className="price-card featured"><span>BEST VALUE · SAVE $21</span><h3><b>$99</b> / year</h3><p>Everything included, billed annually after your trial.</p><button disabled={billingBusy} onClick={() => openBilling("checkout", "yearly")}>{billingBusy ? "Opening secure checkout…" : "Start 30-day trial"}</button></article></div>{accountStatus && <p className="checkout-note">{accountStatus}</p>}<button className="outline back-button" onClick={() => setView("account")}>← Back to account</button></div>}
+    {view === "plans" && <div className="dashboard narrow" id="page-content"><div className="page-heading"><div><p className="eyebrow">SIMPLE PRICING</p><h2>Try everything free for 30 days.</h2><p>Secure checkout is handled by Stripe. Cancel any time before the trial ends.</p></div></div><div className="pricing-grid"><article className="price-card"><span>MONTHLY</span><h3><b>$10</b> / month</h3><p>Flexible month-to-month access.</p><button disabled={billingBusy} onClick={() => openBilling("checkout", "monthly")}>{billingBusy ? "Opening secure checkout…" : "Start 30-day trial"}</button></article><article className="price-card featured"><span>BEST VALUE · SAVE $21</span><h3><b>$99</b> / year</h3><p>Everything included, billed annually after your trial.</p><button disabled={billingBusy} onClick={() => openBilling("checkout", "yearly")}>{billingBusy ? "Opening secure checkout…" : "Start 30-day trial"}</button></article></div>{accountStatus && <p className="checkout-note" role="status">{accountStatus}</p>}<button className="outline back-button" onClick={() => navigateTo("account")}>← Back to account</button></div>}
+    </main>
 
-    {ratingMeal && <div className="modal-backdrop" onClick={() => setRatingMeal(null)}><section className="rating-modal" role="dialog" aria-modal="true" aria-labelledby="rating-title" onClick={(e) => e.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close recipe rating" onClick={() => setRatingMeal(null)}>×</button><span className="mini-label">RATE THIS RECIPE</span><h3 id="rating-title">{ratingMeal.title}</h3><label>Meal quality</label><Stars label="Meal quality" value={ratings[ratingMeal.id]?.quality || 0} onChange={(quality) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality, ease: current[ratingMeal.id]?.ease || 0 } }))} /><label>Ease of preparation</label><Stars label="Ease of preparation" value={ratings[ratingMeal.id]?.ease || 0} onChange={(ease) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality: current[ratingMeal.id]?.quality || 0, ease } }))} /><button className="primary" disabled={!ratings[ratingMeal.id]?.quality || !ratings[ratingMeal.id]?.ease} onClick={() => saveRating(ratingMeal, ratings[ratingMeal.id])}>Save rating</button></section></div>}
+    {ratingMeal && <div className="modal-backdrop" onClick={() => setRatingMeal(null)}><section className="rating-modal" role="dialog" aria-modal="true" aria-labelledby="rating-title" tabIndex={-1} onClick={(e) => e.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close recipe rating" onClick={() => setRatingMeal(null)}>×</button><span className="mini-label">RATE THIS RECIPE</span><h3 id="rating-title">{ratingMeal.title}</h3><label>Meal quality</label><Stars label="Meal quality" value={ratings[ratingMeal.id]?.quality || 0} onChange={(quality) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality, ease: current[ratingMeal.id]?.ease || 0 } }))} /><label>Ease of preparation</label><Stars label="Ease of preparation" value={ratings[ratingMeal.id]?.ease || 0} onChange={(ease) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality: current[ratingMeal.id]?.quality || 0, ease } }))} /><button className="primary" disabled={!ratings[ratingMeal.id]?.quality || !ratings[ratingMeal.id]?.ease} onClick={() => saveRating(ratingMeal, ratings[ratingMeal.id])}>Save rating</button></section></div>}
 
-    {onboardingStep !== null && <div className="onboarding-backdrop"><section className="onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+    {onboardingStep !== null && <div className="onboarding-backdrop"><section className="onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" tabIndex={-1}>
       <button className="modal-close icon-centered" aria-label="Skip introduction" onClick={finishOnboarding}>×</button>
       <span className="mini-label">{onboardingSteps[onboardingStep].eyebrow}</span>
-      <div className="onboarding-icon icon-centered">{["⌂", "⌕", "↕", "✓"][onboardingStep]}</div>
+      <div className="onboarding-icon icon-centered" aria-hidden="true">{["⌂", "⌕", "↕", "✓"][onboardingStep]}</div>
       <h2 id="onboarding-title">{onboardingSteps[onboardingStep].title}</h2>
       <p>{onboardingSteps[onboardingStep].body}</p>
-      <div className="onboarding-progress" aria-label={`Introduction step ${onboardingStep + 1} of ${onboardingSteps.length}`}>{onboardingSteps.map((step, index) => <i key={step.title} className={index <= onboardingStep ? "active" : ""} />)}</div>
+      <div className="onboarding-progress" role="progressbar" aria-valuemin={1} aria-valuemax={onboardingSteps.length} aria-valuenow={onboardingStep + 1} aria-label={`Introduction step ${onboardingStep + 1} of ${onboardingSteps.length}`}>{onboardingSteps.map((step, index) => <i key={step.title} className={index <= onboardingStep ? "active" : ""} />)}</div>
       <div className="onboarding-actions"><button className="text-button" onClick={finishOnboarding}>Skip</button><div>{onboardingStep > 0 && <button className="outline compact" onClick={() => setOnboardingStep(onboardingStep - 1)}>Back</button>}<button className="primary compact" onClick={() => onboardingStep === onboardingSteps.length - 1 ? finishOnboarding() : setOnboardingStep(onboardingStep + 1)}>{onboardingStep === onboardingSteps.length - 1 ? "Start planning" : "Next"}</button></div></div>
     </section></div>}
 
     {undoAction && <div className="undo-toast" role="status"><span>{undoAction.message}</span><button onClick={() => { undoAction.restore(); setUndoAction(null); }}>Undo</button><button className="undo-dismiss" onClick={() => setUndoAction(null)} aria-label="Dismiss notification">×</button></div>}
 
     <footer className="site-footer"><span>Grocer•Eaze</span><p>Better food. Less waste.</p><div><button onClick={startOnboarding}>How it works</button><button onClick={() => navigateTo("plans")}>Plans</button><button onClick={() => navigateTo("account")}>Privacy & security</button>{recipeSourceLinks.map((source) => <a key={source.name} href={source.url} target="_blank" rel="noreferrer">{source.name}</a>)}</div></footer>
-  </main>;
+  </div>;
 }
