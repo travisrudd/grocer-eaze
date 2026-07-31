@@ -39,6 +39,16 @@ test("keeps core accessibility foundations in the product", async () => {
   assert.match(css, /textarea:focus-visible/);
 });
 
+test("supports location search controls and keeps recipe providers out of the footer", async () => {
+  const page = await source("app/page.tsx");
+
+  assert.match(page, /Use my location/);
+  assert.match(page, /Clear shopping location/);
+  assert.match(page, /aria-autocomplete="list"/);
+  assert.match(page, /Plan preferences/);
+  assert.doesNotMatch(page, /recipeSourceLinks/);
+});
+
 test("includes accessibility and usability checks in the release workflow", async () => {
   const [workflow, checklist, packageJson] = await Promise.all([
     source(".github/workflows/release-quality.yml"),

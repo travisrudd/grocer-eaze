@@ -75,6 +75,9 @@ select { appearance: none; padding-left: 12px; padding-right: 42px; background-i
 .label-line strong { color: var(--green); }
 input[type="range"] { width: 100%; min-height: 36px; accent-color: var(--green); }
 .range-labels { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
+.preference-heading { margin: 4px 0 8px; }
+.preference-heading strong { display: block; color: var(--ink); font-size: 12px; line-height: 1.35; }
+.preference-heading span { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; line-height: 1.45; }
 .option-grid { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 12px 0; margin-bottom: 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
 .toggle-row { border: 0; background: transparent; display: flex; width: 100%; padding: 10px 0; justify-content: space-between; text-align: left; cursor: pointer; align-items: center; }
 .toggle-row strong { display: block; font-size: 12px; }
@@ -189,10 +192,15 @@ summary small { color: var(--muted); font-weight: 500; }
 .location-picker { position: relative; margin-bottom: 20px; }
 .location-picker > label { display: block; font-size: 12px; font-weight: 800; margin-bottom: 10px; }
 .location-picker > small { display: block; margin-top: 7px; color: var(--muted); font-size: 11px; }
-.location-input { height: 44px; display: grid; grid-template-columns: 36px 1fr 40px; align-items: center; background: #f1f3ed; border: 1px solid #d8dbd5; border-radius: var(--radius-control); overflow: hidden; }
-.location-input > span { width: 28px; height: 28px; margin-left: 6px; border-radius: 50%; background: var(--mint); color: var(--green-dark); }
+.location-input { min-height: 44px; display: grid; grid-template-columns: 36px minmax(0,1fr) auto; align-items: center; background: #f1f3ed; border: 1px solid #d8dbd5; border-radius: var(--radius-control); overflow: hidden; }
+.location-mark { width: 28px; height: 28px; margin-left: 6px; display: grid; place-items: center; border-radius: 50%; background: var(--mint); color: var(--green-dark); }
+.location-mark i { display: block; font-style: normal; font-size: 14px; line-height: 1; transform: translateY(-1px); }
 .location-input input { height: 100%; border: 0; outline: 0; background: transparent; min-width: 0; font-size: 11px; }
-.location-input button { height: 100%; border: 0; border-left: 1px solid #d8dbd5; background: white; color: var(--green); font-weight: 900; cursor: pointer; font-size: 18px; display: grid; place-items: center; }
+.location-actions { align-self: stretch; display: flex; }
+.location-actions button { min-height: 42px; border: 0; border-left: 1px solid #d8dbd5; background: white; color: var(--green); font-size: 10px; font-weight: 800; cursor: pointer; }
+.location-actions .location-clear { padding: 0 12px; color: var(--muted); }
+.location-actions .location-use { display: flex; align-items: center; gap: 6px; padding: 0 13px; white-space: nowrap; }
+.location-actions .location-use span { font-size: 16px; line-height: 1; }
 .location-results { position: absolute; z-index: 15; top: 68px; left: 0; right: 0; display: grid; background: white; border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(28,52,41,.15); border-radius: var(--radius-card); overflow: hidden; }
 .location-results button { border: 0; border-bottom: 1px solid var(--line); background: white; padding: 11px 13px; text-align: left; font-size: 10px; line-height: 1.45; cursor: pointer; }
 .location-results button:hover { background: #edf3ea; }
@@ -307,7 +315,7 @@ summary small { color: var(--muted); font-weight: 500; }
 
 .onboarding-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px; background: rgba(25,44,36,.64); backdrop-filter: blur(5px); }
 .onboarding-modal { position: relative; width: min(500px, 100%); padding: 38px; border-radius: var(--radius-card); background: var(--paper); box-shadow: 0 28px 90px rgba(0,0,0,.28); text-align: center; }
-.onboarding-icon { width: 36px; height: 36px; margin: 18px auto 14px; border-radius: 50%; background: var(--green); color: white; font: 800 14px/1 Inter, ui-sans-serif, system-ui, sans-serif; box-shadow: 0 4px 10px rgba(61,113,87,.16); }
+.onboarding-icon { width: 24px; height: 24px; margin-left: 10px; vertical-align: middle; border-radius: 50%; background: var(--green); color: white; font: 800 10px/1 Inter, ui-sans-serif, system-ui, sans-serif; box-shadow: 0 4px 10px rgba(61,113,87,.16); }
 .onboarding-modal h2 { margin: 0 0 10px; color: var(--green-dark); font-size: 34px; line-height: 1.04; letter-spacing: -.025em; }
 .onboarding-modal > p { max-width: 390px; margin: 0 auto; color: var(--muted); font-size: 12px; line-height: 1.65; }
 .onboarding-progress { display: flex; justify-content: center; gap: 6px; margin: 24px 0; }.onboarding-progress i { width: 28px; height: 4px; border-radius: var(--radius-pill); background: #d9ded9; }.onboarding-progress i.active { background: var(--orange); }
@@ -475,6 +483,11 @@ summary small { color: var(--muted); font-weight: 500; }
   .grocery-head { align-items: flex-start; flex-direction: column; gap: 5px; }
   .estimate-method { padding: 12px 16px; font-size: 10px; }
   .action-bar .primary.compact { width: 100%; }
+  .location-input { grid-template-columns: 36px minmax(0,1fr); }
+  .location-actions { grid-column: 1 / -1; border-top: 1px solid #d8dbd5; }
+  .location-actions button { flex: 1; border-left: 0; }
+  .location-actions button + button { border-left: 1px solid #d8dbd5; }
+  .location-results { top: 111px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

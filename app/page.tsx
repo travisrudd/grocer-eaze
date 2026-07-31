@@ -19,13 +19,6 @@ type UndoAction = { message: string; restore: () => void };
 type AccountUser = { id: string; name: string; email: string; phone: string; role: "user" | "admin"; accessStatus: string; complimentaryUntil: string | null; billingExempt: boolean; subscriptionStatus: string | null; subscriptionEndsAt: string | null };
 type AdminUser = { id: string; name: string; email: string; phone: string; role: string; access_status: string; trial_ends_at?: string; complimentary_until?: string; billing_exempt: number };
 
-const recipeSourceLinks = [
-  { name: "Allrecipes", url: "https://www.allrecipes.com/" },
-  { name: "Food Network", url: "https://www.foodnetwork.com/recipes" },
-  { name: "EatingWell", url: "https://www.eatingwell.com/recipes/" },
-  { name: "Serious Eats", url: "https://www.seriouseats.com/recipes-5117985" },
-  { name: "Simply Recipes", url: "https://www.simplyrecipes.com/recipes-5090746" },
-];
 const proteinOptions = ["Beef", "Pork", "Fish", "Shrimp"];
 const storeNames = ["Whole Foods", "Jewel-Osco", "Trader Joe’s"];
 const defaultRecipeFilters = { query: "", kind: "All meals", maxTime: "Any time", source: "All sources", protein: "All proteins", favoritesOnly: false };
@@ -462,18 +455,27 @@ export default function Home() {
   }
 
   useEffect(() => {
-    if (locationQuery.trim().length < 3 || locationQuery === location) {
+    const query = locationQuery.trim();
+    if (query.length < 2 || query === location) {
       const clearTimer = window.setTimeout(() => setLocationResults([]), 0);
       return () => window.clearTimeout(clearTimer);
     }
+    const controller = new AbortController();
     const timer = window.setTimeout(async () => {
-      const response = await fetch(`/api/location/search?q=${encodeURIComponent(locationQuery)}`);
-      const data = await response.json();
-      const results = data.results || [];
-      setLocationResults(results);
-      setLocationStatus(results.length ? "Choose a suggested location." : "No location matches yet. Try a neighborhood, city, or ZIP.");
+      try {
+        const response = await fetch(`/api/location/search?q=${encodeURIComponent(query)}`, { signal: controller.signal });
+        const data = await response.json();
+        const results = data.results || [];
+        setLocationResults(results);
+        setLocationStatus(results.length ? "Choose a suggested location." : "No location matches yet. Try a neighborhood, city, or ZIP.");
+      } catch (error) {
+        if ((error as Error).name !== "AbortError") setLocationStatus("Location search is temporarily unavailable.");
+      }
     }, 350);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
   }, [locationQuery, location]);
 
   function mapRecipe(recipe: Record<string, unknown>, index: number, kind = "Dinner"): Meal {
@@ -771,6 +773,13 @@ export default function Home() {
     }, () => setLocationStatus("Location access was not granted. You can type it instead."), { enableHighAccuracy: false, timeout: 10000 });
   }
 
+  function clearLocation() {
+    setLocation("");
+    setLocationQuery("");
+    setLocationResults([]);
+    setLocationStatus("Enter a neighborhood, city, or ZIP, or use your location.");
+  }
+
   async function toggleFavorite(meal: Meal) {
     const saved = favorites.includes(meal.title);
     setFavorites((current) => saved ? current.filter((item) => item !== meal.title) : [...current, meal.title]);
@@ -984,13 +993,14 @@ export default function Home() {
         {familyRuleDetails.length ? <details className="family-rule-panel"><summary><span>Family search rules</span><small>{familyRuleDetails.length} active</small></summary><div>{familyRuleDetails.map((item) => <p key={`${item.member}-${item.rule}`}><strong>{item.member}</strong><span>{item.rule}</span></p>)}</div></details> : <button className="family-empty-link" onClick={() => navigateTo("family")}>+ Add family preferences to personalize the search</button>}
         <div className="two-col"><div className="field"><label htmlFor="max-cook-time">Maximum cook time</label><select id="max-cook-time" value={maxTime} onChange={(e) => setMaxTime(e.target.value)}><option>20 minutes</option><option>30 minutes</option><option>45 minutes</option><option>60 minutes</option></select></div><div className="field"><label htmlFor="cooking-comfort">Cooking comfort</label><select id="cooking-comfort" value={skill} onChange={(e) => setSkill(e.target.value)}><option>Keep it simple</option><option>Comfortable</option><option>Adventurous</option></select></div></div>
         <div className="field"><div className="label-line"><label htmlFor="grocery-budget">Grocery budget for this plan</label><strong>{budget >= 500 ? "$500+" : `$${budget}`}</strong></div><input id="grocery-budget" aria-label="Grocery budget for this plan" type="range" min="50" max="500" step="10" value={budget} onChange={(e) => setBudget(Number(e.target.value))} /><div className="range-labels"><span>$50</span><span>$500+</span></div></div>
+        <div className="preference-heading"><strong>Plan preferences</strong><span>Choose the options that should shape your recipes and shopping plan.</span></div>
         <div className="option-grid"><Toggle label="Plan for leftovers" checked={leftovers} onChange={() => setLeftovers(!leftovers)} note="Cook once, eat twice" /><Toggle label="School lunches" checked={kidLunches} onChange={toggleSchoolLunches} note={`${schoolLunchTarget || (range === "Month" ? 22 : range === "Week" ? 5 : 1)} packable weekday lunch${range === "Day" ? "" : "es"}`} /><Toggle label="Gluten-free" checked={glutenFree} onChange={() => setGlutenFree(!glutenFree)} note={familyGlutenFree ? "Also required by a family member" : undefined} /><Toggle label="Low dairy" checked={lowDairy} onChange={() => setLowDairy(!lowDairy)} note={familyLowDairy ? "Also preferred by a family member" : undefined} /><Toggle label="Mediterranean" checked={mediterranean} onChange={() => setMediterranean(!mediterranean)} /><Toggle label="One store only" checked={oneStore} onChange={() => setOneStore(!oneStore)} /></div>
         {oneStore && <div className="field"><label htmlFor="preferred-store">Preferred store</label><select id="preferred-store" value={selectedStore} onChange={(event) => setSelectedStore(event.target.value)}>{storeNames.map((store) => <option key={store}>{store}</option>)}</select></div>}
         <div className="field"><label htmlFor="ingredient-exclusions">Allergies or ingredients to avoid</label><input id="ingredient-exclusions" className="text-input" placeholder="e.g. shellfish, peanuts, mushrooms" value={exclusions} onChange={(e) => setExclusions(e.target.value)} /></div>
         <div className="location-picker">
-          <label htmlFor="shopping-location">Shopping location</label><div className="location-input"><span className="icon-centered" aria-hidden="true">⌖</span><input id="shopping-location" value={locationQuery} onChange={(e) => setLocationQuery(e.target.value)} placeholder="Neighborhood, city, or ZIP" aria-label="Shopping location" /><button type="button" onClick={locateMe} aria-label="Use my current location" title="Use my current location">◎</button></div>
-          {locationResults.length > 0 && <div className="location-results">{locationResults.map((result) => <button key={`${result.lat}-${result.lon}`} onClick={() => { setLocation(result.label); setLocationQuery(result.label); setLocationResults([]); setLocationStatus("Location updated."); }}>{result.label}</button>)}</div>}
-          <small>{locationStatus || `Searching stores near ${location}`}</small>
+          <label htmlFor="shopping-location">Shopping location</label><div className="location-input"><span className="location-mark" aria-hidden="true"><i>⌖</i></span><input id="shopping-location" value={locationQuery} onChange={(e) => { const nextLocation = e.target.value; setLocationQuery(nextLocation); setLocationResults([]); setLocationStatus(nextLocation.trim().length >= 2 ? "Finding location matches…" : nextLocation ? "Type at least 2 characters to search." : "Enter a neighborhood, city, or ZIP, or use your location."); }} placeholder="Neighborhood, city, or ZIP" aria-label="Shopping location" role="combobox" aria-autocomplete="list" aria-controls="location-options" aria-expanded={locationResults.length > 0} /><div className="location-actions">{locationQuery && <button className="location-clear" type="button" onClick={clearLocation} aria-label="Clear shopping location">Clear</button>}<button className="location-use" type="button" onClick={locateMe}><span aria-hidden="true">◎</span>Use my location</button></div></div>
+          {locationResults.length > 0 && <div className="location-results" id="location-options" role="listbox" aria-label="Location suggestions">{locationResults.map((result) => <button role="option" aria-selected="false" key={`${result.lat}-${result.lon}`} onClick={() => { setLocation(result.label); setLocationQuery(result.label); setLocationResults([]); setLocationStatus("Location updated."); }}>{result.label}</button>)}</div>}
+          <small aria-live="polite">{locationStatus || `Searching stores near ${location}`}</small>
         </div>
         <button className="primary" onClick={() => generatePlan()} disabled={planning}>{planning ? "Building your recipe catalog…" : "Browse recipes for my plan"} <span>→</span></button><p className="estimate">Estimated groceries for a full plan: <strong>${planningEstimate.low}–${planningEstimate.high}</strong>{planningEstimate.high > budget && <span> · above your {budget >= 500 ? "$500+" : `$${budget}`} target</span>}</p>{plannerNotice && <p className="form-notice error" role="alert">{plannerNotice}</p>}
       </section>
@@ -1199,6 +1209,6 @@ export default function Home() {
 
     {undoAction && <div className="undo-toast" role="status"><span>{undoAction.message}</span><button onClick={() => { undoAction.restore(); setUndoAction(null); }}>Undo</button><button className="undo-dismiss" onClick={() => setUndoAction(null)} aria-label="Dismiss notification">×</button></div>}
 
-    <footer className="site-footer"><span>Grocer•Eaze</span><p>Better food. Less waste.</p><div><button onClick={startOnboarding}>How it works</button><button onClick={() => navigateTo("plans")}>Plans</button><button onClick={() => navigateTo("account")}>Privacy & security</button><button aria-current={view === "accessibility" ? "page" : undefined} onClick={() => navigateTo("accessibility")}>Accessibility</button>{recipeSourceLinks.map((source) => <a key={source.name} href={source.url} target="_blank" rel="noreferrer">{source.name}</a>)}</div></footer>
+    <footer className="site-footer"><span>Grocer•Eaze</span><p>Better food. Less waste.</p><div><button onClick={startOnboarding}>How it works</button><button onClick={() => navigateTo("plans")}>Plans</button><button onClick={() => navigateTo("account")}>Privacy & security</button><button aria-current={view === "accessibility" ? "page" : undefined} onClick={() => navigateTo("accessibility")}>Accessibility</button></div></footer>
   </div>;
 }
