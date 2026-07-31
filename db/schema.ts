@@ -37,6 +37,18 @@ export const recipeRatings = sqliteTable("recipe_ratings", {
   updatedAt: text("updated_at").notNull(),
 });
 
+export const recipeCatalog = sqliteTable("recipe_catalog", {
+  id: text("id").primaryKey(),
+  sourceType: text("source_type").notNull(),
+  sourceName: text("source_name").notNull(),
+  sourceUrl: text("source_url").notNull(),
+  title: text("title").notNull(),
+  searchText: text("search_text").notNull(),
+  recipeJson: text("recipe_json").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
   email: text("email").notNull().unique(),

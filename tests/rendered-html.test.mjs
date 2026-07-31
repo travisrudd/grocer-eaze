@@ -49,6 +49,27 @@ test("supports location search controls and keeps recipe providers out of the fo
   assert.doesNotMatch(page, /recipeSourceLinks/);
 });
 
+test("combines a cached catalog, TheMealDB, and user-controlled web recipe imports", async () => {
+  const [page, api, worker, schema] = await Promise.all([
+    source("app/page.tsx"),
+    source("worker/api.ts"),
+    source("worker/index.ts"),
+    source("db/schema.ts"),
+  ]);
+
+  assert.match(api, /THEMEALDB_API_KEY/);
+  assert.match(worker, /THEMEALDB_API_KEY/);
+  assert.match(api, /themealdb\.com\/api\/json\/v2/);
+  assert.match(api, /recipe_catalog/);
+  assert.match(schema, /recipeCatalog/);
+  assert.match(api, /\/api\/recipes\/import/);
+  assert.match(api, /application\\\/ld\\\+json/);
+  assert.match(page, /Search the web ↗/);
+  assert.match(page, /www\.google\.com\/search/);
+  assert.match(page, /Import recipe/);
+  assert.doesNotMatch(api, /google\.com\/search[\s\S]*fetch/);
+});
+
 test("includes accessibility and usability checks in the release workflow", async () => {
   const [workflow, checklist, packageJson] = await Promise.all([
     source(".github/workflows/release-quality.yml"),

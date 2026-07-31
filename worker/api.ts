@@ -10,6 +10,7 @@ type AppEnv = {
   STRIPE_MONTHLY_PRICE_ID?: string;
   STRIPE_YEARLY_PRICE_ID?: string;
   PEXELS_API_KEY?: string;
+  THEMEALDB_API_KEY?: string;
 };
 import { getSessionUser, handleAuthRequest, hasProductAccess } from "./auth";
 import { handleBillingRequest } from "./billing";
@@ -71,6 +72,133 @@ function fallbackPage(url: URL, requested: number) {
   return [...ordered.slice(start), ...ordered.slice(0, start)].slice(0, requested);
 }
 
+type Recipe = {
+  id: string;
+  title: string;
+  sourceName: string;
+  sourceUrl: string;
+  readyInMinutes: number;
+  servings: number;
+  glutenFree: boolean;
+  dairyFree: boolean;
+  image: string;
+  pricePerServing: number;
+  diets: string[];
+  extendedIngredients: Array<{ name: string; aisle: string; original: string }>;
+};
+
+const glutenWords = /\b(wheat|flour|bread|breadcrumbs|pasta|noodles|couscous|barley|rye|soy sauce|tortilla)\b/i;
+const dairyWords = /\b(milk|cheese|cream|butter|yogurt|yoghurt|whey|ghee|mascarpone|mozzarella|parmesan|feta)\b/i;
+
+function ingredientAisle(name: string) {
+  if (/chicken|beef|pork|lamb|fish|salmon|cod|tuna|shrimp|prawn|turkey|sausage/i.test(name)) return "Meat & seafood";
+  if (/milk|cheese|cream|butter|yogurt|egg/i.test(name)) return "Dairy & eggs";
+  if (/tomato|onion|garlic|pepper|lettuce|spinach|potato|carrot|lemon|lime|apple|herb|parsley|cilantro/i.test(name)) return "Produce";
+  if (/frozen/i.test(name)) return "Frozen";
+  return "Pantry";
+}
+
+function recipeMatches(recipe: Recipe, url: URL) {
+  const ingredients = recipe.extendedIngredients.map((item) => item.name).join(" ");
+  const excluded = String(url.searchParams.get("excludeIngredients") || "").split(",").map((item) => item.trim()).filter(Boolean);
+  if (excluded.some((item) => `${recipe.title} ${ingredients}`.toLowerCase().includes(item.toLowerCase()))) return false;
+  if (url.searchParams.get("glutenFree") !== "false" && !recipe.glutenFree) return false;
+  if (url.searchParams.get("lowDairy") === "true" && !recipe.dairyFree) return false;
+  const maxTime = Number(url.searchParams.get("maxTime") || 0);
+  if (maxTime && recipe.readyInMinutes > maxTime) return false;
+  return true;
+}
+
+function dedupeRecipes(recipes: Recipe[]) {
+  const seen = new Set<string>();
+  return recipes.filter((recipe) => {
+    const key = `${recipe.sourceUrl || ""}|${recipe.title}`.toLowerCase().replace(/\/$/, "");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function mealDbSearchTerm(query: string) {
+  const protein = query.match(/\b(chicken|beef|pork|lamb|salmon|cod|tuna|fish|shrimp|prawn|turkey|lentil|chickpea|bean)\b/i)?.[0];
+  if (protein) return protein.toLowerCase();
+  return query.toLowerCase().split(/[^a-z]+/).filter((word) => word.length > 3 && !["mediterranean", "dinner", "lunch", "healthy", "gourmet", "easy", "meal", "prep", "without"].includes(word))[0] || "chicken";
+}
+
+function normalizeMealDb(meal: Record<string, unknown>): Recipe {
+  const ingredients = Array.from({ length: 20 }, (_, index) => {
+    const name = String(meal[`strIngredient${index + 1}`] || "").trim();
+    const measure = String(meal[`strMeasure${index + 1}`] || "").trim();
+    return name ? { name, aisle: ingredientAisle(name), original: `${measure} ${name}`.trim() } : null;
+  }).filter(Boolean) as Recipe["extendedIngredients"];
+  const ingredientText = ingredients.map((item) => item.name).join(" ");
+  const area = String(meal.strArea || "");
+  const tags = String(meal.strTags || "").split(",").map((tag) => tag.trim()).filter(Boolean);
+  const mediterranean = /Greek|Italian|Moroccan|Spanish|Turkish|Lebanese|Croatian|Portuguese|Tunisian|Egyptian|Mediterranean/i.test(`${area} ${tags.join(" ")}`);
+  return {
+    id: `mealdb-${String(meal.idMeal || crypto.randomUUID())}`,
+    title: String(meal.strMeal || "TheMealDB recipe"),
+    sourceName: "TheMealDB",
+    sourceUrl: safeHttpUrl(meal.strSource) || `https://www.themealdb.com/meal/${String(meal.idMeal || "")}`,
+    readyInMinutes: 40,
+    servings: 4,
+    glutenFree: !glutenWords.test(ingredientText),
+    dairyFree: !dairyWords.test(ingredientText),
+    image: safeHttpUrl(meal.strMealThumb),
+    pricePerServing: Math.min(900, 250 + ingredients.length * 18),
+    diets: mediterranean ? ["Mediterranean"] : [],
+    extendedIngredients: ingredients,
+  };
+}
+
+async function mealDbRecipes(url: URL, env: AppEnv, requested: number) {
+  if (!env.THEMEALDB_API_KEY) return { recipes: [] as Recipe[], status: "not-configured" };
+  const base = `https://www.themealdb.com/api/json/v2/${encodeURIComponent(env.THEMEALDB_API_KEY)}`;
+  const term = mealDbSearchTerm(url.searchParams.get("q") || "chicken");
+  try {
+    const response = await fetch(`${base}/search.php?${new URLSearchParams({ s: term })}`);
+    if (!response.ok) return { recipes: [] as Recipe[], status: `error-${response.status}` };
+    const payload = await response.json() as { meals?: Array<Record<string, unknown>> | null };
+    let meals = payload.meals || [];
+    if (Number(url.searchParams.get("offset") || 0) > 0 || meals.length < Math.min(8, requested)) {
+      const randomResponse = await fetch(`${base}/randomselection.php`);
+      if (randomResponse.ok) {
+        const randomPayload = await randomResponse.json() as { meals?: Array<Record<string, unknown>> | null };
+        meals = [...meals, ...(randomPayload.meals || [])];
+      }
+    }
+    const recipes = dedupeRecipes(meals.map(normalizeMealDb)).filter((recipe) => recipeMatches(recipe, url)).slice(0, requested);
+    return { recipes, status: "ok" };
+  } catch {
+    return { recipes: [] as Recipe[], status: "unreachable" };
+  }
+}
+
+async function spoonacularRecipes(url: URL, env: AppEnv, requested: number) {
+  if (!env.SPOONACULAR_API_KEY) return { recipes: [] as Recipe[], status: "not-configured" };
+  const params = new URLSearchParams({
+    apiKey: env.SPOONACULAR_API_KEY,
+    query: url.searchParams.get("q") || "Mediterranean dinner",
+    number: String(requested),
+    offset: String(Math.max(0, Number(url.searchParams.get("offset") || 0))),
+    addRecipeInformation: "true",
+    fillIngredients: "true",
+    instructionsRequired: "true",
+    ...(url.searchParams.get("glutenFree") !== "false" ? { intolerances: "gluten" } : {}),
+    ...(url.searchParams.get("excludeIngredients") ? { excludeIngredients: url.searchParams.get("excludeIngredients") || "" } : {}),
+    maxReadyTime: url.searchParams.get("maxTime") || "45",
+    sort: "random",
+  });
+  try {
+    const response = await fetch(`https://api.spoonacular.com/recipes/complexSearch?${params}`);
+    if (!response.ok) return { recipes: [] as Recipe[], status: `error-${response.status}` };
+    const data = await response.json() as { results?: Array<Record<string, unknown>> };
+    return { recipes: (data.results || []) as unknown as Recipe[], status: "ok" };
+  } catch {
+    return { recipes: [] as Recipe[], status: "unreachable" };
+  }
+}
+
 function json(value: unknown, status = 200) {
   return Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
 }
@@ -116,12 +244,21 @@ async function recipeImageResponse(url: URL, env: AppEnv) {
 
   if (source) {
     const host = new URL(source).hostname.replace(/^www\./, "");
-    if (preferredSources.some((allowed) => host === allowed || host.endsWith(`.${allowed}`))) {
+    if (preferredSources.some((allowed) => host === allowed || host.endsWith(`.${allowed}`)) || host === "themealdb.com" || host.endsWith(".themealdb.com")) {
       try {
         const page = await fetch(source, { headers: { "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)", Accept: "text/html" }, redirect: "follow" });
         if (page.ok) resolved = metaImage((await page.text()).slice(0, 750_000), page.url || source);
       } catch { /* Continue to the provider image or licensed fallback. */ }
     }
+  }
+
+  if (!resolved && fallback) {
+    const fallbackHost = new URL(fallback).hostname.replace(/^www\./, "");
+    const sourceHost = source ? new URL(source).hostname.replace(/^www\./, "") : "";
+    const trustedImage = fallbackHost === sourceHost || fallbackHost.endsWith(`.${sourceHost}`) || sourceHost.endsWith(`.${fallbackHost}`)
+      || fallbackHost === "themealdb.com" || fallbackHost.endsWith(".themealdb.com")
+      || fallbackHost === "spoonacular.com" || fallbackHost.endsWith(".spoonacular.com");
+    if (trustedImage) resolved = fallback;
   }
 
   if (!resolved && env.PEXELS_API_KEY) {
@@ -132,11 +269,6 @@ async function recipeImageResponse(url: URL, env: AppEnv) {
       const data = await response.json() as { photos?: Array<{ src?: { large?: string; medium?: string } }> };
       resolved = safeHttpUrl(data.photos?.[0]?.src?.large || data.photos?.[0]?.src?.medium);
     } catch { /* The existing food icon remains the final visual fallback. */ }
-  }
-
-  if (!resolved && fallback) {
-    const host = new URL(fallback).hostname.replace(/^www\./, "");
-    if (host === "spoonacular.com" || host.endsWith(".spoonacular.com")) resolved = fallback;
   }
 
   if (!resolved) return new Response(null, { status: 404, headers: { "Cache-Control": "public, max-age=3600" } });
@@ -152,36 +284,41 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE INDEX IF NOT EXISTS family_members_owner_idx ON family_members(owner_id)"),
     db.prepare("CREATE TABLE IF NOT EXISTS recipe_ratings (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, recipe_id TEXT NOT NULL, quality INTEGER NOT NULL, ease INTEGER NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE INDEX IF NOT EXISTS recipe_ratings_owner_idx ON recipe_ratings(owner_id)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS recipe_catalog (id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_name TEXT NOT NULL, source_url TEXT NOT NULL, title TEXT NOT NULL, search_text TEXT NOT NULL, recipe_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS recipe_catalog_updated_idx ON recipe_catalog(updated_at)"),
   ]);
 }
 
+async function cacheRecipes(db: D1Database, recipes: Recipe[], sourceType: string) {
+  if (!recipes.length) return;
+  const now = new Date().toISOString();
+  await db.batch(recipes.map((recipe) => db.prepare("INSERT INTO recipe_catalog(id, source_type, source_name, source_url, title, search_text, recipe_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source_name=excluded.source_name, source_url=excluded.source_url, title=excluded.title, search_text=excluded.search_text, recipe_json=excluded.recipe_json, updated_at=excluded.updated_at")
+    .bind(recipe.id, sourceType, recipe.sourceName, recipe.sourceUrl, recipe.title, `${recipe.title} ${recipe.sourceName} ${recipe.diets.join(" ")} ${recipe.extendedIngredients.map((item) => item.name).join(" ")}`.toLowerCase(), JSON.stringify(recipe), now, now)));
+}
+
+async function catalogRecipes(db: D1Database, url: URL, requested: number) {
+  const query = String(url.searchParams.get("q") || "").toLowerCase();
+  const terms = query.split(/[^a-z0-9]+/).filter((term) => term.length > 2 && !["mediterranean", "dinner", "lunch", "healthy", "easy", "meal", "prep", "without"].includes(term)).slice(0, 4);
+  const where = terms.length ? `WHERE ${terms.map(() => "search_text LIKE ?").join(" OR ")}` : "";
+  const statement = db.prepare(`SELECT recipe_json FROM recipe_catalog ${where} ORDER BY updated_at DESC LIMIT 150`);
+  const result = await (terms.length ? statement.bind(...terms.map((term) => `%${term}%`)) : statement).all();
+  const offset = Math.max(0, Number(url.searchParams.get("offset") || 0));
+  return result.results.map((row) => {
+    try { return JSON.parse(String(row.recipe_json)) as Recipe; } catch { return null; }
+  }).filter((recipe): recipe is Recipe => Boolean(recipe && recipeMatches(recipe, url))).slice(offset, offset + requested);
+}
+
 async function searchRecipes(url: URL, env: AppEnv) {
-  const query = url.searchParams.get("q") || "Mediterranean dinner";
-  const maxTime = url.searchParams.get("maxTime") || "45";
   const requested = Math.max(1, Math.min(100, Number(url.searchParams.get("number") || 18)));
-  if (!env.SPOONACULAR_API_KEY) return json({ recipes: fallbackPage(url, requested), demo: true, providerStatus: "fallback" });
-  const params = new URLSearchParams({
-    apiKey: env.SPOONACULAR_API_KEY,
-    query,
-    number: String(requested),
-    offset: String(Math.max(0, Number(url.searchParams.get("offset") || 0))),
-    addRecipeInformation: "true",
-    fillIngredients: "true",
-    instructionsRequired: "true",
-    ...(url.searchParams.get("glutenFree") !== "false" ? { intolerances: "gluten" } : {}),
-    ...(url.searchParams.get("excludeIngredients") ? { excludeIngredients: url.searchParams.get("excludeIngredients") || "" } : {}),
-    maxReadyTime: maxTime,
-    sort: "random",
-  });
-  let response: Response;
-  try {
-    response = await fetch(`https://api.spoonacular.com/recipes/complexSearch?${params}`);
-  } catch {
-    return json({ recipes: fallbackPage(url, requested), demo: true, providerStatus: "unreachable" });
-  }
-  if (!response.ok) return json({ recipes: fallbackPage(url, requested), demo: true, providerStatus: `error-${response.status}` });
-  const data = await response.json() as { results?: Array<Record<string, unknown>> };
-  const preferred = (data.results || []).sort((a, b) => {
+  await ensureSchema(env.DB);
+  const local = await catalogRecipes(env.DB, url, requested);
+  if (local.length >= requested) return json({ recipes: local, demo: false, providers: ["Saved catalog"], providerStatus: { catalog: "ok" } });
+  const [spoonacular, mealDb] = await Promise.all([
+    spoonacularRecipes(url, env, requested),
+    mealDbRecipes(url, env, requested),
+  ]);
+  await cacheRecipes(env.DB, mealDb.recipes, "themealdb");
+  const preferred = spoonacular.recipes.sort((a, b) => {
     const aUrl = String(a.sourceUrl || "");
     const bUrl = String(b.sourceUrl || "");
     const sourceScore = Number(preferredSources.some((host) => bUrl.includes(host))) - Number(preferredSources.some((host) => aUrl.includes(host)));
@@ -189,8 +326,9 @@ async function searchRecipes(url: URL, env: AppEnv) {
     if (url.searchParams.get("schoolLunch") === "true") return Number(a.readyInMinutes || 99) - Number(b.readyInMinutes || 99);
     return 0;
   });
-  const used = new Set(preferred.map((recipe) => String(recipe.title).toLowerCase()));
-  const supplemental = fallbackPage(url, fallbackRecipes.length).filter((recipe) => !used.has(recipe.title.toLowerCase()));
+  const live = dedupeRecipes([...local, ...preferred, ...mealDb.recipes]).filter((recipe) => recipeMatches(recipe, url));
+  const used = new Set(live.map((recipe) => String(recipe.title).toLowerCase()));
+  const supplemental = (fallbackPage(url, fallbackRecipes.length) as Recipe[]).filter((recipe) => !used.has(recipe.title.toLowerCase()));
   if (url.searchParams.get("schoolLunch") === "true") {
     supplemental.sort((a, b) => {
       const lunchPattern = /box|bento|roll-up|quesadilla|bites|lunch|pita|snack/i;
@@ -198,7 +336,123 @@ async function searchRecipes(url: URL, env: AppEnv) {
       return kidScore || a.readyInMinutes - b.readyInMinutes;
     });
   }
-  return json({ recipes: [...preferred, ...supplemental].slice(0, requested), demo: false });
+  const recipes = [...live, ...supplemental].slice(0, requested);
+  const providers = [...new Set(recipes.filter((recipe) => !recipe.id.startsWith("demo-")).map((recipe) => recipe.sourceName))];
+  return json({
+    recipes,
+    demo: recipes.some((recipe) => recipe.id.startsWith("demo-")),
+    providers,
+    providerStatus: { catalog: "ok", spoonacular: spoonacular.status, themealdb: mealDb.status },
+  });
+}
+
+function isPublicRecipeUrl(value: unknown) {
+  const safe = safeHttpUrl(value);
+  if (!safe) return "";
+  const parsed = new URL(safe);
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (parsed.username || parsed.password || !["", "80", "443"].includes(parsed.port)) return "";
+  if (host === "localhost" || host.endsWith(".local") || host === "0.0.0.0" || host === "::1") return "";
+  if (/^\d+$/.test(host) || host.includes(":") || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return "";
+  if (/^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) return "";
+  return parsed.toString();
+}
+
+async function fetchRecipePage(input: string) {
+  let current = input;
+  for (let redirects = 0; redirects < 4; redirects++) {
+    const response = await fetch(current, {
+      redirect: "manual",
+      headers: { "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)", Accept: "text/html,application/xhtml+xml" },
+    });
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const next = isPublicRecipeUrl(new URL(response.headers.get("location") || "", current).toString());
+      if (!next) throw new Error("That recipe link redirects to an unsupported address.");
+      current = next;
+      continue;
+    }
+    if (!response.ok) throw new Error("That recipe page could not be opened.");
+    if (!String(response.headers.get("content-type") || "").toLowerCase().includes("html")) throw new Error("That link is not an HTML recipe page.");
+    return { html: (await response.text()).slice(0, 1_500_000), finalUrl: response.url || current };
+  }
+  throw new Error("That recipe link redirects too many times.");
+}
+
+function findRecipeJsonLd(value: unknown): Record<string, unknown> | null {
+  if (Array.isArray(value)) {
+    for (const item of value) { const found = findRecipeJsonLd(item); if (found) return found; }
+    return null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const types = Array.isArray(record["@type"]) ? record["@type"] : [record["@type"]];
+  if (types.some((type) => String(type).toLowerCase() === "recipe")) return record;
+  for (const key of ["@graph", "mainEntity", "itemListElement"]) {
+    const found = findRecipeJsonLd(record[key]);
+    if (found) return found;
+  }
+  return null;
+}
+
+function parseDuration(value: unknown) {
+  const match = String(value || "").match(/^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$/i);
+  return match ? Number(match[1] || 0) * 1440 + Number(match[2] || 0) * 60 + Number(match[3] || 0) : 0;
+}
+
+function jsonLdImage(value: unknown) {
+  if (typeof value === "string") return safeHttpUrl(value);
+  if (Array.isArray(value)) return jsonLdImage(value[0]);
+  if (value && typeof value === "object") return safeHttpUrl((value as Record<string, unknown>).url || (value as Record<string, unknown>).contentUrl);
+  return "";
+}
+
+async function importRecipe(request: Request, env: AppEnv) {
+  const body = await request.json() as { url?: string };
+  const input = isPublicRecipeUrl(body.url);
+  if (!input) return json({ error: "Enter a public recipe page link beginning with http:// or https://." }, 400);
+  try {
+    const { html, finalUrl } = await fetchRecipePage(input);
+    let recipeData: Record<string, unknown> | null = null;
+    for (const match of html.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+      try {
+        recipeData = findRecipeJsonLd(JSON.parse(match[1].trim()));
+        if (recipeData) break;
+      } catch { /* Some pages include unrelated malformed structured data; try the next block. */ }
+    }
+    if (!recipeData) return json({ error: "We couldn’t find structured recipe details on that page. Try another recipe link." }, 422);
+    const ingredientLines = Array.isArray(recipeData.recipeIngredient) ? recipeData.recipeIngredient.map(String).filter(Boolean) : [];
+    if (!ingredientLines.length) return json({ error: "That page names a recipe but does not provide an ingredient list we can import." }, 422);
+    const ingredientText = ingredientLines.join(" ");
+    const extendedIngredients = ingredientLines.map((original) => {
+      const name = original.replace(/^\s*[\d¼½¾⅓⅔⅛⅜⅝⅞.,/\-–—\s]+/, "").replace(/\([^)]*\)/g, "").trim() || original;
+      return { name, aisle: ingredientAisle(name), original };
+    });
+    const ready = parseDuration(recipeData.totalTime) || parseDuration(recipeData.prepTime) + parseDuration(recipeData.cookTime) || 40;
+    const yieldText = Array.isArray(recipeData.recipeYield) ? recipeData.recipeYield[0] : recipeData.recipeYield;
+    const servings = Math.max(1, Number(String(yieldText || "4").match(/\d+/)?.[0] || 4));
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(finalUrl));
+    const id = `import-${[...new Uint8Array(digest)].slice(0, 12).map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+    const descriptor = `${String(recipeData.keywords || "")} ${String(recipeData.recipeCuisine || "")} ${String(recipeData.recipeCategory || "")}`;
+    const recipe: Recipe = {
+      id,
+      title: String(recipeData.name || "Imported recipe").trim().slice(0, 200),
+      sourceName: new URL(finalUrl).hostname.replace(/^www\./, ""),
+      sourceUrl: finalUrl,
+      readyInMinutes: Math.min(1440, ready),
+      servings,
+      glutenFree: /gluten[- ]free/i.test(descriptor) || !glutenWords.test(ingredientText),
+      dairyFree: /dairy[- ]free|vegan/i.test(descriptor) || !dairyWords.test(ingredientText),
+      image: jsonLdImage(recipeData.image),
+      pricePerServing: Math.min(900, 250 + extendedIngredients.length * 18),
+      diets: /mediterranean/i.test(descriptor) ? ["Mediterranean"] : [],
+      extendedIngredients,
+    };
+    await ensureSchema(env.DB);
+    await cacheRecipes(env.DB, [recipe], "import");
+    return json({ recipe });
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : "That recipe could not be imported." }, 502);
+  }
 }
 
 async function locationLookup(url: URL, reverse = false) {
@@ -282,10 +536,11 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
     return json({ sent: true });
   }
 
-  const paidPaths = new Set(["/api/recipes/search", "/api/recipe-image", "/api/calendar", "/api/favorites", "/api/ratings", "/api/email"]);
+  const paidPaths = new Set(["/api/recipes/search", "/api/recipes/import", "/api/recipe-image", "/api/calendar", "/api/favorites", "/api/ratings", "/api/email"]);
   if (paidPaths.has(url.pathname) && !sessionUser) return json({ error: "Sign in and choose a membership to continue.", code: "PAYMENT_REQUIRED" }, 401);
   if (paidPaths.has(url.pathname) && !hasProductAccess(sessionUser)) return json({ error: "An active membership or trial is required.", code: "PAYMENT_REQUIRED" }, 402);
   if (url.pathname === "/api/recipes/search" && request.method === "GET") return searchRecipes(url, env);
+  if (url.pathname === "/api/recipes/import" && request.method === "POST") return importRecipe(request, env);
   if (url.pathname === "/api/recipe-image" && request.method === "GET") return recipeImageResponse(url, env);
   if (url.pathname === "/api/calendar" && request.method === "POST") return calendarResponse(await request.json());
 

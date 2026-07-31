@@ -50,6 +50,7 @@ function todayInputDate() {
 
 function recipeThumbnail(meal: { title?: string; sourceUrl?: string; image?: string; id?: string }) {
   if (meal.image?.startsWith("/api/recipe-image?")) return meal.image;
+  if (/^(mealdb-|import-)/.test(String(meal.id || "")) && /^https?:\/\//.test(String(meal.image || ""))) return String(meal.image);
   const isBackupRecipe = String(meal.id || "").startsWith("demo-");
   const params = new URLSearchParams({
     title: meal.title || "recipe",
@@ -134,6 +135,10 @@ export default function Home() {
   const [catalogBeforeSimilar, setCatalogBeforeSimilar] = useState<Meal[] | null>(null);
   const [recipeLoading, setRecipeLoading] = useState(false);
   const [recipeNotice, setRecipeNotice] = useState("");
+  const [importUrl, setImportUrl] = useState("");
+  const [importKind, setImportKind] = useState("Dinner");
+  const [importBusy, setImportBusy] = useState(false);
+  const [importStatus, setImportStatus] = useState("");
   const [plannerNotice, setPlannerNotice] = useState("");
   const [planHydrated, setPlanHydrated] = useState(false);
   const [authLoaded, setAuthLoaded] = useState(false);
@@ -597,7 +602,8 @@ export default function Home() {
       setVisibleRecipeCount(recipeBatchSize);
       setCatalogBeforeSimilar(null);
       const fallbackActive = payloads.some((data) => data.demo);
-      setRecipeNotice(`${uniqueIdeas.length} recipes ready to browse.${fallbackActive ? " The live recipe provider is unavailable, so backup recipes are included." : ""}`);
+      const providers = [...new Set(payloads.flatMap((data) => Array.isArray(data.providers) ? data.providers.map(String) : []))];
+      setRecipeNotice(`${uniqueIdeas.length} recipes ready to browse.${providers.length ? ` Sources: ${providers.join(", ")}.` : ""}${fallbackActive ? " Backup recipes fill any remaining gaps." : ""}`);
       if (ownerId) await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, planStartDate, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, maxTime, skill, exclusions } }) });
       setSimilarTo(queryOverride || ""); navigateTo("meals");
     } catch (error) {
@@ -635,6 +641,48 @@ export default function Home() {
     }
   }
 
+  function webRecipeSearchUrl() {
+    const terms = [
+      recipeFilters.query.trim(),
+      effectiveGlutenFree && "gluten-free",
+      effectiveLowDairy && "low dairy",
+      mediterranean && "Mediterranean",
+      importKind === "School lunch" ? "simple kid-friendly school lunch" : importKind.toLowerCase(),
+      familyProteins.length ? familyProteins.join(" or ") : "",
+      familyAvoids.length ? `without ${familyAvoids.join(" or ")}` : "",
+      "recipe",
+    ].filter(Boolean).join(" ");
+    return `https://www.google.com/search?${new URLSearchParams({ q: terms })}`;
+  }
+
+  async function importRecipeUrl() {
+    if (!requireMembership()) return;
+    const value = importUrl.trim();
+    if (!/^https?:\/\//i.test(value)) {
+      setImportStatus("Paste a complete recipe page link beginning with http:// or https://.");
+      return;
+    }
+    setImportBusy(true); setImportStatus("Importing recipe details…");
+    try {
+      const response = await fetch("/api/recipes/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: value }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "That recipe could not be imported.");
+      const meal = mapRecipe(data.recipe as Record<string, unknown>, recipeIdeas.length, importKind);
+      setRecipeIdeas((current) => [meal, ...current.filter((item) => item.sourceUrl !== meal.sourceUrl)]);
+      setVisibleRecipeCount((current) => Math.max(current, recipeBatchSize));
+      setImportUrl("");
+      setImportStatus(`${meal.title} was added to your recipe catalog.`);
+    } catch (error) {
+      setImportStatus(error instanceof Error ? error.message : "That recipe could not be imported.");
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
   async function findSimilar(meal: Meal) {
     setRecipeLoading(true); setRecipeNotice(`Finding recipes like ${meal.title}…`);
     try {
@@ -646,7 +694,7 @@ export default function Home() {
       if (!response.ok) { setRecipeNotice(data.error || "Similar recipes are temporarily unavailable."); return; }
       const similar = (data.recipes || []).map((recipe: Record<string, unknown>, index: number) => mapRecipe(recipe, index, meal.kind));
       if (!similarTo) setCatalogBeforeSimilar(recipeIdeas);
-      setRecipeIdeas([...new Map(similar.map((item: Meal) => [`${item.kind}:${item.title.toLowerCase()}`, item])).values()]);
+      setRecipeIdeas([...new Map<string, Meal>(similar.map((item: Meal) => [`${item.kind}:${item.title.toLowerCase()}`, item])).values()]);
       setRecipeFilters((current) => ({ ...current, query: "" }));
       setVisibleRecipeCount(recipeBatchSize);
       setSimilarTo(meal.title);
@@ -1089,6 +1137,17 @@ export default function Home() {
           <summary><span>Why these recipes match your family</span><small>{members.length} member{members.length === 1 ? "" : "s"} included</small></summary>
           <div>{familyRuleDetails.map((item) => <p key={`catalog-${item.member}-${item.rule}`}><strong>{item.member}</strong><span>{item.rule}</span></p>)}</div>
         </details>}
+        <section className="recipe-import-panel" aria-labelledby="recipe-import-title">
+          <div><p className="mini-label">BRING YOUR OWN RECIPE</p><h4 id="recipe-import-title">Found something elsewhere?</h4><p>Search the web, then paste a recipe page link here. We’ll import its title, image, timing, and ingredients when the page provides standard recipe details.</p></div>
+          <div className="recipe-import-controls">
+            <label htmlFor="recipe-import-kind">Add to catalog as</label>
+            <select id="recipe-import-kind" value={importKind} onChange={(event) => setImportKind(event.target.value)}>{activeMealKinds.map((kind) => <option key={kind}>{kind}</option>)}</select>
+            <label className="recipe-url-field" htmlFor="recipe-import-url">Recipe page link<input id="recipe-import-url" type="url" placeholder="https://example.com/recipe" value={importUrl} onChange={(event) => { setImportUrl(event.target.value); setImportStatus(""); }} onKeyDown={(event) => { if (event.key === "Enter") void importRecipeUrl(); }} /></label>
+            <button className="outline" type="button" disabled={importBusy || !importUrl.trim()} onClick={importRecipeUrl}>{importBusy ? "Importing…" : "Import recipe"}</button>
+            <a className="web-recipe-search" href={webRecipeSearchUrl()} target="_blank" rel="noreferrer">Search the web ↗</a>
+          </div>
+          {importStatus && <p className="recipe-import-status" role="status" aria-live="polite">{importStatus}</p>}
+        </section>
         <details className="catalog-filter-panel" open>
           <summary><span>Filter recipes</span><small>{filteredRecipeIdeas.length} matches</small></summary>
           <div className="recipe-filters">
