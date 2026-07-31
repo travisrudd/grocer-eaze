@@ -15,6 +15,7 @@ type Member = { id: string; name: string; role: string; allergies: string; prefe
 type Rating = { quality: number; ease: number };
 type LocationResult = { label: string; lat?: string; lon?: string };
 type View = "plan" | "meals" | "list" | "account" | "family" | "plans" | "admin";
+type UndoAction = { message: string; restore: () => void };
 type AccountUser = { id: string; name: string; email: string; phone: string; role: "user" | "admin"; accessStatus: string; complimentaryUntil: string | null; billingExempt: boolean; subscriptionStatus: string | null; subscriptionEndsAt: string | null };
 type AdminUser = { id: string; name: string; email: string; phone: string; role: string; access_status: string; trial_ends_at?: string; complimentary_until?: string; billing_exempt: number };
 
@@ -27,6 +28,12 @@ const recipeSourceLinks = [
 ];
 const proteinOptions = ["Beef", "Pork", "Fish", "Shrimp"];
 const storeNames = ["Whole Foods", "Jewel-Osco", "Trader Joe’s"];
+const onboardingSteps = [
+  { eyebrow: "STEP 1 OF 4", title: "Start with your household.", body: "Choose your dates, meals, budget, and dietary needs. Family preferences are included automatically." },
+  { eyebrow: "STEP 2 OF 4", title: "Browse a catalog built for you.", body: "Filter a large recipe collection, save favorites, and add each recipe to lunch, dinner, or school lunch." },
+  { eyebrow: "STEP 3 OF 4", title: "Shape your schedule.", body: "Quick-fill open slots or reorder meals by date. Every change stays saved on this device." },
+  { eyebrow: "STEP 4 OF 4", title: "Review once, then take it anywhere.", body: "Check merged ingredients and package notes before copying your list, emailing recipes, or exporting your calendar." },
+];
 
 function parseServingCost(meal: Meal) {
   return meal.pricePerServing || Number(meal.cost.match(/\$([\d.]+)/)?.[1] || 3.75);
@@ -40,8 +47,14 @@ function calendarText(value: string) {
   return value.replace(/\\/g, "\\\\").replace(/\r?\n/g, "\\n").replace(/,/g, "\\,").replace(/;/g, "\\;");
 }
 
-function mealDateFor(kind: string, index: number) {
+function todayInputDate() {
   const date = new Date();
+  date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+  return date.toISOString().slice(0, 10);
+}
+
+function mealDateFor(kind: string, index: number, startDate?: string) {
+  const date = startDate ? new Date(`${startDate}T12:00:00`) : new Date();
   date.setHours(12, 0, 0, 0);
   if (kind === "School lunch") {
     let schoolDays = -1;
@@ -54,7 +67,7 @@ function mealDateFor(kind: string, index: number) {
   }
   return {
     day: date.toLocaleDateString("en-US", { weekday: "short" }).toUpperCase(),
-    date: String(date.getDate()),
+    date: date.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
     sortOrder: date.getTime(),
   };
 }
@@ -70,6 +83,7 @@ function Stars({ value, onChange, label }: { value: number; onChange: (value: nu
 export default function Home() {
   const [view, setView] = useState<View>("plan");
   const [range, setRange] = useState("Week");
+  const [planStartDate, setPlanStartDate] = useState(todayInputDate);
   const [mealType, setMealType] = useState("Lunch + dinner");
   const [people, setPeople] = useState(4);
   const [budget, setBudget] = useState(150);
@@ -115,6 +129,12 @@ export default function Home() {
   const [plannerNotice, setPlannerNotice] = useState("");
   const [planHydrated, setPlanHydrated] = useState(false);
   const [calendarOrder, setCalendarOrder] = useState<"plan" | "random">("plan");
+  const [draggedMealId, setDraggedMealId] = useState("");
+  const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
+  const [onboardingStep, setOnboardingStep] = useState<number | null>(null);
+  const [ingredientAdjustments, setIngredientAdjustments] = useState<Record<string, string>>({});
+  const [reviewedPlanSignature, setReviewedPlanSignature] = useState("");
+  const [familyStatus, setFamilyStatus] = useState("");
   const [recipeFilters, setRecipeFilters] = useState({ query: "", kind: "All meals", maxTime: "Any time", source: "All sources", protein: "All proteins", favoritesOnly: false });
 
   const dinnerTarget = range === "Day" ? 1 : range === "Week" ? 7 : 30;
@@ -138,6 +158,17 @@ export default function Home() {
     ...(members.some((member) => member.preferences?.avoidOnions) ? ["onions"] : []),
     ...exclusions.split(",").map((item) => item.trim()).filter(Boolean),
   ])], [members, exclusions]);
+  const familyRuleDetails = useMemo(() => members.flatMap((member) => {
+    const rules = [
+      ...member.allergies.split(",").map((item) => item.trim()).filter(Boolean).map((item) => `Avoid ${item}`),
+      ...(member.preferences?.avoidOnions ? ["Avoid onions"] : []),
+      ...(member.preferences?.glutenFree ? ["Gluten-free required"] : []),
+      ...(member.preferences?.lowDairy ? ["Low dairy preferred"] : []),
+      ...(member.preferences?.kidFriendly ? ["Kid-friendly preferred"] : []),
+      ...(member.preferences?.proteins || []).map((protein) => `${protein} favorite`),
+    ];
+    return rules.map((rule) => ({ member: member.name, rule }));
+  }), [members]);
   const planningEstimate = useMemo(() => ({
     low: Math.max(12, Math.round(totalTarget * people * 2.65 * .84)),
     high: Math.max(18, Math.round(totalTarget * people * 4.15 * .9)),
@@ -178,6 +209,21 @@ export default function Home() {
     });
     return Object.values(groups).filter((group) => group.items.length).map((group) => ({ ...group, count: group.items.length }));
   }, [plannedMeals]);
+  const groceryEntries = useMemo(() => {
+    const merged = new Map<string, { name: string; occurrences: number; originals: string[] }>();
+    plannedMeals.flatMap((meal) => meal.ingredients || []).forEach((ingredient) => {
+      const name = (ingredient.name || ingredient.original || "").trim();
+      if (!name) return;
+      const key = name.toLowerCase();
+      const current = merged.get(key) || { name: name[0].toUpperCase() + name.slice(1), occurrences: 0, originals: [] };
+      current.occurrences += 1;
+      if (ingredient.original && !current.originals.includes(ingredient.original)) current.originals.push(ingredient.original);
+      merged.set(key, current);
+    });
+    return [...merged.entries()].map(([key, value]) => ({ key, ...value })).sort((a, b) => a.name.localeCompare(b.name));
+  }, [plannedMeals]);
+  const planSignature = useMemo(() => `${people}:${plannedMeals.map((meal) => meal.id).join("|")}`, [people, plannedMeals]);
+  const ingredientsReviewed = Boolean(planSignature && reviewedPlanSignature === planSignature);
   const recipeSources = useMemo(() => [...new Set(recipeIdeas.map((meal) => meal.sourceName).filter(Boolean) as string[])].sort(), [recipeIdeas]);
   const filteredRecipeIdeas = useMemo(() => recipeIdeas.filter((meal) => {
     const query = recipeFilters.query.trim().toLowerCase();
@@ -195,6 +241,7 @@ export default function Home() {
     let id = window.localStorage.getItem("grocer-eaze-owner");
     if (!id) { id = crypto.randomUUID(); window.localStorage.setItem("grocer-eaze-owner", id); }
     const cachedPlan = window.localStorage.getItem("grocer-eaze-active-plan");
+    const onboardingComplete = window.localStorage.getItem("grocer-eaze-onboarding-complete") === "true";
     Promise.all([
       fetch("/api/profile", { headers: { "x-grocer-owner": id } }).then((r) => r.json()),
       fetch("/api/favorites", { headers: { "x-grocer-owner": id } }).then((r) => r.json()),
@@ -209,6 +256,7 @@ export default function Home() {
         try {
           const preferences = JSON.parse(profileData.profile.preferences_json || "{}");
           if (preferences.range) setRange(preferences.range);
+          if (preferences.planStartDate) setPlanStartDate(preferences.planStartDate);
           if (preferences.mealType) setMealType(preferences.mealType);
           if (preferences.budget) setBudget(preferences.budget);
           if (typeof preferences.leftovers === "boolean") setLeftovers(preferences.leftovers);
@@ -233,6 +281,7 @@ export default function Home() {
           if (Array.isArray(saved.plannedMeals)) setPlannedMeals(saved.plannedMeals);
           if (Array.isArray(saved.recipeIdeas)) setRecipeIdeas(saved.recipeIdeas);
           if (saved.range) setRange(saved.range);
+          if (saved.planStartDate) setPlanStartDate(saved.planStartDate);
           if (saved.mealType) setMealType(saved.mealType);
           if (saved.people) setPeople(saved.people);
           if (saved.budget) setBudget(saved.budget);
@@ -252,7 +301,11 @@ export default function Home() {
         } catch { /* Ignore a corrupted device cache. */ }
       }
       setPlanHydrated(true);
-    }).catch(() => setPlanHydrated(true));
+      if (!onboardingComplete) setOnboardingStep(0);
+    }).catch(() => {
+      setPlanHydrated(true);
+      if (!onboardingComplete) setOnboardingStep(0);
+    });
   }, []);
 
   useEffect(() => {
@@ -261,11 +314,17 @@ export default function Home() {
       window.localStorage.setItem("grocer-eaze-active-plan", JSON.stringify({
         plannedMeals,
         recipeIdeas: recipeIdeas.slice(0, 90),
-        range, mealType, people, budget, leftovers, glutenFree, lowDairy, mediterranean,
+        range, planStartDate, mealType, people, budget, leftovers, glutenFree, lowDairy, mediterranean,
         kidLunches, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder,
       }));
     } catch { /* Device storage can be unavailable in private browsing. */ }
-  }, [planHydrated, plannedMeals, recipeIdeas, range, mealType, people, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder]);
+  }, [planHydrated, plannedMeals, recipeIdeas, range, planStartDate, mealType, people, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder]);
+
+  useEffect(() => {
+    if (!undoAction) return;
+    const timer = window.setTimeout(() => setUndoAction(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [undoAction]);
 
   async function startAuth() {
     setAuthBusy(true); setAccountStatus("");
@@ -319,7 +378,7 @@ export default function Home() {
   }, [locationQuery, location]);
 
   function mapRecipe(recipe: Record<string, unknown>, index: number, kind = "Dinner"): Meal {
-    const scheduled = mealDateFor(kind, index);
+    const scheduled = mealDateFor(kind, index, planStartDate);
     const title = String(recipe.title || "Untitled recipe");
     const diets = Array.isArray(recipe.diets) ? recipe.diets.map(String) : [];
     const servingCost = Number(recipe.pricePerServing || 420) / 100;
@@ -333,6 +392,7 @@ export default function Home() {
       ...(mediterranean || diets.some((diet) => diet.toLowerCase().includes("mediterranean")) ? ["Mediterranean"] : []),
       ...(kind === "School lunch" || (familyKidFriendly && kind === "Lunch") ? ["Kid-friendly"] : []),
       ...(kind === "School lunch" ? ["Packable"] : []),
+      ...(leftovers && kind !== "School lunch" ? ["Leftover-friendly"] : []),
       ...(Number(recipe.readyInMinutes || 35) <= 20 ? ["Quick"] : []),
       ...(servingCost <= targetServingBudget * 1.15 ? ["Budget fit"] : []),
       ...proteinOptions.filter((protein) => title.toLowerCase().includes(protein.toLowerCase())),
@@ -363,8 +423,10 @@ export default function Home() {
     const minutes = maxTime.match(/\d+/)?.[0] || "45";
     const proteinPrompt = familyProteins.length ? familyProteins.join(" or ") : "healthy";
     const avoidPrompt = familyAvoids.length ? `without ${familyAvoids.join(", ")}` : "";
-    const dinnerQuery = queryOverride || `${mediterranean ? "Mediterranean " : ""}${proteinPrompt} dinner ${avoidPrompt}`;
-    const lunchQuery = `${mediterranean ? "Mediterranean " : ""}${proteinPrompt} lunch ${avoidPrompt}`;
+    const skillPrompt = skill === "Keep it simple" ? "easy" : skill === "Adventurous" ? "gourmet" : "";
+    const batchPrompt = leftovers ? "meal prep" : "";
+    const dinnerQuery = queryOverride || `${mediterranean ? "Mediterranean " : ""}${skillPrompt} ${batchPrompt} ${proteinPrompt} dinner ${avoidPrompt}`;
+    const lunchQuery = `${mediterranean ? "Mediterranean " : ""}${skillPrompt} ${batchPrompt} ${proteinPrompt} lunch ${avoidPrompt}`;
     const schoolQuery = `wrap ${avoidPrompt}`;
     const providerExclusions = [...familyAvoids, ...(lowDairy ? ["cream cheese", "heavy cream"] : [])];
     const resultCount = range === "Month" ? "48" : "30";
@@ -391,9 +453,13 @@ export default function Home() {
       });
       const uniqueIdeas = [...new Map(ideas.map((meal) => [`${meal.kind}:${meal.title.toLowerCase()}`, meal])).values()]
         .sort((a, b) => Number(Boolean(b.tags?.includes("Budget fit"))) - Number(Boolean(a.tags?.includes("Budget fit"))));
+      const previousPlan = plannedMeals;
+      if (previousPlan.length) {
+        setUndoAction({ message: "Your previous schedule was cleared for the new catalog.", restore: () => setPlannedMeals(previousPlan) });
+      }
       setPlannedMeals([]);
       setRecipeIdeas(uniqueIdeas); setRecipePage(1); setRecipeNotice(`${uniqueIdeas.length} recipes ready to browse.`);
-      if (ownerId) await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, maxTime, skill, exclusions } }) });
+      if (ownerId) await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, planStartDate, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, maxTime, skill, exclusions } }) });
       setSimilarTo(queryOverride || ""); setView("meals"); window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (error) {
       setPlannerNotice(error instanceof Error ? error.message : "Recipes are temporarily unavailable. Please try again.");
@@ -405,7 +471,8 @@ export default function Home() {
     const kind = recipeFilters.kind !== "All meals" ? recipeFilters.kind : activeMealKinds[recipePage % activeMealKinds.length] || "Dinner";
     const familyProtein = familyProteins.length ? familyProteins[recipePage % familyProteins.length] : "healthy";
     const proteinPrompt = recipeFilters.protein === "All proteins" ? familyProtein : recipeFilters.protein;
-    const query = recipeFilters.query.trim() || (kind === "School lunch" ? "wrap" : `${mediterranean ? "Mediterranean " : ""}${proteinPrompt} ${kind.toLowerCase()}`);
+    const skillPrompt = skill === "Keep it simple" ? "easy" : skill === "Adventurous" ? "gourmet" : "";
+    const query = recipeFilters.query.trim() || (kind === "School lunch" ? "wrap" : `${mediterranean ? "Mediterranean " : ""}${skillPrompt} ${leftovers ? "meal prep " : ""}${proteinPrompt} ${kind.toLowerCase()}`);
     const maxTimeFilter = recipeFilters.maxTime === "Any time" ? (maxTime.match(/\d+/)?.[0] || "60") : recipeFilters.maxTime;
     const providerExclusions = [...familyAvoids, ...(lowDairy ? ["cream cheese", "heavy cream"] : [])];
     try {
@@ -457,7 +524,7 @@ export default function Home() {
       setRecipeNotice(`${kind} is already full.`);
       return;
     }
-    const scheduled = mealDateFor(kind, currentCount);
+    const scheduled = mealDateFor(kind, currentCount, planStartDate);
     setPlannedMeals((current) => [...current, {
       ...meal,
       ...scheduled,
@@ -469,12 +536,76 @@ export default function Home() {
     setRecipeNotice(`${meal.title} added to ${kind.toLowerCase()}.`);
   }
 
+  function resequenceMeals(meals: Meal[], startDate = planStartDate) {
+    const kinds = [...new Set(meals.map((meal) => meal.kind))];
+    return kinds.flatMap((kind) => meals
+      .filter((meal) => meal.kind === kind)
+      .map((meal, index) => ({ ...meal, ...mealDateFor(kind, index, startDate) })))
+      .sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder) || a.kind.localeCompare(b.kind));
+  }
+
+  function showUndo(message: string, restore: () => void) {
+    setUndoAction({ message, restore });
+  }
+
   function removePlannedMeal(id: string) {
-    setPlannedMeals((current) => {
-      const remaining = current.filter((meal) => meal.id !== id);
-      const grouped = activeMealKinds.flatMap((kind) => remaining.filter((meal) => meal.kind === kind).map((meal, index) => ({ ...meal, ...mealDateFor(kind, index) })));
-      return grouped.sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder) || a.kind.localeCompare(b.kind));
-    });
+    const removed = plannedMeals.find((meal) => meal.id === id);
+    if (!removed) return;
+    const previous = plannedMeals;
+    setPlannedMeals(resequenceMeals(plannedMeals.filter((meal) => meal.id !== id)));
+    showUndo(`${removed.title} removed from ${removed.kind.toLowerCase()}.`, () => setPlannedMeals(previous));
+  }
+
+  function clearSelections() {
+    if (!plannedMeals.length) return;
+    const previous = plannedMeals;
+    setPlannedMeals([]);
+    showUndo("All selected meals were cleared.", () => setPlannedMeals(previous));
+  }
+
+  function movePlannedMeal(id: string, direction: -1 | 1) {
+    const meal = plannedMeals.find((item) => item.id === id);
+    if (!meal) return;
+    const sameKind = plannedMeals.filter((item) => item.kind === meal.kind).sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder));
+    const currentIndex = sameKind.findIndex((item) => item.id === id);
+    const nextIndex = currentIndex + direction;
+    if (nextIndex < 0 || nextIndex >= sameKind.length) return;
+    [sameKind[currentIndex], sameKind[nextIndex]] = [sameKind[nextIndex], sameKind[currentIndex]];
+    const otherMeals = plannedMeals.filter((item) => item.kind !== meal.kind);
+    setPlannedMeals(resequenceMeals([...otherMeals, ...sameKind]));
+    const category = meal.kind === "School lunch" ? "school lunches" : `${meal.kind.toLowerCase()}s`;
+    setRecipeNotice(`${meal.title} moved ${direction < 0 ? "earlier" : "later"} in ${category}.`);
+  }
+
+  function reorderPlannedMeal(sourceId: string, targetId: string, kind: string) {
+    if (!sourceId || sourceId === targetId) return;
+    const sameKind = plannedMeals.filter((meal) => meal.kind === kind).sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder));
+    const sourceIndex = sameKind.findIndex((meal) => meal.id === sourceId);
+    const targetIndex = sameKind.findIndex((meal) => meal.id === targetId);
+    if (sourceIndex < 0 || targetIndex < 0) {
+      setRecipeNotice("Meals can be reordered within the same meal category.");
+      return;
+    }
+    const [moved] = sameKind.splice(sourceIndex, 1);
+    sameKind.splice(targetIndex, 0, moved);
+    const otherMeals = plannedMeals.filter((meal) => meal.kind !== kind);
+    setPlannedMeals(resequenceMeals([...otherMeals, ...sameKind]));
+    setDraggedMealId("");
+    setRecipeNotice(`${moved.title} moved to a new date.`);
+  }
+
+  function updatePlanStartDate(value: string) {
+    if (!value) return;
+    const previousDate = planStartDate;
+    const previousMeals = plannedMeals;
+    setPlanStartDate(value);
+    if (plannedMeals.length) {
+      setPlannedMeals(resequenceMeals(plannedMeals, value));
+      showUndo("Plan dates were updated.", () => {
+        setPlanStartDate(previousDate);
+        setPlannedMeals(previousMeals);
+      });
+    }
   }
 
   function quickFillRemaining() {
@@ -488,13 +619,16 @@ export default function Home() {
         const target = mealTargets[kind as keyof typeof mealTargets];
         const existingCount = next.filter((meal) => meal.kind === kind).length;
         const preferred = recipeIdeas.filter((meal) => meal.kind === kind);
-        const pool = (preferred.length ? preferred : recipeIdeas)
+        const usedTitles = new Set(next.map((meal) => meal.title.toLowerCase()));
+        const rankedPool = (preferred.length ? preferred : recipeIdeas)
           .sort((a, b) => Number(Boolean(b.tags?.includes("Budget fit"))) - Number(Boolean(a.tags?.includes("Budget fit"))));
+        const unusedPool = rankedPool.filter((meal) => !usedTitles.has(meal.title.toLowerCase()));
+        const pool = unusedPool.length ? unusedPool : rankedPool;
         for (let index = existingCount; index < target; index++) {
           const meal = pool[(index - existingCount) % pool.length];
           next.push({
             ...meal,
-            ...mealDateFor(kind, index),
+            ...mealDateFor(kind, index, planStartDate),
             id: `${meal.recipeId || meal.id}-${kind}-${crypto.randomUUID()}`,
             recipeId: meal.recipeId || meal.id,
             kind,
@@ -540,20 +674,29 @@ export default function Home() {
   }
 
   async function saveMember() {
-    if (!memberDraft.name.trim()) return;
+    if (!memberDraft.name.trim()) { setFamilyStatus("Enter a name before saving."); return; }
     const member: Member = {
       id: editingMemberId || crypto.randomUUID(), name: memberDraft.name.trim(), role: memberDraft.role, allergies: memberDraft.allergies,
       preferences: { glutenFree: memberDraft.glutenFree, lowDairy: memberDraft.lowDairy, kidFriendly: memberDraft.kidFriendly, avoidOnions: memberDraft.avoidOnions, proteins: memberDraft.proteins },
     };
     setMembers((current) => editingMemberId ? current.map((item) => item.id === editingMemberId ? member : item) : [...current, member]);
     await fetch("/api/family", { method: "POST", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify(member) });
+    setFamilyStatus(`${member.name}’s preferences are now included in recipe searches.`);
     setEditingMemberId("");
     setMemberDraft({ name: "", role: "Adult", allergies: "", glutenFree: true, lowDairy: false, kidFriendly: false, avoidOnions: false, proteins: [] });
   }
 
   async function deleteMember(id: string) {
+    const removed = members.find((member) => member.id === id);
+    if (!removed) return;
     setMembers((current) => current.filter((member) => member.id !== id));
     await fetch(`/api/family?id=${encodeURIComponent(id)}`, { method: "DELETE", headers: { "x-grocer-owner": ownerId } });
+    setFamilyStatus(`${removed.name} was removed.`);
+    showUndo(`${removed.name} was removed from the family.`, () => {
+      setMembers((current) => [...current, removed]);
+      void fetch("/api/family", { method: "POST", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify(removed) });
+      setFamilyStatus(`${removed.name} was restored.`);
+    });
   }
 
   function editMember(member: Member) {
@@ -567,21 +710,37 @@ export default function Home() {
   }
 
   async function copyForReminders() {
-    const start = new Date();
+    if (!ingredientsReviewed) { setExportStatus("Review and confirm the merged ingredient list before exporting."); return; }
+    const start = new Date(`${planStartDate}T12:00:00`);
     const end = new Date(start);
     end.setDate(start.getDate() + (range === "Day" ? 0 : range === "Week" ? 6 : 29));
     const dateLabel = range === "Day"
       ? start.toLocaleDateString("en-US", { month: "short", day: "numeric" })
       : `${start.toLocaleDateString("en-US", { month: "short", day: "numeric" })} - ${end.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
-    const text = `Groceries, ${dateLabel}\n\n${groceryGroups.map((group) => `${group.title}\n${group.items.map((item) => `• ${item}`).join("\n")}`).join("\n\n")}`;
-    await navigator.clipboard.writeText(text); setExportStatus("Grocery list copied — paste it into Apple Reminders.");
+    const text = `Groceries, ${dateLabel}\n\n${groceryGroups.map((group) => `${group.title}\n${group.items.map((item) => `• ${item}${ingredientAdjustments[item.toLowerCase()] ? ` — ${ingredientAdjustments[item.toLowerCase()]}` : ""}`).join("\n")}`).join("\n\n")}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setExportStatus("Grocery list copied — paste it into Apple Reminders.");
+    } catch {
+      setExportStatus("Your browser blocked copying. Try the calendar or email export instead.");
+    }
   }
   function downloadCalendar() {
     if (!plannedMeals.length) { setExportStatus("Add recipes to your plan before exporting a calendar."); return; }
+    if (!ingredientsReviewed) { setExportStatus("Review and confirm the merged ingredient list before exporting."); return; }
     const slots = [...plannedMeals].sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder));
-    const recipes = calendarOrder === "random"
-      ? [...plannedMeals].sort(() => Math.random() - .5)
-      : slots;
+    const shuffledByKind = new Map<string, Meal[]>();
+    if (calendarOrder === "random") {
+      [...new Set(slots.map((meal) => meal.kind))].forEach((kind) => {
+        shuffledByKind.set(kind, slots.filter((meal) => meal.kind === kind).sort(() => Math.random() - .5));
+      });
+    }
+    const shuffledIndexes = new Map<string, number>();
+    const recipes = calendarOrder === "random" ? slots.map((slot) => {
+      const index = shuffledIndexes.get(slot.kind) || 0;
+      shuffledIndexes.set(slot.kind, index + 1);
+      return shuffledByKind.get(slot.kind)?.[index] || slot;
+    }) : slots;
     const events = slots.map((slot, index) => {
       const recipe = recipes[index];
       const start = new Date(Number(slot.sortOrder) || Date.now());
@@ -592,10 +751,11 @@ export default function Home() {
     }).join("\r\n");
     const file = new Blob([`BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Grocer-Eaze//Meal Plan//EN\r\n${events}\r\nEND:VCALENDAR`], { type: "text/calendar" });
     const link = document.createElement("a"); link.href = URL.createObjectURL(file); link.download = "grocer-eaze-meal-plan.ics"; link.click(); URL.revokeObjectURL(link.href);
-    setExportStatus(`Calendar downloaded in ${calendarOrder === "random" ? "a shuffled" : "your selected"} recipe order.`);
+    setExportStatus(`Calendar downloaded in ${calendarOrder === "random" ? "a shuffled order within each meal category" : "your selected recipe order"}.`);
   }
   async function emailRecipes() {
     if (!email) { setExportStatus("Enter your email address first."); return; }
+    if (!ingredientsReviewed) { setExportStatus("Review and confirm the merged ingredient list before exporting."); return; }
     const response = await fetch("/api/email", { method: "POST", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ to: email, subject: "My Grocer-Eaze recipes", html: `<h1>Your meal plan</h1>${plannedMeals.map((meal) => `<h2>${meal.day}: ${meal.title}</h2><p>${meal.detail} · ${meal.time}</p>`).join("")}` }) });
     setExportStatus(response.ok ? `Recipes sent to ${email}.` : "We couldn’t send that email. Please try again.");
   }
@@ -603,6 +763,15 @@ export default function Home() {
   function navigateTo(nextView: View) {
     setView(nextView);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function finishOnboarding() {
+    window.localStorage.setItem("grocer-eaze-onboarding-complete", "true");
+    setOnboardingStep(null);
+  }
+
+  function startOnboarding() {
+    setOnboardingStep(0);
   }
 
   return <main>
@@ -623,8 +792,10 @@ export default function Home() {
       <section className="planner">
         <div className="planner-top"><div><span>1</span><strong>Build your plan</strong></div><p>About 60 seconds</p></div>
         <div className="field"><label>How far ahead?</label><div className="segmented">{["Day", "Week", "Month"].map((item) => <button key={item} aria-pressed={range === item} onClick={() => setRange(item)} className={range === item ? "selected" : ""}>{item}</button>)}</div></div>
+        <div className="field"><label htmlFor="plan-start-date">When should this plan start?</label><input id="plan-start-date" className="text-input" type="date" min={todayInputDate()} value={planStartDate} suppressHydrationWarning onChange={(event) => updatePlanStartDate(event.target.value)} /><small className="field-help">Your schedule, reminders, and calendar exports will use this date.</small></div>
         <div className="two-col"><div className="field"><label>Meals to plan</label><select value={mealType} onChange={(e) => setMealType(e.target.value)}><option>Lunch + dinner</option><option>Dinner only</option></select></div><div className="field"><label>People</label><div className="stepper"><button onClick={() => setPeople(Math.max(1, people - 1))}>−</button><strong>{people}</strong><button onClick={() => setPeople(Math.min(20, people + 1))}>+</button></div></div></div>
         <div className="field"><label>Household profile</label><input className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /><small className="field-help">{members.length ? `${members.length} family member${members.length === 1 ? "" : "s"} included in preferences.` : "Add individual preferences on the Family page."}</small></div>
+        {familyRuleDetails.length ? <details className="family-rule-panel"><summary><span>Family search rules</span><small>{familyRuleDetails.length} active</small></summary><div>{familyRuleDetails.map((item) => <p key={`${item.member}-${item.rule}`}><strong>{item.member}</strong><span>{item.rule}</span></p>)}</div></details> : <button className="family-empty-link" onClick={() => navigateTo("family")}>+ Add family preferences to personalize the search</button>}
         <div className="two-col"><div className="field"><label>Maximum cook time</label><select value={maxTime} onChange={(e) => setMaxTime(e.target.value)}><option>20 minutes</option><option>30 minutes</option><option>45 minutes</option><option>60 minutes</option></select></div><div className="field"><label>Cooking comfort</label><select value={skill} onChange={(e) => setSkill(e.target.value)}><option>Keep it simple</option><option>Comfortable</option><option>Adventurous</option></select></div></div>
         <div className="field"><div className="label-line"><label>Grocery budget for this plan</label><strong>{budget >= 500 ? "$500+" : `$${budget}`}</strong></div><input aria-label="Grocery budget for this plan" type="range" min="50" max="500" step="10" value={budget} onChange={(e) => setBudget(Number(e.target.value))} /><div className="range-labels"><span>$50</span><span>$500+</span></div></div>
         <div className="option-grid"><Toggle label="Plan for leftovers" checked={leftovers} onChange={() => setLeftovers(!leftovers)} note="Cook once, eat twice" /><Toggle label="School lunches" checked={kidLunches} onChange={toggleSchoolLunches} note={`${schoolLunchTarget || (range === "Month" ? 22 : range === "Week" ? 5 : 1)} packable weekday lunch${range === "Day" ? "" : "es"}`} /><Toggle label="Gluten-free" checked={glutenFree} onChange={() => setGlutenFree(!glutenFree)} note={familyGlutenFree ? "Also required by a family member" : undefined} /><Toggle label="Low dairy" checked={lowDairy} onChange={() => setLowDairy(!lowDairy)} note={familyLowDairy ? "Also preferred by a family member" : undefined} /><Toggle label="Mediterranean" checked={mediterranean} onChange={() => setMediterranean(!mediterranean)} /><Toggle label="One store only" checked={oneStore} onChange={() => setOneStore(!oneStore)} /></div>
@@ -643,7 +814,7 @@ export default function Home() {
       <div className="page-heading catalog-heading"><div><p className="eyebrow">{people} PEOPLE · {household.toUpperCase()}</p><h2>{similarTo ? `More like ${similarTo}.` : "Build your plan from the catalog."}</h2><p>Browse, filter, and add each recipe to the meal where it belongs.</p></div><button className="outline" onClick={() => navigateTo("plan")}>Adjust full plan</button></div>
 
       <section className="plan-progress" aria-label={`${filledCount} of ${totalTarget} meal slots filled`}>
-        <div className="progress-copy"><span>{filledCount} / {totalTarget}</span><div><strong>{planIsFull ? "Your schedule is full" : `${totalTarget - filledCount} meal slots left`}</strong><small>{range} plan · {selectedStore} estimate {selectedEstimate ? `$${selectedEstimate}` : "$0"} · {selectedEstimate <= budget ? `$${budget - selectedEstimate} under budget` : `$${selectedEstimate - budget} over budget`}</small></div>{planIsFull && <button className="progress-cta" onClick={() => navigateTo("list")}>Build grocery list →</button>}</div>
+        <div className="progress-copy"><span>{filledCount} / {totalTarget}</span><div><strong>{planIsFull ? "Your schedule is full" : `${totalTarget - filledCount} meal slots left`}</strong><small>Starts {new Date(`${planStartDate}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })} · {selectedStore} estimate {selectedEstimate ? `$${selectedEstimate}` : "$0"} · {selectedEstimate <= budget ? `$${budget - selectedEstimate} under budget` : `$${selectedEstimate - budget} over budget`}</small></div>{planIsFull && <button className="progress-cta" onClick={() => navigateTo("list")}>Build grocery list →</button>}</div>
         <div className="progress-track"><i style={{ width: `${Math.min(100, (filledCount / Math.max(1, totalTarget)) * 100)}%` }} /></div>
         <div className="progress-breakdown">{activeMealKinds.map((kind) => {
           const count = plannedMeals.filter((meal) => meal.kind === kind).length;
@@ -666,6 +837,10 @@ export default function Home() {
           {familyAvoids.map((avoid) => <span key={avoid}>Avoid {avoid}</span>)}
           {familyProteins.map((protein) => <span key={protein}>{protein} favorite</span>)}
         </div>
+        {familyRuleDetails.length > 0 && <details className="family-rule-panel catalog-family-rules">
+          <summary><span>Why these recipes match your family</span><small>{members.length} member{members.length === 1 ? "" : "s"} included</small></summary>
+          <div>{familyRuleDetails.map((item) => <p key={`catalog-${item.member}-${item.rule}`}><strong>{item.member}</strong><span>{item.rule}</span></p>)}</div>
+        </details>}
         <details className="catalog-filter-panel" open>
           <summary><span>Filter recipes</span><small>{filteredRecipeIdeas.length} matches</small></summary>
           <div className="recipe-filters">
@@ -690,23 +865,75 @@ export default function Home() {
       </section>
 
       <section className="selection-board">
-        <div className="selection-heading"><div><p className="eyebrow">YOUR SCHEDULE</p><h3>Selected meals</h3><span>Collapse any section to keep a long week or month easy to scan.</span></div><div className="selection-actions"><button className="outline" onClick={quickFillRemaining} disabled={planIsFull || !recipeIdeas.length}>Quick-fill remaining</button>{plannedMeals.length > 0 && <button className="outline" onClick={() => setPlannedMeals([])}>Clear selections</button>}</div></div>
+        <div className="selection-heading"><div><p className="eyebrow">YOUR SCHEDULE</p><h3>Selected meals</h3><span>Drag meals—or use the arrow buttons—to change which recipe lands on each date.</span></div><div className="selection-actions"><button className="outline" onClick={quickFillRemaining} disabled={planIsFull || !recipeIdeas.length}>Quick-fill remaining</button>{plannedMeals.length > 0 && <button className="outline" onClick={clearSelections}>Clear selections</button>}</div></div>
         {activeMealKinds.map((kind) => {
-          const selected = plannedMeals.filter((meal) => meal.kind === kind);
+          const selected = plannedMeals.filter((meal) => meal.kind === kind).sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder));
           const target = mealTargets[kind as keyof typeof mealTargets];
           const kindLabel = kind === "School lunch" ? "School lunches" : kind === "Lunch" ? "Lunches" : "Dinners";
-          return <details className="selected-meal-section" open key={kind}><summary><span>{kind === "School lunch" ? "🍱" : kind === "Lunch" ? "🥗" : "🍽"} {kindLabel}</span><small>{selected.length} of {target} selected</small></summary>{selected.length ? <div className="selected-meal-list">{selected.map((meal) => <article key={meal.id}><span>{meal.day}<b>{meal.date}</b></span><div><strong>{meal.title}</strong><small>{meal.sourceName} · {meal.time} · {meal.cost}</small></div><button onClick={() => removePlannedMeal(meal.id)} aria-label={`Remove ${meal.title} from ${kind}`}>Remove</button></article>)}</div> : <p className="empty-selection">Choose {target} {kind.toLowerCase()} recipe{target === 1 ? "" : "s"} from the catalog above.</p>}</details>;
+          return <details className="selected-meal-section" open key={kind}>
+            <summary><span>{kind === "School lunch" ? "🍱" : kind === "Lunch" ? "🥗" : "🍽"} {kindLabel}</span><small>{selected.length} of {target} selected</small></summary>
+            {selected.length ? <div className="selected-meal-list">{selected.map((meal, index) => <article
+              key={meal.id}
+              draggable
+              className={draggedMealId === meal.id ? "dragging" : ""}
+              onDragStart={() => setDraggedMealId(meal.id)}
+              onDragEnd={() => setDraggedMealId("")}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={() => reorderPlannedMeal(draggedMealId, meal.id, kind)}
+            >
+              <span className="drag-handle" aria-hidden="true">⋮⋮</span>
+              <span className="meal-date">{meal.day}<b>{meal.date}</b></span>
+              <div className="scheduled-meal-copy"><strong>{meal.title}</strong><small>{meal.sourceName} · {meal.time} · {meal.cost}</small></div>
+              <div className="schedule-actions">
+                <button disabled={index === 0} onClick={() => movePlannedMeal(meal.id, -1)} aria-label={`Move ${meal.title} to an earlier date`}>↑</button>
+                <button disabled={index === selected.length - 1} onClick={() => movePlannedMeal(meal.id, 1)} aria-label={`Move ${meal.title} to a later date`}>↓</button>
+                <button onClick={() => removePlannedMeal(meal.id)} aria-label={`Remove ${meal.title} from ${kind}`}>Remove</button>
+              </div>
+            </article>)}</div> : <p className="empty-selection">Choose {target} {kind.toLowerCase()} recipe{target === 1 ? "" : "s"} from the catalog above.</p>}
+          </details>;
         })}
       </section>
 
       <div className={`action-bar confirm-bar ${planIsFull ? "ready" : ""}`}><p><strong>{planIsFull ? "Schedule complete." : `${filledCount} of ${totalTarget} meals selected.`}</strong> {planIsFull ? "Your recipe ingredients are ready to combine into one grocery list." : "Keep browsing to fill every meal slot."}</p><button className="primary compact" disabled={!planIsFull} onClick={() => navigateTo("list")}>{planIsFull ? "Confirm & build grocery list →" : `${totalTarget - filledCount} slots remaining`}</button></div>
     </div>}
 
-    {view === "list" && <div className="dashboard"><div className="page-heading"><div><p className="eyebrow">GROCERIES · {plannedMeals.length} SELECTED MEALS</p><h2>Everything you need, sorted.</h2><p>{groceryGroups.reduce((sum, group) => sum + group.count, 0)} unique ingredients for {people} people near {location}. {selectedStore} estimate: ${selectedEstimate}.</p></div><button className="outline" onClick={() => setView("meals")}>← Back to recipes</button></div><div className="list-layout"><section className="grocery-panel"><div className="store-compare"><span className="mini-label">{oneStore ? "YOUR SELECTED STORE" : "COMPARE NEARBY STORES"}</span><div>{visibleStoreEstimates.map((store) => <button key={store.name} className={selectedStore === store.name ? "selected-store" : ""} onClick={() => setSelectedStore(store.name)}><strong>{store.name}</strong><span>${store.price}</span><small>{store.availability}% estimated availability</small></button>)}</div></div><div className="grocery-head"><strong>{selectedStore}</strong><span>{plannedMeals.length} meals × {people} people · recipe-derived estimate</span></div><p className="estimate-method"><strong>How this is calculated:</strong> We add each selected recipe’s listed cost per serving for {people} people, then adjust for typical pricing at {selectedStore}. It is an estimate—not an exact checkout total—because package sizes, sales, taxes, availability, and items you already have can change the final cost.</p>{groceryGroups.length ? groceryGroups.map((group) => <details open key={group.title}><summary><span>{group.icon} {group.title}</span><small>{group.count} {group.count === 1 ? "item" : "items"}</small></summary><div className="checklist">{group.items.map((item) => <label key={item}><input type="checkbox" /> <span>{item}</span><em>for {people}</em></label>)}</div></details>) : <p className="empty-state">Select recipes to build your grocery list.</p>}</section><aside className="export-panel"><span className="mini-label">READY WHEN YOU ARE</span><h3>Take your plan with you</h3><p>Send lists, recipes, and reminders where you already use them.</p><button onClick={copyForReminders}><span className="icon-centered">✓</span><div><strong>Apple Reminders</strong><small>Copy this grocery list</small></div><b>Copy</b></button><div className="calendar-export"><label htmlFor="calendar-order">Calendar recipe order</label><select id="calendar-order" value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle recipes across dates</option></select><button onClick={downloadCalendar}><span className="icon-centered">31</span><div><strong>Google or Apple Calendar</strong><small>Recipes appear on their scheduled dates</small></div><b>Export</b></button></div><div className="email-export"><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" /><button onClick={emailRecipes}><span className="icon-centered">@</span><div><strong>Email me recipes</strong><small>Send the complete plan</small></div><b>Email</b></button></div>{exportStatus && <p className="export-status" aria-live="polite">{exportStatus}</p>}</aside></div></div>}
+    {view === "list" && <div className="dashboard">
+      <div className="page-heading"><div><p className="eyebrow">GROCERIES · {plannedMeals.length} SELECTED MEALS</p><h2>Everything you need, sorted.</h2><p>{groceryGroups.reduce((sum, group) => sum + group.count, 0)} unique ingredients for {people} people near {location}. {selectedStore} estimate: ${selectedEstimate}.</p></div><button className="outline" onClick={() => navigateTo("meals")}>← Back to recipes</button></div>
+      <div className="list-layout">
+        <section className="grocery-panel">
+          <div className="store-compare"><span className="mini-label">{oneStore ? "YOUR SELECTED STORE" : "COMPARE NEARBY STORES"}</span><div>{visibleStoreEstimates.map((store) => <button key={store.name} className={selectedStore === store.name ? "selected-store" : ""} onClick={() => setSelectedStore(store.name)}><strong>{store.name}</strong><span>${store.price}</span><small>{store.availability}% estimated availability</small></button>)}</div></div>
+          <div className="grocery-head"><strong>{selectedStore}</strong><span>{plannedMeals.length} meals × {people} people · recipe-derived estimate</span></div>
+          <p className="estimate-method"><strong>How this is calculated:</strong> We add each selected recipe’s listed cost per serving for {people} people, then adjust for typical pricing at {selectedStore}. It is an estimate—not an exact checkout total—because package sizes, sales, taxes, availability, and items you already have can change the final cost.</p>
+          <details className="ingredient-review" open={!ingredientsReviewed}>
+            <summary><span>Review merged ingredients</span><small>{ingredientsReviewed ? "Confirmed" : "Required before export"}</small></summary>
+            <div className="ingredient-review-body">
+              <p>We merged repeated ingredients from every recipe. Add a package or quantity note wherever the recipe wording needs clarification.</p>
+              <div className="ingredient-review-list">{groceryEntries.map((entry) => <label key={entry.key}>
+                <span><strong>{entry.name}</strong><small>Used in {entry.occurrences} recipe{entry.occurrences === 1 ? "" : "s"}{entry.originals[0] ? ` · ${entry.originals[0]}` : ""}</small></span>
+                <input className="text-input" value={ingredientAdjustments[entry.key] || ""} onChange={(event) => {
+                  setIngredientAdjustments((current) => ({ ...current, [entry.key]: event.target.value }));
+                  setReviewedPlanSignature("");
+                }} placeholder="Quantity or package note" aria-label={`Quantity or package note for ${entry.name}`} />
+              </label>)}</div>
+              <button className="primary compact" disabled={!groceryEntries.length} onClick={() => { setReviewedPlanSignature(planSignature); setExportStatus("Ingredients confirmed. Your exports are ready."); }}>{ingredientsReviewed ? "Ingredients confirmed" : "Confirm ingredient list"}</button>
+            </div>
+          </details>
+          {groceryGroups.length ? groceryGroups.map((group) => <details open key={group.title}><summary><span>{group.icon} {group.title}</span><small>{group.count} {group.count === 1 ? "item" : "items"}</small></summary><div className="checklist">{group.items.map((item) => <label key={item}><input type="checkbox" /> <span>{item}</span><em>{ingredientAdjustments[item.toLowerCase()] || `for ${people}`}</em></label>)}</div></details>) : <p className="empty-state">Select recipes to build your grocery list.</p>}
+        </section>
+        <aside className="export-panel">
+          <span className="mini-label">READY WHEN YOU ARE</span><h3>Take your plan with you</h3><p>Send lists, recipes, and reminders where you already use them.</p>
+          {!ingredientsReviewed && <p className="review-required">Confirm the merged ingredient list to unlock exports.</p>}
+          <button disabled={!ingredientsReviewed} onClick={copyForReminders}><span className="icon-centered">✓</span><div><strong>Apple Reminders</strong><small>Copy this grocery list</small></div><b>Copy</b></button>
+          <div className="calendar-export"><label htmlFor="calendar-order">Calendar recipe order</label><select id="calendar-order" value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle within each meal type</option></select><button disabled={!ingredientsReviewed} onClick={downloadCalendar}><span className="icon-centered">31</span><div><strong>Google or Apple Calendar</strong><small>Recipes appear on their scheduled dates</small></div><b>Export</b></button></div>
+          <div className="email-export"><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" /><button disabled={!ingredientsReviewed} onClick={emailRecipes}><span className="icon-centered">@</span><div><strong>Email me recipes</strong><small>Send the complete plan</small></div><b>Email</b></button></div>
+          {exportStatus && <p className="export-status" aria-live="polite">{exportStatus}</p>}
+        </aside>
+      </div>
+    </div>}
 
-    {view === "family" && <div className="dashboard narrow"><div className="page-heading"><div><p className="eyebrow">HOUSEHOLD PREFERENCES</p><h2>Your family, thoughtfully fed.</h2><p>Allergies, avoided ingredients, and favorite proteins shape every catalog search.</p></div></div><div className="family-grid"><section className="settings-card"><h3>Family members</h3>{members.length === 0 && <p className="empty-state">No family members yet. Add the first person below.</p>}{members.map((member) => <article className="member-card" key={member.id}><span className="member-avatar icon-centered">{member.name.slice(0, 1).toUpperCase()}</span><div><strong>{member.name}</strong><small>{member.role} · {member.allergies || "No listed allergies"}</small><p>{[member.preferences?.glutenFree && "Gluten-free", member.preferences?.lowDairy && "Low dairy", member.preferences?.kidFriendly && "Kid-friendly", member.preferences?.avoidOnions && "Avoid onions", ...(member.preferences?.proteins || []).map((protein) => `${protein} favorite`)].filter(Boolean).join(" · ") || "No preferences yet"}</p></div><div className="member-actions"><button onClick={() => editMember(member)}>Edit</button><button onClick={() => deleteMember(member.id)} aria-label={`Remove ${member.name}`}>Remove</button></div></article>)}</section><section className="settings-card"><h3>{editingMemberId ? "Edit family member" : "Add a family member"}</h3><div className="field"><label>Name</label><input className="text-input" value={memberDraft.name} onChange={(e) => setMemberDraft({ ...memberDraft, name: e.target.value })} /></div><div className="field"><label>Role</label><select value={memberDraft.role} onChange={(e) => setMemberDraft({ ...memberDraft, role: e.target.value })}><option>Adult</option><option>Teen</option><option>Child</option></select></div><div className="field"><label>Allergies / avoid</label><input className="text-input" placeholder="Peanuts, shellfish…" value={memberDraft.allergies} onChange={(e) => setMemberDraft({ ...memberDraft, allergies: e.target.value })} /></div><div className="field"><label>Favorite proteins</label><div className="preference-check-grid">{proteinOptions.map((protein) => <button type="button" key={protein} className={memberDraft.proteins.includes(protein) ? "selected" : ""} aria-pressed={memberDraft.proteins.includes(protein)} onClick={() => setMemberDraft({ ...memberDraft, proteins: memberDraft.proteins.includes(protein) ? memberDraft.proteins.filter((item) => item !== protein) : [...memberDraft.proteins, protein] })}>{protein}</button>)}</div></div><Toggle label="Avoid onions" checked={memberDraft.avoidOnions} onChange={() => setMemberDraft({ ...memberDraft, avoidOnions: !memberDraft.avoidOnions })} /><Toggle label="Gluten-free" checked={memberDraft.glutenFree} onChange={() => setMemberDraft({ ...memberDraft, glutenFree: !memberDraft.glutenFree })} /><Toggle label="Low dairy" checked={memberDraft.lowDairy} onChange={() => setMemberDraft({ ...memberDraft, lowDairy: !memberDraft.lowDairy })} /><Toggle label="Kid-friendly" checked={memberDraft.kidFriendly} onChange={() => setMemberDraft({ ...memberDraft, kidFriendly: !memberDraft.kidFriendly })} /><button className="primary" onClick={saveMember}>{editingMemberId ? "Save changes" : "Add family member"}</button>{editingMemberId && <button className="text-button" onClick={() => { setEditingMemberId(""); setMemberDraft({ name: "", role: "Adult", allergies: "", glutenFree: true, lowDairy: false, kidFriendly: false, avoidOnions: false, proteins: [] }); }}>Cancel editing</button>}</section></div></div>}
+    {view === "family" && <div className="dashboard narrow"><div className="page-heading"><div><p className="eyebrow">HOUSEHOLD PREFERENCES</p><h2>Your family, thoughtfully fed.</h2><p>Allergies, avoided ingredients, and favorite proteins shape every catalog search.</p></div></div>{familyStatus && <p className="form-notice success" aria-live="polite">{familyStatus}</p>}<div className="family-grid"><section className="settings-card"><h3>Family members</h3>{members.length === 0 && <p className="empty-state">No family members yet. Add the first person below.</p>}{members.map((member) => <article className="member-card" key={member.id}><span className="member-avatar icon-centered">{member.name.slice(0, 1).toUpperCase()}</span><div><strong>{member.name}</strong><small>{member.role} · {member.allergies || "No listed allergies"}</small><p>{[member.preferences?.glutenFree && "Gluten-free", member.preferences?.lowDairy && "Low dairy", member.preferences?.kidFriendly && "Kid-friendly", member.preferences?.avoidOnions && "Avoid onions", ...(member.preferences?.proteins || []).map((protein) => `${protein} favorite`)].filter(Boolean).join(" · ") || "No preferences yet"}</p></div><div className="member-actions"><button onClick={() => editMember(member)}>Edit</button><button onClick={() => deleteMember(member.id)} aria-label={`Remove ${member.name}`}>Remove</button></div></article>)}</section><section className="settings-card"><h3>{editingMemberId ? "Edit family member" : "Add a family member"}</h3><div className="field"><label>Name</label><input className="text-input" value={memberDraft.name} onChange={(e) => setMemberDraft({ ...memberDraft, name: e.target.value })} /></div><div className="field"><label>Role</label><select value={memberDraft.role} onChange={(e) => setMemberDraft({ ...memberDraft, role: e.target.value })}><option>Adult</option><option>Teen</option><option>Child</option></select></div><div className="field"><label>Allergies / avoid</label><input className="text-input" placeholder="Peanuts, shellfish…" value={memberDraft.allergies} onChange={(e) => setMemberDraft({ ...memberDraft, allergies: e.target.value })} /></div><div className="field"><label>Favorite proteins</label><div className="preference-check-grid">{proteinOptions.map((protein) => <button type="button" key={protein} className={memberDraft.proteins.includes(protein) ? "selected" : ""} aria-pressed={memberDraft.proteins.includes(protein)} onClick={() => setMemberDraft({ ...memberDraft, proteins: memberDraft.proteins.includes(protein) ? memberDraft.proteins.filter((item) => item !== protein) : [...memberDraft.proteins, protein] })}>{protein}</button>)}</div></div><Toggle label="Avoid onions" checked={memberDraft.avoidOnions} onChange={() => setMemberDraft({ ...memberDraft, avoidOnions: !memberDraft.avoidOnions })} /><Toggle label="Gluten-free" checked={memberDraft.glutenFree} onChange={() => setMemberDraft({ ...memberDraft, glutenFree: !memberDraft.glutenFree })} /><Toggle label="Low dairy" checked={memberDraft.lowDairy} onChange={() => setMemberDraft({ ...memberDraft, lowDairy: !memberDraft.lowDairy })} /><Toggle label="Kid-friendly" checked={memberDraft.kidFriendly} onChange={() => setMemberDraft({ ...memberDraft, kidFriendly: !memberDraft.kidFriendly })} /><button className="primary" onClick={saveMember}>{editingMemberId ? "Save changes" : "Add family member"}</button>{editingMemberId && <button className="text-button" onClick={() => { setEditingMemberId(""); setMemberDraft({ name: "", role: "Adult", allergies: "", glutenFree: true, lowDairy: false, kidFriendly: false, avoidOnions: false, proteins: [] }); }}>Cancel editing</button>}</section></div></div>}
 
-    {view === "account" && <div className="dashboard narrow"><div className="page-heading"><div><p className="eyebrow">PROFILE & SECURITY</p><h2>{user ? `Welcome, ${user.name}.` : "Create your account"}</h2><p>{user ? "Control your household, privacy, and plan." : "No password needed. We’ll verify your email with a one-time code."}</p></div></div>{!user ? <section className="settings-card auth-card"><div className="auth-trust"><span className="icon-centered">🔒</span><strong>Secure passwordless signup</strong><small>Only your name and verified email are required. Phone is optional.</small></div>{authStep === "details" ? <><div className="field"><label>Name</label><input className="text-input" autoComplete="name" value={authForm.name} onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })} /></div><div className="field"><label>Email</label><input className="text-input" type="email" autoComplete="email" value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} /></div><div className="field"><label>Phone <small>(optional)</small></label><input className="text-input" type="tel" autoComplete="tel" value={authForm.phone} onChange={(e) => setAuthForm({ ...authForm, phone: e.target.value })} /></div><button className="primary" disabled={authBusy} onClick={startAuth}>{authBusy ? "Sending code…" : "Continue with email"}</button></> : <><div className="field"><label>Six-digit verification code</label><input className="text-input code-input" inputMode="numeric" maxLength={6} value={authForm.code} onChange={(e) => setAuthForm({ ...authForm, code: e.target.value.replace(/\D/g, "") })} /></div><button className="primary" disabled={authBusy || authForm.code.length !== 6} onClick={verifyAuth}>{authBusy ? "Verifying…" : "Verify and create account"}</button><button className="text-button" onClick={() => setAuthStep("details")}>Use a different email</button></>}{accountStatus && <p className="checkout-note">{accountStatus}</p>}</section> : <div className="settings-stack"><section className="settings-card"><h3>Profile</h3><div className="account-identity"><span className="member-avatar icon-centered">{user.name[0].toUpperCase()}</span><div><strong>{user.name}</strong><small>{user.email}{user.phone ? ` · ${user.phone}` : ""}</small></div><em>{user.role}</em></div><div className="two-col"><div className="field"><label>Household name</label><input className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /></div><div className="field"><label>Email for recipes</label><input className="text-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div></div><button className="outline" onClick={async () => { await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, maxTime, skill, exclusions } }) }); setAccountStatus("Profile saved."); }}>Save profile</button>{accountStatus && <span className="success-note">{accountStatus}</span>}</section><section className="settings-card security-card"><div className="icon-centered">🔒</div><div><h3>Security</h3><p>Your email is verified. Your session is stored in a secure, HTTP-only cookie, protected data is checked on the server, and sensitive service keys never reach your browser.</p></div></section><section className="settings-card plan-row"><div><span className="mini-label">ACCESS STATUS</span><h3>{user.billingExempt ? "Billing exempt" : user.accessStatus === "complimentary" ? "Complimentary account" : user.subscriptionStatus === "active" ? "Active membership" : user.subscriptionStatus === "trialing" ? "30-day free trial" : "30-day free trial"}</h3><p>{user.complimentaryUntil ? `Complimentary through ${user.complimentaryUntil}` : user.subscriptionEndsAt ? `Current period ends ${new Date(user.subscriptionEndsAt).toLocaleDateString()}` : "Choose monthly or yearly billing when you’re ready."}</p></div>{user.subscriptionStatus ? <button className="primary compact" disabled={billingBusy} onClick={() => openBilling("portal")}>Manage billing</button> : <button className="primary compact" onClick={() => setView("plans")}>View plans</button>}</section><section className="settings-card danger-zone"><h3>Account controls</h3><button className="outline" onClick={async () => { await fetch("/api/auth/signout", { method: "POST" }); setUser(null); setAuthStep("details"); }}>Sign out</button></section></div>}</div>}
+    {view === "account" && <div className="dashboard narrow"><div className="page-heading"><div><p className="eyebrow">PROFILE & SECURITY</p><h2>{user ? `Welcome, ${user.name}.` : "Create your account"}</h2><p>{user ? "Control your household, privacy, and plan." : "No password needed. We’ll verify your email with a one-time code."}</p></div></div>{!user ? <section className="settings-card auth-card"><div className="auth-trust"><span className="icon-centered">🔒</span><strong>Secure passwordless signup</strong><small>Only your name and verified email are required. Phone is optional.</small></div>{authStep === "details" ? <><div className="field"><label>Name</label><input className="text-input" autoComplete="name" value={authForm.name} onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })} /></div><div className="field"><label>Email</label><input className="text-input" type="email" autoComplete="email" value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} /></div><div className="field"><label>Phone <small>(optional)</small></label><input className="text-input" type="tel" autoComplete="tel" value={authForm.phone} onChange={(e) => setAuthForm({ ...authForm, phone: e.target.value })} /></div><button className="primary" disabled={authBusy} onClick={startAuth}>{authBusy ? "Sending code…" : "Continue with email"}</button></> : <><div className="field"><label>Six-digit verification code</label><input className="text-input code-input" inputMode="numeric" maxLength={6} value={authForm.code} onChange={(e) => setAuthForm({ ...authForm, code: e.target.value.replace(/\D/g, "") })} /></div><button className="primary" disabled={authBusy || authForm.code.length !== 6} onClick={verifyAuth}>{authBusy ? "Verifying…" : "Verify and create account"}</button><button className="text-button" onClick={() => setAuthStep("details")}>Use a different email</button></>}{accountStatus && <p className="checkout-note">{accountStatus}</p>}</section> : <div className="settings-stack"><section className="settings-card"><h3>Profile</h3><div className="account-identity"><span className="member-avatar icon-centered">{user.name[0].toUpperCase()}</span><div><strong>{user.name}</strong><small>{user.email}{user.phone ? ` · ${user.phone}` : ""}</small></div><em>{user.role}</em></div><div className="two-col"><div className="field"><label>Household name</label><input className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /></div><div className="field"><label>Email for recipes</label><input className="text-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div></div><button className="outline" onClick={async () => { await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, planStartDate, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, maxTime, skill, exclusions } }) }); setAccountStatus("Profile saved."); }}>Save profile</button>{accountStatus && <span className="success-note">{accountStatus}</span>}</section><section className="settings-card security-card"><div className="icon-centered">🔒</div><div><h3>Security</h3><p>Your email is verified. Your session is stored in a secure, HTTP-only cookie, protected data is checked on the server, and sensitive service keys never reach your browser.</p></div></section><section className="settings-card plan-row"><div><span className="mini-label">ACCESS STATUS</span><h3>{user.billingExempt ? "Billing exempt" : user.accessStatus === "complimentary" ? "Complimentary account" : user.subscriptionStatus === "active" ? "Active membership" : user.subscriptionStatus === "trialing" ? "30-day free trial" : "30-day free trial"}</h3><p>{user.complimentaryUntil ? `Complimentary through ${user.complimentaryUntil}` : user.subscriptionEndsAt ? `Current period ends ${new Date(user.subscriptionEndsAt).toLocaleDateString()}` : "Choose monthly or yearly billing when you’re ready."}</p></div>{user.subscriptionStatus ? <button className="primary compact" disabled={billingBusy} onClick={() => openBilling("portal")}>Manage billing</button> : <button className="primary compact" onClick={() => setView("plans")}>View plans</button>}</section><section className="settings-card danger-zone"><h3>Account controls</h3><button className="outline" onClick={async () => { await fetch("/api/auth/signout", { method: "POST" }); setUser(null); setAuthStep("details"); }}>Sign out</button></section></div>}</div>}
 
     {view === "admin" && user?.role === "admin" && <div className="dashboard"><div className="page-heading"><div><p className="eyebrow">SECURE ADMIN CONSOLE</p><h2>User access management</h2><p>Grant free access, exempt billing, suspend accounts, and manage administrators.</p></div></div><section className="admin-toolbar"><input className="text-input" placeholder="Search name or email" value={adminSearch} onChange={(e) => setAdminSearch(e.target.value)} /><button className="outline" onClick={() => loadAdminUsers()}>Search</button></section>{accountStatus && <p className="checkout-note">{accountStatus}</p>}<div className="admin-list">{adminUsers.map((account) => <article className="admin-user" key={account.id}><div><strong>{account.name}</strong><small>{account.email}{account.phone ? ` · ${account.phone}` : ""}</small></div><div className="access-badges"><span>{account.role}</span><span>{account.access_status}</span>{Boolean(account.billing_exempt) && <span>billing exempt</span>}</div><div className="admin-actions"><button onClick={() => adminAction(account.id, account.access_status === "complimentary" ? "revoke_complimentary" : "grant_complimentary")}>{account.access_status === "complimentary" ? "Remove free access" : "Give free access"}</button><button onClick={() => adminAction(account.id, account.billing_exempt ? "billing_required" : "billing_exempt")}>{account.billing_exempt ? "Require payment" : "Turn off payment"}</button><button onClick={() => adminAction(account.id, account.access_status === "suspended" ? "activate" : "suspend")}>{account.access_status === "suspended" ? "Reactivate" : "Suspend"}</button><button onClick={() => adminAction(account.id, account.role === "admin" ? "remove_admin" : "make_admin")}>{account.role === "admin" ? "Remove admin" : "Make admin"}</button></div></article>)}</div>{adminUsers.length === 0 && <p className="empty-state">No users to show yet. Search or wait for the first signup.</p>}</div>}
 
@@ -714,6 +941,18 @@ export default function Home() {
 
     {ratingMeal && <div className="modal-backdrop" onClick={() => setRatingMeal(null)}><section className="rating-modal" role="dialog" aria-modal="true" aria-labelledby="rating-title" onClick={(e) => e.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close recipe rating" onClick={() => setRatingMeal(null)}>×</button><span className="mini-label">RATE THIS RECIPE</span><h3 id="rating-title">{ratingMeal.title}</h3><label>Meal quality</label><Stars label="Meal quality" value={ratings[ratingMeal.id]?.quality || 0} onChange={(quality) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality, ease: current[ratingMeal.id]?.ease || 0 } }))} /><label>Ease of preparation</label><Stars label="Ease of preparation" value={ratings[ratingMeal.id]?.ease || 0} onChange={(ease) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality: current[ratingMeal.id]?.quality || 0, ease } }))} /><button className="primary" disabled={!ratings[ratingMeal.id]?.quality || !ratings[ratingMeal.id]?.ease} onClick={() => saveRating(ratingMeal, ratings[ratingMeal.id])}>Save rating</button></section></div>}
 
-    <footer className="site-footer"><span>Grocer•Eaze</span><p>Better food. Less waste.</p><div><button onClick={() => setView("plans")}>Plans</button><button onClick={() => setView("account")}>Privacy & security</button>{recipeSourceLinks.map((source) => <a key={source.name} href={source.url} target="_blank" rel="noreferrer">{source.name}</a>)}</div></footer>
+    {onboardingStep !== null && <div className="onboarding-backdrop"><section className="onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+      <button className="modal-close icon-centered" aria-label="Skip introduction" onClick={finishOnboarding}>×</button>
+      <span className="mini-label">{onboardingSteps[onboardingStep].eyebrow}</span>
+      <div className="onboarding-icon icon-centered">{["⌂", "⌕", "↕", "✓"][onboardingStep]}</div>
+      <h2 id="onboarding-title">{onboardingSteps[onboardingStep].title}</h2>
+      <p>{onboardingSteps[onboardingStep].body}</p>
+      <div className="onboarding-progress" aria-label={`Introduction step ${onboardingStep + 1} of ${onboardingSteps.length}`}>{onboardingSteps.map((step, index) => <i key={step.title} className={index <= onboardingStep ? "active" : ""} />)}</div>
+      <div className="onboarding-actions"><button className="text-button" onClick={finishOnboarding}>Skip</button><div>{onboardingStep > 0 && <button className="outline compact" onClick={() => setOnboardingStep(onboardingStep - 1)}>Back</button>}<button className="primary compact" onClick={() => onboardingStep === onboardingSteps.length - 1 ? finishOnboarding() : setOnboardingStep(onboardingStep + 1)}>{onboardingStep === onboardingSteps.length - 1 ? "Start planning" : "Next"}</button></div></div>
+    </section></div>}
+
+    {undoAction && <div className="undo-toast" role="status"><span>{undoAction.message}</span><button onClick={() => { undoAction.restore(); setUndoAction(null); }}>Undo</button><button className="undo-dismiss" onClick={() => setUndoAction(null)} aria-label="Dismiss notification">×</button></div>}
+
+    <footer className="site-footer"><span>Grocer•Eaze</span><p>Better food. Less waste.</p><div><button onClick={startOnboarding}>How it works</button><button onClick={() => navigateTo("plans")}>Plans</button><button onClick={() => navigateTo("account")}>Privacy & security</button>{recipeSourceLinks.map((source) => <a key={source.name} href={source.url} target="_blank" rel="noreferrer">{source.name}</a>)}</div></footer>
   </main>;
 }
