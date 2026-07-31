@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 
 type Meal = {
   id: string; day: string; date: string; kind: string; title: string; detail: string;
-  time: string; cost: string; tone: string; emoji: string; sourceUrl?: string;
+  time: string; cost: string; tone: string; emoji: string; sourceUrl?: string; image?: string; sortOrder?: number;
 };
 type Member = { id: string; name: string; role: string; allergies: string; preferences?: { glutenFree?: boolean; lowDairy?: boolean; kidFriendly?: boolean } };
 type Rating = { quality: number; ease: number };
@@ -74,7 +74,8 @@ export default function Home() {
   const [billingBusy, setBillingBusy] = useState(false);
 
   const estimated = useMemo(() => Math.round(people * (range === "Day" ? 9 : range === "Week" ? 27 : 104)), [people, range]);
-  const lunchCount = kidLunches && mealType !== "Dinner only" ? 5 : 0;
+  const dinnerTarget = range === "Day" ? 1 : range === "Week" ? 7 : 30;
+  const lunchTarget = kidLunches && mealType !== "Dinner only" ? (range === "Day" ? 1 : range === "Week" ? 5 : 22) : 0;
 
   useEffect(() => {
     let id = window.localStorage.getItem("grocer-eaze-owner");
@@ -147,13 +148,26 @@ export default function Home() {
   }, [locationQuery, location]);
 
   function mapRecipe(recipe: Record<string, unknown>, index: number, kind = "Dinner"): Meal {
+    const mealDate = new Date();
+    mealDate.setHours(12, 0, 0, 0);
+    if (kind === "School lunch") {
+      let weekdays = -1;
+      while (weekdays < index) {
+        if (mealDate.getDay() !== 0 && mealDate.getDay() !== 6) weekdays++;
+        if (weekdays < index) mealDate.setDate(mealDate.getDate() + 1);
+      }
+    } else {
+      mealDate.setDate(mealDate.getDate() + index);
+    }
     return {
-      id: String(recipe.id || `recipe-${index}`), day: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"][index % 7],
-      date: String(12 + (index % 7)), kind, title: String(recipe.title),
+      id: String(recipe.id || `recipe-${index}`), day: mealDate.toLocaleDateString("en-US", { weekday: "short" }).toUpperCase(),
+      date: String(mealDate.getDate()), kind, title: String(recipe.title),
       detail: `from ${String(recipe.sourceName || "a trusted recipe source")}`,
       time: `${Number(recipe.readyInMinutes || 35)} min`, cost: `$${((Number(recipe.pricePerServing || 420)) / 100).toFixed(2)} / serving`,
       tone: ["salmon", "gold", "green", "blue"][index % 4], emoji: kind.includes("lunch") ? "🍱" : ["🥗", "🍲", "🐟", "🍅"][index % 4],
       sourceUrl: String(recipe.sourceUrl || ""),
+      image: String(recipe.image || ""),
+      sortOrder: mealDate.getTime(),
     };
   }
 
@@ -162,14 +176,15 @@ export default function Home() {
     const minutes = maxTime.match(/\d+/)?.[0] || "45";
     const dinnerQuery = queryOverride || `${mediterranean ? "Mediterranean " : ""}family dinner ${exclusions ? `without ${exclusions}` : ""}`;
     try {
-      const requests = [fetch(`/api/recipes/search?${new URLSearchParams({ q: dinnerQuery, maxTime: minutes, glutenFree: String(glutenFree) })}`)];
-      if (kidLunches && mealType !== "Dinner only") requests.push(fetch(`/api/recipes/search?${new URLSearchParams({ q: `school lunch box kid friendly weekday ${exclusions ? `without ${exclusions}` : ""}`, maxTime: "20", glutenFree: String(glutenFree) })}`));
+      const requests = [fetch(`/api/recipes/search?${new URLSearchParams({ q: dinnerQuery, maxTime: minutes, glutenFree: String(glutenFree), number: String(dinnerTarget) })}`)];
+      if (lunchTarget) requests.push(fetch(`/api/recipes/search?${new URLSearchParams({ q: `school lunch kid friendly packable ${exclusions ? `without ${exclusions}` : ""}`, maxTime: "20", glutenFree: String(glutenFree), number: String(lunchTarget) })}`));
       const responses = await Promise.all(requests);
       const dinnerData = await responses[0].json();
       const lunchData = responses[1] ? await responses[1].json() : { recipes: [] };
-      const dinners = (dinnerData.recipes || []).slice(0, range === "Day" ? 1 : 7).map((r: Record<string, unknown>, i: number) => mapRecipe(r, i));
-      const lunches = (lunchData.recipes || []).slice(0, range === "Day" ? 1 : 5).map((r: Record<string, unknown>, i: number) => mapRecipe(r, i, "School lunch"));
-      if (dinners.length) setPlannedMeals([...dinners, ...lunches].sort((a, b) => a.day.localeCompare(b.day)));
+      const unique = (recipes: Array<Record<string, unknown>>) => [...new Map(recipes.map((recipe) => [String(recipe.title).toLowerCase(), recipe])).values()];
+      const dinners = unique(dinnerData.recipes || []).slice(0, dinnerTarget).map((r, i) => mapRecipe(r, i));
+      const lunches = unique(lunchData.recipes || []).slice(0, lunchTarget).map((r, i) => mapRecipe(r, i, "School lunch"));
+      if (dinners.length) setPlannedMeals([...dinners, ...lunches].sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder) || a.kind.localeCompare(b.kind)));
       if (ownerId) await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, maxTime, skill, exclusions } }) });
       setSimilarTo(queryOverride || ""); setView("meals"); window.scrollTo({ top: 0, behavior: "smooth" });
     } finally { setPlanning(false); }
@@ -261,11 +276,11 @@ export default function Home() {
     </div>}
 
     {view === "meals" && <div className="dashboard">
-      <div className="page-heading"><div><p className="eyebrow">{people} PEOPLE · {household.toUpperCase()} · {location.toUpperCase()}</p><h2>{similarTo ? `More like ${similarTo}.` : "Your week is ready."}</h2><p>{glutenFree ? "Gluten-free · " : ""}{mediterranean ? "Mediterranean · " : ""}{lowDairy ? "Low dairy · " : ""}max {maxTime.toLowerCase()}</p></div><button className="outline" onClick={() => setView("plan")}>Adjust plan</button></div>
-      <div className="summary-strip"><div><span>{Math.min(7, plannedMeals.filter((m) => m.kind === "Dinner").length)}</span><small>dinners</small></div><div><span>{lunchCount}</span><small>school lunches</small></div><div><span>{leftovers ? 3 : 0}</span><small>leftover nights</small></div><div className="total"><small>estimated total</small><span>${Math.min(Math.max(budget - 8, 50), estimated)}</span><em>${budget >= 500 ? "500+" : budget} budget</em></div></div>
-      {kidLunches && mealType !== "Dinner only" && <section className="lunch-banner"><div className="icon-centered">🍱</div><div><strong>Monday–Friday school lunches are covered</strong><p>Packable in 20 minutes or less, allergy-aware, and balanced for kids.</p></div><span>5 weekday lunches</span></section>}
+      <div className="page-heading"><div><p className="eyebrow">{people} PEOPLE · {household.toUpperCase()} · {location.toUpperCase()}</p><h2>{similarTo ? `More like ${similarTo}.` : `Your ${range.toLowerCase()} is ready.`}</h2><p>{glutenFree ? "Gluten-free · " : ""}{mediterranean ? "Mediterranean · " : ""}{lowDairy ? "Low dairy · " : ""}max {maxTime.toLowerCase()}</p></div><button className="outline" onClick={() => setView("plan")}>Adjust plan</button></div>
+      <div className="summary-strip"><div><span>{plannedMeals.filter((m) => m.kind === "Dinner").length}</span><small>dinners</small></div><div><span>{plannedMeals.filter((m) => m.kind === "School lunch").length}</span><small>school lunches</small></div><div><span>{leftovers ? Math.round(dinnerTarget / 3) : 0}</span><small>leftover nights</small></div><div className="total"><small>estimated total</small><span>${Math.min(Math.max(budget - 8, 50), estimated)}</span><em>${budget >= 500 ? "500+" : budget} budget</em></div></div>
+      {kidLunches && mealType !== "Dinner only" && <section className="lunch-banner"><div className="icon-centered">🍱</div><div><strong>Weekday school lunches are covered</strong><p>Packable in 20 minutes or less, allergy-aware, and balanced for kids.</p></div><span>{plannedMeals.filter((m) => m.kind === "School lunch").length} weekday lunches</span></section>}
       <div className="meal-grid">{plannedMeals.map((meal) => <article className="meal-card" key={`${meal.id}-${meal.kind}`}>
-        <div className="date"><strong>{meal.day}</strong><span>{meal.date}</span></div><div className={`meal-art ${meal.tone}`}><span>{meal.emoji}</span><small>{meal.kind}</small></div>
+        <div className="date"><strong>{meal.day}</strong><span>{meal.date}</span></div><div className={`meal-art ${meal.tone}`}>{meal.image ? <><img src={meal.image} alt="" loading="lazy" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.nextElementSibling?.removeAttribute("hidden"); }} /><span hidden>{meal.emoji}</span></> : <span>{meal.emoji}</span>}<small>{meal.kind}</small></div>
         <div className="meal-copy"><p>{meal.kind.toUpperCase()}</p><h3>{meal.title}</h3><span>{meal.detail}</span><footer><small>◷ {meal.time}</small><small>{meal.cost}</small>{ratings[meal.id] && <small>★ {ratings[meal.id].quality}/5 quality · {ratings[meal.id].ease}/5 ease</small>}</footer><div className="recipe-actions"><button onClick={() => setRatingMeal(meal)}>Rate</button><button onClick={() => generatePlan(meal.title)}>Find similar</button>{meal.sourceUrl && <a href={meal.sourceUrl} target="_blank" rel="noreferrer">Recipe ↗</a>}</div></div>
         <button className={`favorite icon-centered ${favorites.includes(meal.title) ? "saved" : ""}`} onClick={() => toggleFavorite(meal)} aria-label={`${favorites.includes(meal.title) ? "Remove" : "Add"} favorite`}>{favorites.includes(meal.title) ? "♥" : "♡"}</button>
       </article>)}</div>

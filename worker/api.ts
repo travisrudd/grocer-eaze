@@ -15,11 +15,36 @@ import { handleBillingRequest } from "./billing";
 
 const preferredSources = ["allrecipes.com", "foodnetwork.com", "eatingwell.com"];
 
-const fallbackRecipes = [
-  { id: "demo-salmon", title: "Lemon Herb Salmon", sourceName: "EatingWell", sourceUrl: "https://www.eatingwell.com/", readyInMinutes: 35, servings: 4, glutenFree: true, dairyFree: true, image: "", extendedIngredients: [{ original: "4 salmon fillets" }, { original: "1 bunch asparagus" }, { original: "1 cup quinoa" }] },
-  { id: "demo-beans", title: "Tuscan White Bean Skillet", sourceName: "Food Network", sourceUrl: "https://www.foodnetwork.com/recipes", readyInMinutes: 30, servings: 4, glutenFree: true, dairyFree: true, image: "", extendedIngredients: [{ original: "2 cans white beans" }, { original: "5 oz baby spinach" }, { original: "1 pint cherry tomatoes" }] },
-  { id: "demo-souvlaki", title: "Chicken Souvlaki Bowls", sourceName: "Allrecipes", sourceUrl: "https://www.allrecipes.com/", readyInMinutes: 40, servings: 4, glutenFree: true, dairyFree: true, image: "", extendedIngredients: [{ original: "1.5 lb chicken breast" }, { original: "2 cucumbers" }, { original: "1 cup oat yogurt" }] },
+const fallbackTitles = [
+  "Lemon Herb Salmon", "Tuscan White Bean Skillet", "Chicken Souvlaki Bowls", "Tomato Basil Turkey Meatballs",
+  "Garlic Shrimp and Polenta", "Sheet Pan Chicken with Olives", "Chickpea Vegetable Tagine", "Greek Stuffed Peppers",
+  "Rosemary Pork with Apples", "Baked Cod with Tomatoes", "Lentil Sweet Potato Stew", "Herbed Quinoa Chicken",
+  "Zucchini Turkey Burgers", "Spinach Artichoke Chicken", "Citrus Salmon Rice Bowls", "Mushroom White Bean Risotto",
+  "Mediterranean Beef Kofta", "Roasted Vegetable Frittata", "Pesto Chicken with Green Beans", "Red Lentil Coconut Curry",
+  "Seared Tuna Niçoise Bowls", "Paprika Chicken and Potatoes", "Black Bean Stuffed Squash", "Lemon Oregano Turkey Kebabs",
+  "Ginger Sesame Salmon", "Harissa Chickpea Bowls", "Chicken Piccata with Broccoli", "Tomato Braised Cod",
+  "Greek Turkey Lettuce Cups", "Eggplant Lentil Moussaka", "Orange Herb Roast Chicken", "Shrimp and White Bean Sauté",
+  "Rainbow Hummus Lunch Box", "Turkey Cucumber Roll-Ups", "Sunflower Butter Berry Box", "Chicken Pita Bento",
+  "Mediterranean Pasta Salad Box", "Egg and Veggie Snack Box", "Bean and Corn Quesadilla Box", "Apple Cheddar Turkey Bites",
 ];
+const fallbackRecipes = fallbackTitles.map((title, index) => ({
+  id: `demo-${index + 1}`,
+  title,
+  sourceName: ["EatingWell", "Food Network", "Allrecipes"][index % 3],
+  sourceUrl: ["https://www.eatingwell.com/recipes/", "https://www.foodnetwork.com/recipes", "https://www.allrecipes.com/recipes/"][index % 3],
+  readyInMinutes: 20 + (index % 5) * 5,
+  servings: 4,
+  glutenFree: true,
+  dairyFree: index % 3 !== 0,
+  image: "",
+  pricePerServing: 280 + (index % 7) * 55,
+  extendedIngredients: [{ original: "Fresh vegetables" }, { original: "Lean protein or beans" }, { original: "Herbs and pantry staples" }],
+}));
+
+function variedFallback() {
+  const start = crypto.getRandomValues(new Uint32Array(1))[0] % fallbackRecipes.length;
+  return [...fallbackRecipes.slice(start), ...fallbackRecipes.slice(0, start)];
+}
 
 function json(value: unknown, status = 200) {
   return Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
@@ -40,16 +65,18 @@ async function ensureSchema(db: D1Database) {
 async function searchRecipes(url: URL, env: AppEnv) {
   const query = url.searchParams.get("q") || "Mediterranean dinner";
   const maxTime = url.searchParams.get("maxTime") || "45";
-  if (!env.SPOONACULAR_API_KEY) return json({ recipes: fallbackRecipes, demo: true });
+  const requested = Math.max(1, Math.min(100, Number(url.searchParams.get("number") || 18)));
+  if (!env.SPOONACULAR_API_KEY) return json({ recipes: variedFallback().slice(0, requested), demo: true });
   const params = new URLSearchParams({
     apiKey: env.SPOONACULAR_API_KEY,
     query,
-    number: "18",
+    number: String(requested),
     addRecipeInformation: "true",
     fillIngredients: "true",
     instructionsRequired: "true",
     ...(url.searchParams.get("glutenFree") === "false" ? {} : { diet: "gluten free" }),
     maxReadyTime: maxTime,
+    sort: "random",
   });
   const response = await fetch(`https://api.spoonacular.com/recipes/complexSearch?${params}`);
   if (!response.ok) return json({ error: "Recipe provider is temporarily unavailable." }, 502);
@@ -59,7 +86,9 @@ async function searchRecipes(url: URL, env: AppEnv) {
     const bUrl = String(b.sourceUrl || "");
     return Number(preferredSources.some((host) => bUrl.includes(host))) - Number(preferredSources.some((host) => aUrl.includes(host)));
   });
-  return json({ recipes: preferred, demo: false });
+  const used = new Set(preferred.map((recipe) => String(recipe.title).toLowerCase()));
+  const supplemental = variedFallback().filter((recipe) => !used.has(recipe.title.toLowerCase()));
+  return json({ recipes: [...preferred, ...supplemental].slice(0, requested), demo: false });
 }
 
 async function locationLookup(url: URL, reverse = false) {
