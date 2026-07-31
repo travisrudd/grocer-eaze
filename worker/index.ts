@@ -11,6 +11,10 @@ interface Env {
   EMAIL_FROM?: string;
   AUTH_SECRET?: string;
   INITIAL_ADMIN_EMAIL?: string;
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+  STRIPE_MONTHLY_PRICE_ID?: string;
+  STRIPE_YEARLY_PRICE_ID?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {

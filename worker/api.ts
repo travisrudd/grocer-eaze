@@ -5,8 +5,13 @@ type AppEnv = {
   EMAIL_FROM?: string;
   AUTH_SECRET?: string;
   INITIAL_ADMIN_EMAIL?: string;
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+  STRIPE_MONTHLY_PRICE_ID?: string;
+  STRIPE_YEARLY_PRICE_ID?: string;
 };
 import { getSessionUser, handleAuthRequest } from "./auth";
+import { handleBillingRequest } from "./billing";
 
 const preferredSources = ["allrecipes.com", "foodnetwork.com", "eatingwell.com"];
 
@@ -85,6 +90,8 @@ function calendarResponse(body: { meals?: Array<{ title: string; detail?: string
 
 export async function handleApiRequest(request: Request, env: AppEnv): Promise<Response> {
   const url = new URL(request.url);
+  const billingResponse = await handleBillingRequest(request, env);
+  if (billingResponse) return billingResponse;
   const authResponse = await handleAuthRequest(request, env);
   if (authResponse) return authResponse;
   const sessionUser = await getSessionUser(request, env);

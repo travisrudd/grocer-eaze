@@ -47,6 +47,10 @@ export const users = sqliteTable("users", {
   trialEndsAt: text("trial_ends_at"),
   complimentaryUntil: text("complimentary_until"),
   billingExempt: integer("billing_exempt").notNull().default(0),
+  stripeCustomerId: text("stripe_customer_id"),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  subscriptionStatus: text("subscription_status"),
+  subscriptionEndsAt: text("subscription_ends_at"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

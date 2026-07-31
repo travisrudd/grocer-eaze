@@ -15,6 +15,8 @@ type SessionUser = {
   accessStatus: string;
   complimentaryUntil: string | null;
   billingExempt: boolean;
+  subscriptionStatus: string | null;
+  subscriptionEndsAt: string | null;
 };
 
 const cookieName = "grocer_eaze_session";
@@ -54,6 +56,8 @@ export async function getSessionUser(request: Request, env: AuthEnv): Promise<Se
     id: String(row.id), name: String(row.name), email: String(row.email), phone: String(row.phone || ""),
     role: row.role === "admin" ? "admin" : "user", accessStatus: String(row.access_status),
     complimentaryUntil: row.complimentary_until ? String(row.complimentary_until) : null, billingExempt: Boolean(row.billing_exempt),
+    subscriptionStatus: row.subscription_status ? String(row.subscription_status) : null,
+    subscriptionEndsAt: row.subscription_ends_at ? String(row.subscription_ends_at) : null,
   };
 }
 
