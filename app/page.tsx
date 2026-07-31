@@ -14,7 +14,7 @@ type MemberPreferences = {
 type Member = { id: string; name: string; role: string; allergies: string; preferences?: MemberPreferences };
 type Rating = { quality: number; ease: number };
 type LocationResult = { label: string; lat?: string; lon?: string };
-type View = "plan" | "meals" | "list" | "account" | "family" | "plans" | "admin";
+type View = "plan" | "meals" | "list" | "account" | "family" | "plans" | "admin" | "accessibility";
 type UndoAction = { message: string; restore: () => void };
 type AccountUser = { id: string; name: string; email: string; phone: string; role: "user" | "admin"; accessStatus: string; complimentaryUntil: string | null; billingExempt: boolean; subscriptionStatus: string | null; subscriptionEndsAt: string | null };
 type AdminUser = { id: string; name: string; email: string; phone: string; role: string; access_status: string; trial_ends_at?: string; complimentary_until?: string; billing_exempt: number };
@@ -140,6 +140,9 @@ export default function Home() {
   const [reviewedPlanSignature, setReviewedPlanSignature] = useState("");
   const [familyStatus, setFamilyStatus] = useState("");
   const [recipeFilters, setRecipeFilters] = useState(defaultRecipeFilters);
+  const [accessibilityFeedback, setAccessibilityFeedback] = useState({ name: "", email: "", details: "", website: "" });
+  const [accessibilityStatus, setAccessibilityStatus] = useState("");
+  const [accessibilityBusy, setAccessibilityBusy] = useState(false);
 
   const dinnerTarget = range === "Day" ? 1 : range === "Week" ? 7 : 30;
   const schoolLunchTarget = kidLunches ? (range === "Day" ? 1 : range === "Week" ? 5 : 22) : 0;
@@ -341,7 +344,7 @@ export default function Home() {
   }, [undoAction]);
 
   useEffect(() => {
-    const validViews: View[] = ["plan", "meals", "list", "account", "family", "plans", "admin"];
+    const validViews: View[] = ["plan", "meals", "list", "account", "family", "plans", "admin", "accessibility"];
     const syncViewFromUrl = () => {
       const nextView = window.location.hash.replace("#", "") as View;
       if (validViews.includes(nextView)) {
@@ -367,6 +370,7 @@ export default function Home() {
       family: "Family preferences",
       plans: "Membership plans",
       admin: "Admin",
+      accessibility: "Accessibility",
     };
     document.title = `${titles[view]} | Grocer-Eaze`;
   }, [view]);
@@ -868,11 +872,54 @@ export default function Home() {
     setExportStatus(response.ok ? `Recipes sent to ${email}.` : "We couldn’t send that email. Please try again.");
   }
 
+  async function submitAccessibilityFeedback(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAccessibilityStatus("");
+    const details = accessibilityFeedback.details.trim();
+    const feedbackEmail = accessibilityFeedback.email.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(feedbackEmail)) {
+      setAccessibilityStatus("Enter a valid email address so we can follow up.");
+      return;
+    }
+    if (details.length < 10) {
+      setAccessibilityStatus("Please share a little more detail about the barrier you encountered.");
+      return;
+    }
+    setAccessibilityBusy(true);
+    try {
+      const response = await fetch("/api/accessibility-feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(accessibilityFeedback),
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) {
+        setAccessibilityStatus(data.error || "We couldn’t send your feedback. Please try again.");
+        return;
+      }
+      setAccessibilityFeedback((current) => ({ ...current, details: "" }));
+      setAccessibilityStatus("Thank you. Your accessibility feedback has been sent to the Grocer-Eaze team.");
+    } catch {
+      setAccessibilityStatus("We couldn’t send your feedback. Please try again.");
+    } finally {
+      setAccessibilityBusy(false);
+    }
+  }
+
   function navigateTo(nextView: View) {
     setView(nextView);
     const nextHash = `#${nextView}`;
     if (window.location.hash !== nextHash) window.history.pushState(null, "", nextHash);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function focusMainContent() {
+    window.setTimeout(() => {
+      const content = document.getElementById("page-content");
+      if (!content) return;
+      content.setAttribute("tabindex", "-1");
+      content.focus();
+    });
   }
 
   function updateRecipeFilters(nextFilters: typeof defaultRecipeFilters) {
@@ -912,7 +959,7 @@ export default function Home() {
   }
 
   return <div className="app">
-    <a className="skip-link" href="#page-content">Skip to main content</a>
+    <a className="skip-link" href="#page-content" onClick={focusMainContent}>Skip to main content</a>
     <header>
       <button className="brand" aria-label="Grocer-Eaze home" onClick={() => navigateTo("plan")}><span className="brand-mark" aria-hidden="true"><span>g</span></span><span>Grocer<span>•</span>Eaze</span></button>
       <nav aria-label="Primary navigation">
@@ -926,7 +973,7 @@ export default function Home() {
     </header>
     <main>
 
-    {view === "plan" && <div className="shell" id="page-content">
+    {view === "plan" && <div className="shell" id="page-content" tabIndex={-1}>
       <section className="hero"><p className="eyebrow">MEAL PLANNING, MADE HUMAN</p><h1><span>Better Food,</span><br /><em>Less Waste.</em></h1><p className="lede">A recipe catalog shaped around every person at your table, so you buy what you need and enjoy what you make.</p><div className="trust-row"><span><b>✓</b> Family preferences included</span><span><b>✓</b> Shop with a smarter list</span><span><b>✓</b> Use more, waste less</span></div></section>
       <section className="planner">
         <div className="planner-top"><div><span>1</span><strong>Build your plan</strong></div><p>About 60 seconds</p></div>
@@ -949,7 +996,7 @@ export default function Home() {
       </section>
     </div>}
 
-    {view === "meals" && <div className="dashboard catalog-dashboard" id="page-content">
+    {view === "meals" && <div className="dashboard catalog-dashboard" id="page-content" tabIndex={-1}>
       <div className="page-heading catalog-heading"><div><p className="eyebrow">{people} PEOPLE · {household.toUpperCase()}</p><h2>{similarTo ? `More like ${similarTo}.` : "Build your plan from the catalog."}</h2><p>Browse, filter, and add each recipe to the meal where it belongs.</p></div><div className="page-heading-actions">{similarTo && catalogBeforeSimilar && <button className="outline" onClick={returnToFullCatalog}>← Full catalog</button>}<button className="outline" onClick={() => navigateTo("plan")}>Adjust full plan</button></div></div>
 
       <section className="plan-progress" aria-label={`${filledCount} of ${totalTarget} meal slots filled`}>
@@ -1037,7 +1084,7 @@ export default function Home() {
       <div className={`action-bar confirm-bar ${planIsFull ? "ready" : ""}`}><p><strong>{planIsFull ? "Schedule complete." : `${filledCount} of ${totalTarget} meals selected.`}</strong> {planIsFull ? "Your recipe ingredients are ready to combine into one grocery list." : "Keep browsing to fill every meal slot."}</p><button className="primary compact" disabled={!planIsFull} onClick={() => navigateTo("list")}>{planIsFull ? "Confirm & build grocery list →" : `${totalTarget - filledCount} slots remaining`}</button></div>
     </div>}
 
-    {view === "list" && <div className="dashboard" id="page-content">
+    {view === "list" && <div className="dashboard" id="page-content" tabIndex={-1}>
       <div className="page-heading"><div><p className="eyebrow">GROCERIES · {plannedMeals.length} SELECTED MEALS</p><h2>Everything you need, sorted.</h2><p>{groceryGroups.reduce((sum, group) => sum + group.count, 0)} unique ingredients for {people} people near {location}. {selectedStore} estimate: ${selectedEstimate}.</p></div><button className="outline" onClick={() => navigateTo("meals")}>← Back to recipes</button></div>
       {plannedMeals.length ? <div className="list-layout">
         <section className="grocery-panel">
@@ -1104,6 +1151,38 @@ export default function Home() {
     {view === "admin" && user?.role === "admin" && <div className="dashboard" id="page-content"><div className="page-heading"><div><p className="eyebrow">SECURE ADMIN CONSOLE</p><h2>User access management</h2><p>Grant free access, exempt billing, suspend accounts, and manage administrators.</p></div></div><section className="admin-toolbar"><input className="text-input" aria-label="Search users by name or email" placeholder="Search name or email" value={adminSearch} onChange={(e) => setAdminSearch(e.target.value)} /><button className="outline" onClick={() => loadAdminUsers()}>Search</button></section>{accountStatus && <p className="checkout-note" role="status">{accountStatus}</p>}<div className="admin-list">{adminUsers.map((account) => <article className="admin-user" key={account.id}><div><strong>{account.name}</strong><small>{account.email}{account.phone ? ` · ${account.phone}` : ""}</small></div><div className="access-badges"><span>{account.role}</span><span>{account.access_status}</span>{Boolean(account.billing_exempt) && <span>billing exempt</span>}</div><div className="admin-actions"><button onClick={() => adminAction(account.id, account.access_status === "complimentary" ? "revoke_complimentary" : "grant_complimentary")}>{account.access_status === "complimentary" ? "Remove free access" : "Give free access"}</button><button onClick={() => adminAction(account.id, account.billing_exempt ? "billing_required" : "billing_exempt")}>{account.billing_exempt ? "Require payment" : "Turn off payment"}</button><button onClick={() => adminAction(account.id, account.access_status === "suspended" ? "activate" : "suspend")}>{account.access_status === "suspended" ? "Reactivate" : "Suspend"}</button><button onClick={() => adminAction(account.id, account.role === "admin" ? "remove_admin" : "make_admin")}>{account.role === "admin" ? "Remove admin" : "Make admin"}</button></div></article>)}</div>{adminUsers.length === 0 && <p className="empty-state">No users to show yet. Search or wait for the first signup.</p>}</div>}
 
     {view === "plans" && <div className="dashboard narrow" id="page-content"><div className="page-heading"><div><p className="eyebrow">SIMPLE PRICING</p><h2>Try everything free for 30 days.</h2><p>Secure checkout is handled by Stripe. Cancel any time before the trial ends.</p></div></div><div className="pricing-grid"><article className="price-card"><span>MONTHLY</span><h3><b>$10</b> / month</h3><p>Flexible month-to-month access.</p><button disabled={billingBusy} onClick={() => openBilling("checkout", "monthly")}>{billingBusy ? "Opening secure checkout…" : "Start 30-day trial"}</button></article><article className="price-card featured"><span>BEST VALUE · SAVE $21</span><h3><b>$99</b> / year</h3><p>Everything included, billed annually after your trial.</p><button disabled={billingBusy} onClick={() => openBilling("checkout", "yearly")}>{billingBusy ? "Opening secure checkout…" : "Start 30-day trial"}</button></article></div>{accountStatus && <p className="checkout-note" role="status">{accountStatus}</p>}<button className="outline back-button" onClick={() => navigateTo("account")}>← Back to account</button></div>}
+    {view === "accessibility" && <div className="dashboard narrow accessibility-page" id="page-content" tabIndex={-1}>
+      <div className="page-heading"><div><p className="eyebrow">ACCESSIBILITY AT GROCER-EAZE</p><h2>Meal planning should work for everyone.</h2><p>We’re committed to an experience people can use with a keyboard, screen reader, magnification, voice control, or other assistive technology.</p></div></div>
+      <div className="accessibility-grid">
+        <section className="settings-card accessibility-statement" aria-labelledby="accessibility-commitment">
+          <span className="accessibility-icon icon-centered" aria-hidden="true">A</span>
+          <h3 id="accessibility-commitment">Our commitment</h3>
+          <p>Grocer-Eaze aims to meet the Web Content Accessibility Guidelines (WCAG) 2.2 Level AA. We include accessibility checks in every release and regularly review keyboard navigation, screen-reader structure, contrast, text resizing, touch targets, and responsive reflow.</p>
+          <h3>What you can expect</h3>
+          <ul>
+            <li>Meaningful headings, labels, landmarks, and status announcements.</li>
+            <li>Complete keyboard access with visible focus and no keyboard traps.</li>
+            <li>Layouts that reflow without horizontal scrolling at narrow widths and high zoom.</li>
+            <li>Motion that respects your reduced-motion preference.</li>
+          </ul>
+          <h3>Ongoing work</h3>
+          <p>Accessibility is an ongoing practice. We test automated rules on every deployment and perform manual checks with common screen-reader and keyboard workflows. We welcome reports about anything that remains difficult to use.</p>
+        </section>
+        <section className="settings-card accessibility-feedback" aria-labelledby="accessibility-feedback-title">
+          <p className="mini-label">REPORT A BARRIER</p>
+          <h3 id="accessibility-feedback-title">Tell us what happened</h3>
+          <p>Include the page or task, what you expected, and the assistive technology or browser you were using if relevant.</p>
+          <form onSubmit={submitAccessibilityFeedback}>
+            <div className="field"><label htmlFor="accessibility-name">Name <small>(optional)</small></label><input id="accessibility-name" className="text-input" autoComplete="name" maxLength={100} value={accessibilityFeedback.name} onChange={(event) => setAccessibilityFeedback({ ...accessibilityFeedback, name: event.target.value })} /></div>
+            <div className="field"><label htmlFor="accessibility-email">Email</label><input id="accessibility-email" className="text-input" type="email" autoComplete="email" required maxLength={254} aria-describedby="accessibility-email-help" value={accessibilityFeedback.email} onChange={(event) => setAccessibilityFeedback({ ...accessibilityFeedback, email: event.target.value })} /><small id="accessibility-email-help" className="field-help">We’ll only use this to follow up about your report.</small></div>
+            <div className="field"><label htmlFor="accessibility-details">Accessibility barrier</label><textarea id="accessibility-details" required minLength={10} maxLength={3000} aria-describedby="accessibility-details-help" value={accessibilityFeedback.details} onChange={(event) => setAccessibilityFeedback({ ...accessibilityFeedback, details: event.target.value })} /><small id="accessibility-details-help" className="field-help">Please don’t include passwords, payment details, or health information.</small></div>
+            <div className="feedback-honeypot" hidden><label htmlFor="accessibility-website">Website</label><input id="accessibility-website" tabIndex={-1} autoComplete="off" value={accessibilityFeedback.website} onChange={(event) => setAccessibilityFeedback({ ...accessibilityFeedback, website: event.target.value })} /></div>
+            <button className="primary" type="submit" disabled={accessibilityBusy}>{accessibilityBusy ? "Sending feedback…" : "Send accessibility feedback"}</button>
+            {accessibilityStatus && <p className="accessibility-status" role="status" aria-live="polite">{accessibilityStatus}</p>}
+          </form>
+        </section>
+      </div>
+    </div>}
     </main>
 
     {ratingMeal && <div className="modal-backdrop" onClick={() => setRatingMeal(null)}><section className="rating-modal" role="dialog" aria-modal="true" aria-labelledby="rating-title" tabIndex={-1} onClick={(e) => e.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close recipe rating" onClick={() => setRatingMeal(null)}>×</button><span className="mini-label">RATE THIS RECIPE</span><h3 id="rating-title">{ratingMeal.title}</h3><label>Meal quality</label><Stars label="Meal quality" value={ratings[ratingMeal.id]?.quality || 0} onChange={(quality) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality, ease: current[ratingMeal.id]?.ease || 0 } }))} /><label>Ease of preparation</label><Stars label="Ease of preparation" value={ratings[ratingMeal.id]?.ease || 0} onChange={(ease) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality: current[ratingMeal.id]?.quality || 0, ease } }))} /><button className="primary" disabled={!ratings[ratingMeal.id]?.quality || !ratings[ratingMeal.id]?.ease} onClick={() => saveRating(ratingMeal, ratings[ratingMeal.id])}>Save rating</button></section></div>}
@@ -1120,6 +1199,6 @@ export default function Home() {
 
     {undoAction && <div className="undo-toast" role="status"><span>{undoAction.message}</span><button onClick={() => { undoAction.restore(); setUndoAction(null); }}>Undo</button><button className="undo-dismiss" onClick={() => setUndoAction(null)} aria-label="Dismiss notification">×</button></div>}
 
-    <footer className="site-footer"><span>Grocer•Eaze</span><p>Better food. Less waste.</p><div><button onClick={startOnboarding}>How it works</button><button onClick={() => navigateTo("plans")}>Plans</button><button onClick={() => navigateTo("account")}>Privacy & security</button>{recipeSourceLinks.map((source) => <a key={source.name} href={source.url} target="_blank" rel="noreferrer">{source.name}</a>)}</div></footer>
+    <footer className="site-footer"><span>Grocer•Eaze</span><p>Better food. Less waste.</p><div><button onClick={startOnboarding}>How it works</button><button onClick={() => navigateTo("plans")}>Plans</button><button onClick={() => navigateTo("account")}>Privacy & security</button><button aria-current={view === "accessibility" ? "page" : undefined} onClick={() => navigateTo("accessibility")}>Accessibility</button>{recipeSourceLinks.map((source) => <a key={source.name} href={source.url} target="_blank" rel="noreferrer">{source.name}</a>)}</div></footer>
   </div>;
 }

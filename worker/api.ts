@@ -74,6 +74,16 @@ function json(value: unknown, status = 200) {
   return Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
 }
 
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;",
+  })[character] || character);
+}
+
 async function ensureSchema(db: D1Database) {
   await db.batch([
     db.prepare("CREATE TABLE IF NOT EXISTS profiles (owner_id TEXT PRIMARY KEY, household_name TEXT NOT NULL, people INTEGER NOT NULL DEFAULT 4, location TEXT NOT NULL DEFAULT 'Uptown, Chicago, IL', preferences_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL)"),
@@ -188,6 +198,33 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
   if (url.pathname === "/api/location/search" && request.method === "GET") return locationLookup(url);
   if (url.pathname === "/api/location/reverse" && request.method === "GET") return locationLookup(url, true);
   if (url.pathname === "/api/calendar" && request.method === "POST") return calendarResponse(await request.json());
+  if (url.pathname === "/api/accessibility-feedback" && request.method === "POST") {
+    const body = await request.json() as { name?: string; email?: string; details?: string; website?: string };
+    if (body.website) return json({ sent: true });
+    const name = String(body.name || "").trim().slice(0, 100);
+    const email = String(body.email || "").trim().slice(0, 254);
+    const details = String(body.details || "").trim().slice(0, 3000);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: "Enter a valid email address." }, 400);
+    if (details.length < 10) return json({ error: "Please share a little more detail about the barrier." }, 400);
+    if (!env.RESEND_API_KEY || !env.EMAIL_FROM) return json({ error: "Feedback delivery is temporarily unavailable." }, 503);
+    const sent = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+        "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)",
+      },
+      body: JSON.stringify({
+        from: env.EMAIL_FROM,
+        to: [env.INITIAL_ADMIN_EMAIL || "travis.rudd@gmail.com"],
+        reply_to: email,
+        subject: "Grocer-Eaze accessibility feedback",
+        html: `<h1>Accessibility feedback</h1><p><strong>From:</strong> ${escapeHtml(name || "Anonymous")} (${escapeHtml(email)})</p><p>${escapeHtml(details).replace(/\n/g, "<br>")}</p>`,
+      }),
+    });
+    if (!sent.ok) return json({ error: "We couldn’t send your feedback. Please try again." }, 502);
+    return json({ sent: true });
+  }
   if (!ownerId) return json({ error: "Missing household identifier." }, 400);
   await ensureSchema(env.DB);
 
