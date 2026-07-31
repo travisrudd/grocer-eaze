@@ -16,7 +16,7 @@ type Rating = { quality: number; ease: number };
 type LocationResult = { label: string; lat?: string; lon?: string };
 type View = "plan" | "meals" | "list" | "account" | "family" | "plans" | "admin" | "accessibility";
 type UndoAction = { message: string; restore: () => void };
-type AccountUser = { id: string; name: string; email: string; phone: string; role: "user" | "admin"; accessStatus: string; complimentaryUntil: string | null; billingExempt: boolean; subscriptionStatus: string | null; subscriptionEndsAt: string | null };
+type AccountUser = { id: string; name: string; email: string; phone: string; role: "user" | "admin"; accessStatus: string; complimentaryUntil: string | null; billingExempt: boolean; subscriptionStatus: string | null; subscriptionEndsAt: string | null; hasAccess: boolean };
 type AdminUser = { id: string; name: string; email: string; phone: string; role: string; access_status: string; trial_ends_at?: string; complimentary_until?: string; billing_exempt: number };
 
 const proteinOptions = ["Beef", "Pork", "Fish", "Shrimp"];
@@ -46,6 +46,17 @@ function todayInputDate() {
   const date = new Date();
   date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
   return date.toISOString().slice(0, 10);
+}
+
+function recipeThumbnail(meal: { title?: string; sourceUrl?: string; image?: string; id?: string }) {
+  if (meal.image?.startsWith("/api/recipe-image?")) return meal.image;
+  const isBackupRecipe = String(meal.id || "").startsWith("demo-");
+  const params = new URLSearchParams({
+    title: meal.title || "recipe",
+    ...(!isBackupRecipe && meal.sourceUrl ? { source: meal.sourceUrl } : {}),
+    ...(meal.image ? { fallback: meal.image } : {}),
+  });
+  return `/api/recipe-image?${params}`;
 }
 
 function mealDateFor(kind: string, index: number, startDate?: string) {
@@ -125,6 +136,7 @@ export default function Home() {
   const [recipeNotice, setRecipeNotice] = useState("");
   const [plannerNotice, setPlannerNotice] = useState("");
   const [planHydrated, setPlanHydrated] = useState(false);
+  const [authLoaded, setAuthLoaded] = useState(false);
   const [calendarOrder, setCalendarOrder] = useState<"plan" | "random">("plan");
   const [draggedMealId, setDraggedMealId] = useState("");
   const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
@@ -285,11 +297,19 @@ export default function Home() {
       if (familyData.members) setMembers(familyData.members);
       if (ratingData.ratings) setRatings(Object.fromEntries(ratingData.ratings.map((r: { recipe_id: string; quality: number; ease: number }) => [r.recipe_id, { quality: r.quality, ease: r.ease }])));
       if (authData.user) { setUser(authData.user); setEmail(authData.user.email); }
+      const requestedView = window.location.hash.replace("#", "") as View;
+      if (["meals", "list"].includes(requestedView) && !authData.user?.hasAccess) {
+        const destination: View = authData.user ? "plans" : "account";
+        setView(destination);
+        window.history.replaceState(null, "", `#${destination}`);
+        setAccountStatus(authData.user ? "Choose a membership to unlock meal planning and exports." : "Sign in before using meal planning tools.");
+      }
+      setAuthLoaded(true);
       if (cachedPlan) {
         try {
           const saved = JSON.parse(cachedPlan);
-          if (Array.isArray(saved.plannedMeals)) setPlannedMeals(saved.plannedMeals);
-          if (Array.isArray(saved.recipeIdeas)) setRecipeIdeas(saved.recipeIdeas);
+          if (Array.isArray(saved.plannedMeals)) setPlannedMeals(saved.plannedMeals.map((meal: Meal) => ({ ...meal, image: recipeThumbnail(meal) })));
+          if (Array.isArray(saved.recipeIdeas)) setRecipeIdeas(saved.recipeIdeas.map((meal: Meal) => ({ ...meal, image: recipeThumbnail(meal) })));
           if (saved.range) setRange(saved.range);
           if (saved.planStartDate) setPlanStartDate(saved.planStartDate);
           if (saved.mealType) setMealType(saved.mealType);
@@ -313,6 +333,13 @@ export default function Home() {
       setPlanHydrated(true);
       if (!onboardingComplete) setOnboardingStep(0);
     }).catch(() => {
+      const requestedView = window.location.hash.replace("#", "") as View;
+      if (["meals", "list"].includes(requestedView)) {
+        setView("account");
+        window.history.replaceState(null, "", "#account");
+        setAccountStatus("Sign in before using meal planning tools.");
+      }
+      setAuthLoaded(true);
       setPlanHydrated(true);
       if (!onboardingComplete) setOnboardingStep(0);
     });
@@ -429,7 +456,7 @@ export default function Home() {
     const result = await fetch("/api/auth/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: authForm.email, code: authForm.code }) });
     const data = await result.json(); setAuthBusy(false);
     if (!result.ok) { setAccountStatus(data.error || "That code could not be verified."); return; }
-    const me = await fetch("/api/auth/me").then((r) => r.json()); setUser(me.user); setEmail(me.user.email); setAccountStatus("Your secure account is ready.");
+    const me = await fetch("/api/auth/me").then((r) => r.json()); setUser(me.user); setEmail(me.user.email); setAccountStatus("Your secure account is ready. Choose a plan to start your free trial.");
   }
 
   async function loadAdminUsers(query = adminSearch) {
@@ -504,13 +531,16 @@ export default function Home() {
         return { name: String(item.name || item.nameClean || item.original || ""), aisle: String(item.aisle || ""), original: String(item.original || "") };
       }).filter((ingredient) => ingredient.name)
       : [];
+    const recipeId = String(recipe.id || `recipe-${index}`);
+    const rawImage = String(recipe.image || "");
+    const sourceUrl = String(recipe.sourceUrl || "");
     return {
-      id: String(recipe.id || `recipe-${index}`), recipeId: String(recipe.id || `recipe-${index}`), ...scheduled, kind, title,
+      id: recipeId, recipeId, ...scheduled, kind, title,
       detail: `from ${String(recipe.sourceName || "a trusted recipe source")}`,
       time: `${Number(recipe.readyInMinutes || 35)} min`, cost: `$${servingCost.toFixed(2)} / serving`,
       tone: ["salmon", "gold", "green", "blue"][index % 4], emoji: kind.includes("lunch") ? "🍱" : ["🥗", "🍲", "🐟", "🍅"][index % 4],
-      sourceUrl: String(recipe.sourceUrl || ""),
-      image: String(recipe.image || ""),
+      sourceUrl,
+      image: recipeThumbnail({ id: recipeId, title, sourceUrl, image: rawImage }),
       sourceName: String(recipe.sourceName || "Recipe source"),
       readyMinutes: Number(recipe.readyInMinutes || 35),
       pricePerServing: servingCost,
@@ -520,6 +550,7 @@ export default function Home() {
   }
 
   async function generatePlan(queryOverride?: string) {
+    if (!requireMembership()) return;
     setPlanning(true); setPlannerNotice("");
     const minutes = maxTime.match(/\d+/)?.[0] || "45";
     const proteinPrompt = familyProteins.length ? familyProteins.join(" or ") : "healthy";
@@ -830,7 +861,7 @@ export default function Home() {
     });
   }
 
-  async function copyForReminders() {
+  async function shareGroceryList() {
     if (!ingredientsReviewed) { setExportStatus("Review and confirm the merged ingredient list before exporting."); return; }
     const start = new Date(`${planStartDate}T12:00:00`);
     const end = new Date(start);
@@ -839,11 +870,20 @@ export default function Home() {
       ? start.toLocaleDateString("en-US", { month: "short", day: "numeric" })
       : `${start.toLocaleDateString("en-US", { month: "short", day: "numeric" })} - ${end.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
     const text = `Groceries, ${dateLabel}\n\n${groceryGroups.map((group) => `${group.title}\n${group.items.map((item) => `• ${item}${ingredientAdjustments[item.toLowerCase()] ? ` — ${ingredientAdjustments[item.toLowerCase()]}` : ""}`).join("\n")}`).join("\n\n")}`;
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: `Groceries, ${dateLabel}`, text });
+        setExportStatus("Grocery list shared. Choose Notes, Reminders, Keep, or another list app on your device.");
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") { setExportStatus("Sharing cancelled. Your grocery list is unchanged."); return; }
+      }
+    }
     try {
       await navigator.clipboard.writeText(text);
-      setExportStatus("Grocery list copied — paste it into Apple Reminders.");
+      setExportStatus("Grocery list copied. Paste it into Apple Notes, Reminders, Google Keep, or your preferred list app.");
     } catch {
-      setExportStatus("Your browser blocked copying. Try the calendar or email export instead.");
+      setExportStatus("Your browser blocked sharing and copying. Try the calendar or email export instead.");
     }
   }
   function downloadCalendar() {
@@ -877,7 +917,7 @@ export default function Home() {
   async function emailRecipes() {
     if (!email) { setExportStatus("Enter your email address first."); return; }
     if (!ingredientsReviewed) { setExportStatus("Review and confirm the merged ingredient list before exporting."); return; }
-    const response = await fetch("/api/email", { method: "POST", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ to: email, subject: "My Grocer-Eaze recipes", html: `<h1>Your meal plan</h1>${plannedMeals.map((meal) => `<h2>${meal.day}: ${meal.title}</h2><p>${meal.detail} · ${meal.time}</p>`).join("")}` }) });
+    const response = await fetch("/api/email", { method: "POST", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ to: email, subject: "My Grocer-Eaze recipes", meals: plannedMeals.map(({ day, title, detail, time, sourceUrl }) => ({ day, title, detail, time, sourceUrl })) }) });
     setExportStatus(response.ok ? `Recipes sent to ${email}.` : "We couldn’t send that email. Please try again.");
   }
 
@@ -915,7 +955,18 @@ export default function Home() {
     }
   }
 
+  function requireMembership() {
+    if (!user) { navigateTo("account"); setAccountStatus("Sign in before using meal planning tools."); return false; }
+    if (!user.hasAccess) { navigateTo("plans"); setAccountStatus("Choose a membership to unlock meal planning and exports."); return false; }
+    return true;
+  }
+
   function navigateTo(nextView: View) {
+    if (["meals", "list"].includes(nextView) && authLoaded) {
+      if (!user) { nextView = "account"; setAccountStatus("Sign in before using meal planning tools."); }
+      else if (!user.hasAccess) { nextView = "plans"; setAccountStatus("Choose a membership to unlock meal planning and exports."); }
+    }
+    if (nextView === "family" && authLoaded && !user) { nextView = "account"; setAccountStatus("Sign in before adding family preferences."); }
     setView(nextView);
     const nextHash = `#${nextView}`;
     if (window.location.hash !== nextHash) window.history.pushState(null, "", nextHash);
@@ -1120,7 +1171,7 @@ export default function Home() {
         <aside className="export-panel">
           <span className="mini-label">READY WHEN YOU ARE</span><h3>Take your plan with you</h3><p>Send lists, recipes, and reminders where you already use them.</p>
           {!ingredientsReviewed && <p className="review-required">Confirm the merged ingredient list to unlock exports.</p>}
-          <button disabled={!ingredientsReviewed} onClick={copyForReminders}><span className="icon-centered" aria-hidden="true">✓</span><div><strong>Apple Reminders</strong><small>Copy this grocery list</small></div><b>Copy</b></button>
+          <button disabled={!ingredientsReviewed} onClick={shareGroceryList}><span className="icon-centered" aria-hidden="true">↗</span><div><strong>Share grocery list</strong><small>Send to Notes, Reminders, Keep, or another app</small></div><b>Share</b></button>
           <div className="calendar-export"><label htmlFor="calendar-order">Calendar recipe order</label><select id="calendar-order" value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle within each meal type</option></select><button disabled={!ingredientsReviewed} onClick={downloadCalendar}><span className="icon-centered" aria-hidden="true">31</span><div><strong>Google or Apple Calendar</strong><small>Recipes appear on their scheduled dates</small></div><b>Export</b></button></div>
           <div className="email-export"><input type="email" aria-label="Email address for recipe export" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" /><button disabled={!ingredientsReviewed} onClick={emailRecipes}><span className="icon-centered" aria-hidden="true">@</span><div><strong>Email me recipes</strong><small>Send the complete plan</small></div><b>Email</b></button></div>
           {exportStatus && <p className="export-status" aria-live="polite">{exportStatus}</p>}
@@ -1153,14 +1204,14 @@ export default function Home() {
           <button className="outline" onClick={async () => { await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, planStartDate, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, maxTime, skill, exclusions } }) }); setAccountStatus("Profile saved."); }}>Save profile</button>{accountStatus && <span className="success-note" role="status">{accountStatus}</span>}
         </section>
         <section className="settings-card security-card"><div className="icon-centered" aria-hidden="true">🔒</div><div><h3>Security</h3><p>Your email is verified. Your session is stored in a secure, HTTP-only cookie, protected data is checked on the server, and sensitive service keys never reach your browser.</p></div></section>
-        <section className="settings-card plan-row"><div><span className="mini-label">ACCESS STATUS</span><h3>{user.billingExempt ? "Billing exempt" : user.accessStatus === "complimentary" ? "Complimentary account" : user.subscriptionStatus === "active" ? "Active membership" : user.subscriptionStatus === "trialing" ? "30-day free trial" : "30-day free trial"}</h3><p>{user.complimentaryUntil ? `Complimentary through ${user.complimentaryUntil}` : user.subscriptionEndsAt ? `Current period ends ${new Date(user.subscriptionEndsAt).toLocaleDateString()}` : "Choose monthly or yearly billing when you’re ready."}</p></div>{user.subscriptionStatus ? <button className="primary compact" disabled={billingBusy} onClick={() => openBilling("portal")}>Manage billing</button> : <button className="primary compact" onClick={() => navigateTo("plans")}>View plans</button>}</section>
+        <section className="settings-card plan-row"><div><span className="mini-label">ACCESS STATUS</span><h3>{user.billingExempt ? "Billing exempt" : user.accessStatus === "complimentary" ? "Complimentary account" : user.subscriptionStatus === "active" ? "Active membership" : user.subscriptionStatus === "trialing" ? "30-day free trial" : "Plan required"}</h3><p>{user.complimentaryUntil ? `Complimentary through ${user.complimentaryUntil}` : user.subscriptionEndsAt ? `Current period ends ${new Date(user.subscriptionEndsAt).toLocaleDateString()}` : user.hasAccess ? "Your Grocer-Eaze tools are unlocked." : "Choose monthly or yearly billing to start your 30-day trial."}</p></div>{user.subscriptionStatus ? <button className="primary compact" disabled={billingBusy} onClick={() => openBilling("portal")}>Manage billing</button> : <button className="primary compact" onClick={() => navigateTo("plans")}>View plans</button>}</section>
         <section className="settings-card danger-zone"><h3>Account controls</h3><button className="outline" onClick={async () => { await fetch("/api/auth/signout", { method: "POST" }); setUser(null); setAuthStep("details"); }}>Sign out</button></section>
       </div>}
     </div>}
 
     {view === "admin" && user?.role === "admin" && <div className="dashboard" id="page-content"><div className="page-heading"><div><p className="eyebrow">SECURE ADMIN CONSOLE</p><h2>User access management</h2><p>Grant free access, exempt billing, suspend accounts, and manage administrators.</p></div></div><section className="admin-toolbar"><input className="text-input" aria-label="Search users by name or email" placeholder="Search name or email" value={adminSearch} onChange={(e) => setAdminSearch(e.target.value)} /><button className="outline" onClick={() => loadAdminUsers()}>Search</button></section>{accountStatus && <p className="checkout-note" role="status">{accountStatus}</p>}<div className="admin-list">{adminUsers.map((account) => <article className="admin-user" key={account.id}><div><strong>{account.name}</strong><small>{account.email}{account.phone ? ` · ${account.phone}` : ""}</small></div><div className="access-badges"><span>{account.role}</span><span>{account.access_status}</span>{Boolean(account.billing_exempt) && <span>billing exempt</span>}</div><div className="admin-actions"><button onClick={() => adminAction(account.id, account.access_status === "complimentary" ? "revoke_complimentary" : "grant_complimentary")}>{account.access_status === "complimentary" ? "Remove free access" : "Give free access"}</button><button onClick={() => adminAction(account.id, account.billing_exempt ? "billing_required" : "billing_exempt")}>{account.billing_exempt ? "Require payment" : "Turn off payment"}</button><button onClick={() => adminAction(account.id, account.access_status === "suspended" ? "activate" : "suspend")}>{account.access_status === "suspended" ? "Reactivate" : "Suspend"}</button><button onClick={() => adminAction(account.id, account.role === "admin" ? "remove_admin" : "make_admin")}>{account.role === "admin" ? "Remove admin" : "Make admin"}</button></div></article>)}</div>{adminUsers.length === 0 && <p className="empty-state">No users to show yet. Search or wait for the first signup.</p>}</div>}
 
-    {view === "plans" && <div className="dashboard narrow" id="page-content"><div className="page-heading"><div><p className="eyebrow">SIMPLE PRICING</p><h2>Try everything free for 30 days.</h2><p>Secure checkout is handled by Stripe. Cancel any time before the trial ends.</p></div></div><div className="pricing-grid"><article className="price-card"><span>MONTHLY</span><h3><b>$10</b> / month</h3><p>Flexible month-to-month access.</p><button disabled={billingBusy} onClick={() => openBilling("checkout", "monthly")}>{billingBusy ? "Opening secure checkout…" : "Start 30-day trial"}</button></article><article className="price-card featured"><span>BEST VALUE · SAVE $21</span><h3><b>$99</b> / year</h3><p>Everything included, billed annually after your trial.</p><button disabled={billingBusy} onClick={() => openBilling("checkout", "yearly")}>{billingBusy ? "Opening secure checkout…" : "Start 30-day trial"}</button></article></div>{accountStatus && <p className="checkout-note" role="status">{accountStatus}</p>}<button className="outline back-button" onClick={() => navigateTo("account")}>← Back to account</button></div>}
+    {view === "plans" && <div className="dashboard narrow" id="page-content"><div className="page-heading"><div><p className="eyebrow">SIMPLE PRICING</p><h2>Try everything free for 30 days.</h2><p>Secure checkout is handled by Stripe. Cancel any time before the trial ends.</p></div></div><div className="pricing-grid"><article className="price-card"><span>MONTHLY</span><h3><b>$10</b> / month</h3><p>Flexible month-to-month access.</p><button disabled={billingBusy} onClick={() => openBilling("checkout", "monthly")}>{billingBusy ? "Opening secure checkout…" : "Start 30-day trial"}</button></article><article className="price-card featured"><span>BEST VALUE · SAVE $71</span><h3><b>$49</b> / year</h3><p>Everything included, billed annually after your trial.</p><button disabled={billingBusy} onClick={() => openBilling("checkout", "yearly")}>{billingBusy ? "Opening secure checkout…" : "Start 30-day trial"}</button></article></div>{accountStatus && <p className="checkout-note" role="status">{accountStatus}</p>}<button className="outline back-button" onClick={() => navigateTo("account")}>← Back to account</button></div>}
     {view === "accessibility" && <div className="dashboard narrow accessibility-page" id="page-content" tabIndex={-1}>
       <div className="page-heading"><div><p className="eyebrow">ACCESSIBILITY AT GROCER-EAZE</p><h2>Meal planning should work for everyone.</h2><p>We’re committed to an experience people can use with a keyboard, screen reader, magnification, voice control, or other assistive technology.</p></div></div>
       <div className="accessibility-grid">

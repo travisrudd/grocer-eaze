@@ -43,7 +43,7 @@ export const users = sqliteTable("users", {
   name: text("name").notNull(),
   phone: text("phone").notNull().default(""),
   role: text("role").notNull().default("user"),
-  accessStatus: text("access_status").notNull().default("trial"),
+  accessStatus: text("access_status").notNull().default("pending"),
   trialEndsAt: text("trial_ends_at"),
   complimentaryUntil: text("complimentary_until"),
   billingExempt: integer("billing_exempt").notNull().default(0),

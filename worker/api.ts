@@ -9,8 +9,9 @@ type AppEnv = {
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_MONTHLY_PRICE_ID?: string;
   STRIPE_YEARLY_PRICE_ID?: string;
+  PEXELS_API_KEY?: string;
 };
-import { getSessionUser, handleAuthRequest } from "./auth";
+import { getSessionUser, handleAuthRequest, hasProductAccess } from "./auth";
 import { handleBillingRequest } from "./billing";
 
 const preferredSources = ["allrecipes.com", "foodnetwork.com", "eatingwell.com", "seriouseats.com", "simplyrecipes.com"];
@@ -82,6 +83,64 @@ function escapeHtml(value: string) {
     '"': "&quot;",
     "'": "&#039;",
   })[character] || character);
+}
+
+function safeHttpUrl(value: unknown) {
+  try {
+    const parsed = new URL(String(value || ""));
+    return ["http:", "https:"].includes(parsed.protocol) ? parsed.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function metaImage(html: string, pageUrl: string) {
+  const tags = html.match(/<meta\b[^>]*>/gi) || [];
+  for (const tag of tags) {
+    const attributes = Object.fromEntries([...tag.matchAll(/([\w:-]+)\s*=\s*["']([^"']*)["']/g)].map((match) => [match[1].toLowerCase(), match[2]]));
+    const key = String(attributes.property || attributes.name || "").toLowerCase();
+    if (!["og:image", "og:image:url", "twitter:image", "twitter:image:src"].includes(key) || !attributes.content) continue;
+    try {
+      const image = new URL(attributes.content, pageUrl);
+      if (["http:", "https:"].includes(image.protocol)) return image.toString();
+    } catch { /* Try the next image metadata tag. */ }
+  }
+  return "";
+}
+
+async function recipeImageResponse(url: URL, env: AppEnv) {
+  const source = safeHttpUrl(url.searchParams.get("source"));
+  const fallback = safeHttpUrl(url.searchParams.get("fallback"));
+  const title = String(url.searchParams.get("title") || "recipe").trim().slice(0, 120);
+  let resolved = "";
+
+  if (source) {
+    const host = new URL(source).hostname.replace(/^www\./, "");
+    if (preferredSources.some((allowed) => host === allowed || host.endsWith(`.${allowed}`))) {
+      try {
+        const page = await fetch(source, { headers: { "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)", Accept: "text/html" }, redirect: "follow" });
+        if (page.ok) resolved = metaImage((await page.text()).slice(0, 750_000), page.url || source);
+      } catch { /* Continue to the provider image or licensed fallback. */ }
+    }
+  }
+
+  if (!resolved && env.PEXELS_API_KEY) {
+    try {
+      const response = await fetch(`https://api.pexels.com/v1/search?${new URLSearchParams({ query: `${title} dish`, per_page: "1", orientation: "landscape" })}`, {
+        headers: { Authorization: env.PEXELS_API_KEY, "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)" },
+      });
+      const data = await response.json() as { photos?: Array<{ src?: { large?: string; medium?: string } }> };
+      resolved = safeHttpUrl(data.photos?.[0]?.src?.large || data.photos?.[0]?.src?.medium);
+    } catch { /* The existing food icon remains the final visual fallback. */ }
+  }
+
+  if (!resolved && fallback) {
+    const host = new URL(fallback).hostname.replace(/^www\./, "");
+    if (host === "spoonacular.com" || host.endsWith(".spoonacular.com")) resolved = fallback;
+  }
+
+  if (!resolved) return new Response(null, { status: 404, headers: { "Cache-Control": "public, max-age=3600" } });
+  return new Response(null, { status: 302, headers: { Location: resolved, "Cache-Control": "public, max-age=86400" } });
 }
 
 async function ensureSchema(db: D1Database) {
@@ -192,12 +251,9 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
   const authResponse = await handleAuthRequest(request, env);
   if (authResponse) return authResponse;
   const sessionUser = await getSessionUser(request, env);
-  const ownerId = sessionUser?.id || request.headers.get("x-grocer-owner") || "";
   if (url.pathname === "/api/health") return json({ ok: true });
-  if (url.pathname === "/api/recipes/search" && request.method === "GET") return searchRecipes(url, env);
   if (url.pathname === "/api/location/search" && request.method === "GET") return locationLookup(url);
   if (url.pathname === "/api/location/reverse" && request.method === "GET") return locationLookup(url, true);
-  if (url.pathname === "/api/calendar" && request.method === "POST") return calendarResponse(await request.json());
   if (url.pathname === "/api/accessibility-feedback" && request.method === "POST") {
     const body = await request.json() as { name?: string; email?: string; details?: string; website?: string };
     if (body.website) return json({ sent: true });
@@ -225,7 +281,16 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
     if (!sent.ok) return json({ error: "We couldn’t send your feedback. Please try again." }, 502);
     return json({ sent: true });
   }
-  if (!ownerId) return json({ error: "Missing household identifier." }, 400);
+
+  const paidPaths = new Set(["/api/recipes/search", "/api/recipe-image", "/api/calendar", "/api/favorites", "/api/ratings", "/api/email"]);
+  if (paidPaths.has(url.pathname) && !sessionUser) return json({ error: "Sign in and choose a membership to continue.", code: "PAYMENT_REQUIRED" }, 401);
+  if (paidPaths.has(url.pathname) && !hasProductAccess(sessionUser)) return json({ error: "An active membership or trial is required.", code: "PAYMENT_REQUIRED" }, 402);
+  if (url.pathname === "/api/recipes/search" && request.method === "GET") return searchRecipes(url, env);
+  if (url.pathname === "/api/recipe-image" && request.method === "GET") return recipeImageResponse(url, env);
+  if (url.pathname === "/api/calendar" && request.method === "POST") return calendarResponse(await request.json());
+
+  if (!sessionUser) return json({ error: "Sign in to access household information." }, 401);
+  const ownerId = sessionUser.id;
   await ensureSchema(env.DB);
 
   if (url.pathname === "/api/profile") {
@@ -294,7 +359,17 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
 
   if (url.pathname === "/api/email" && request.method === "POST") {
     if (!env.RESEND_API_KEY || !env.EMAIL_FROM) return json({ error: "Email delivery is not configured yet." }, 503);
-    const body = await request.json() as { to: string; subject: string; html: string };
+    const body = await request.json() as { to?: string; subject?: string; meals?: Array<{ day?: string; title?: string; detail?: string; time?: string; sourceUrl?: string }> };
+    const to = String(body.to || "").trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return json({ error: "Enter a valid email address." }, 400);
+    const meals = Array.isArray(body.meals) ? body.meals.slice(0, 100) : [];
+    if (!meals.length) return json({ error: "Add at least one recipe before emailing your plan." }, 400);
+    const html = `<h1>Your meal plan</h1>${meals.map((meal) => {
+      const title = escapeHtml(String(meal.title || "Recipe"));
+      const recipeUrl = safeHttpUrl(meal.sourceUrl);
+      const linkedTitle = recipeUrl ? `<a href="${escapeHtml(recipeUrl)}">${title}</a>` : title;
+      return `<h2>${escapeHtml(String(meal.day || "Meal"))}: ${linkedTitle}</h2><p>${escapeHtml(String(meal.detail || ""))} · ${escapeHtml(String(meal.time || ""))}</p>`;
+    }).join("")}`;
     const sent = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
@@ -302,7 +377,7 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
         "Content-Type": "application/json",
         "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)",
       },
-      body: JSON.stringify({ from: env.EMAIL_FROM, to: [body.to], subject: body.subject, html: body.html }),
+      body: JSON.stringify({ from: env.EMAIL_FROM, to: [to], subject: String(body.subject || "My Grocer-Eaze recipes"), html }),
     });
     return json(await sent.json(), sent.status);
   }

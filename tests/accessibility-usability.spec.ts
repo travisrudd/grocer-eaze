@@ -39,18 +39,14 @@ test("supports keyboard navigation and a working skip link", async ({ page }) =>
   await expect(page.locator(":focus")).toBeVisible();
 });
 
-test("primary navigation and empty states always offer a next step", async ({ page }) => {
+test("paid navigation directs signed-out visitors to a clear next step", async ({ page }) => {
   await openPlan(page);
 
   await page.getByRole("button", { name: "Grocery list" }).click();
-  await expect(page.getByRole("heading", { name: "Your grocery list starts with a meal." })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Build my plan" })).toBeEnabled();
+  await expect(page.getByRole("heading", { name: "Create your account" })).toBeVisible();
+  await expect(page.getByText("Sign in before using meal planning tools.")).toBeVisible();
 
   await page.getByRole("button", { name: "Family" }).click();
-  await expect(page.getByRole("heading", { name: "Your family, thoughtfully fed." })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Add family member" })).toBeEnabled();
-
-  await page.getByRole("button", { name: "Open profile" }).click();
   await expect(page.getByRole("heading", { name: "Create your account" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Continue with email" })).toBeDisabled();
 });
@@ -72,6 +68,13 @@ test("the recipe catalog loads progressively and filters remain usable", async (
   }));
   await page.route("**/api/recipes/search?*", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ recipes }) });
+  });
+  await page.route("**/api/auth/me", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ user: {
+      id: "test-user", name: "Test User", email: "test@example.com", phone: "", role: "user",
+      accessStatus: "active", complimentaryUntil: null, billingExempt: false,
+      subscriptionStatus: "active", subscriptionEndsAt: null, hasAccess: true,
+    } }) });
   });
 
   await openPlan(page);

@@ -6,7 +6,7 @@ type AuthEnv = {
   INITIAL_ADMIN_EMAIL?: string;
 };
 
-type SessionUser = {
+export type SessionUser = {
   id: string;
   name: string;
   email: string;
@@ -17,9 +17,20 @@ type SessionUser = {
   billingExempt: boolean;
   subscriptionStatus: string | null;
   subscriptionEndsAt: string | null;
+  hasAccess: boolean;
 };
 
 const cookieName = "grocer_eaze_session";
+
+export function hasProductAccess(user: Omit<SessionUser, "hasAccess"> | SessionUser | null) {
+  if (!user || user.accessStatus === "suspended") return false;
+  if (user.role === "admin" || user.billingExempt) return true;
+  if (user.accessStatus === "complimentary") {
+    if (!user.complimentaryUntil || new Date(user.complimentaryUntil).getTime() > Date.now()) return true;
+  }
+  return ["active", "trialing"].includes(user.subscriptionStatus || "")
+    || ["active", "trialing"].includes(user.accessStatus);
+}
 
 function response(value: unknown, status = 200, headers?: HeadersInit) {
   return Response.json(value, { status, headers: { "Cache-Control": "no-store", ...headers } });
@@ -36,7 +47,7 @@ function cookies(request: Request) {
 
 export async function ensureAuthSchema(db: D1Database) {
   await db.batch([
-    db.prepare("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'user', access_status TEXT NOT NULL DEFAULT 'trial', trial_ends_at TEXT, complimentary_until TEXT, billing_exempt INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'user', access_status TEXT NOT NULL DEFAULT 'pending', trial_ends_at TEXT, complimentary_until TEXT, billing_exempt INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE INDEX IF NOT EXISTS users_email_idx ON users(email)"),
     db.prepare("CREATE TABLE IF NOT EXISTS auth_codes (email TEXT PRIMARY KEY, code_hash TEXT NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', expires_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)"),
@@ -52,13 +63,14 @@ export async function getSessionUser(request: Request, env: AuthEnv): Promise<Se
   const tokenHash = await digest(token);
   const row = await env.DB.prepare("SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?").bind(tokenHash, new Date().toISOString()).first();
   if (!row) return null;
-  return {
+  const user: Omit<SessionUser, "hasAccess"> = {
     id: String(row.id), name: String(row.name), email: String(row.email), phone: String(row.phone || ""),
     role: row.role === "admin" ? "admin" : "user", accessStatus: String(row.access_status),
     complimentaryUntil: row.complimentary_until ? String(row.complimentary_until) : null, billingExempt: Boolean(row.billing_exempt),
     subscriptionStatus: row.subscription_status ? String(row.subscription_status) : null,
     subscriptionEndsAt: row.subscription_ends_at ? String(row.subscription_ends_at) : null,
   };
+  return { ...user, hasAccess: hasProductAccess(user) };
 }
 
 async function sendCode(email: string, code: string, env: AuthEnv) {
@@ -113,7 +125,7 @@ export async function handleAuthRequest(request: Request, env: AuthEnv): Promise
     const id = existing ? String(existing.id) : crypto.randomUUID();
     const adminEmail = (env.INITIAL_ADMIN_EMAIL || "").toLowerCase();
     await env.DB.prepare("INSERT INTO users(id,email,name,phone,role,access_status,trial_ends_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET name=excluded.name, phone=excluded.phone, role=CASE WHEN excluded.email = ? THEN 'admin' ELSE users.role END, updated_at=excluded.updated_at")
-      .bind(id, email, record.name, record.phone, email === adminEmail ? "admin" : "user", "trial", new Date(now.getTime() + 30 * 86400_000).toISOString(), now.toISOString(), now.toISOString(), adminEmail).run();
+      .bind(id, email, record.name, record.phone, email === adminEmail ? "admin" : "user", "pending", null, now.toISOString(), now.toISOString(), adminEmail).run();
     const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
     const token = [...tokenBytes].map((item) => item.toString(16).padStart(2, "0")).join("");
     await env.DB.prepare("INSERT INTO sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)").bind(await digest(token), id, new Date(now.getTime() + 30 * 86400_000).toISOString(), now.toISOString()).run();
@@ -143,7 +155,7 @@ export async function handleAuthRequest(request: Request, env: AuthEnv): Promise
     if (!allowed.includes(String(body.action))) return response({ error: "Unsupported action." }, 400);
     if (body.userId === admin.id && ["suspend", "remove_admin"].includes(String(body.action))) return response({ error: "Administrators cannot suspend themselves or remove their own administrator role." }, 400);
     const updates: Record<string, string | number | null> = {
-      grant_complimentary: "complimentary", revoke_complimentary: "trial", suspend: "suspended", activate: "active",
+      grant_complimentary: "complimentary", revoke_complimentary: "pending", suspend: "suspended", activate: "active",
       make_admin: "admin", remove_admin: "user",
     };
     if (body.action === "billing_exempt" || body.action === "billing_required") {
