@@ -9,6 +9,8 @@ interface Env {
   SPOONACULAR_API_KEY?: string;
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
+  AUTH_SECRET?: string;
+  INITIAL_ADMIN_EMAIL?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {

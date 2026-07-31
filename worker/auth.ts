@@ -1,0 +1,161 @@
+type AuthEnv = {
+  DB: D1Database;
+  RESEND_API_KEY?: string;
+  EMAIL_FROM?: string;
+  AUTH_SECRET?: string;
+  INITIAL_ADMIN_EMAIL?: string;
+};
+
+type SessionUser = {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  role: "user" | "admin";
+  accessStatus: string;
+  complimentaryUntil: string | null;
+  billingExempt: boolean;
+};
+
+const cookieName = "grocer_eaze_session";
+
+function response(value: unknown, status = 200, headers?: HeadersInit) {
+  return Response.json(value, { status, headers: { "Cache-Control": "no-store", ...headers } });
+}
+
+async function digest(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((item) => item.toString(16).padStart(2, "0")).join("");
+}
+
+function cookies(request: Request) {
+  return Object.fromEntries((request.headers.get("cookie") || "").split(";").map((item) => item.trim().split("=")).filter(([key]) => key));
+}
+
+export async function ensureAuthSchema(db: D1Database) {
+  await db.batch([
+    db.prepare("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'user', access_status TEXT NOT NULL DEFAULT 'trial', trial_ends_at TEXT, complimentary_until TEXT, billing_exempt INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS users_email_idx ON users(email)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS auth_codes (email TEXT PRIMARY KEY, code_hash TEXT NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', expires_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS admin_audit_log (id TEXT PRIMARY KEY, admin_user_id TEXT NOT NULL, target_user_id TEXT NOT NULL, action TEXT NOT NULL, detail_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)"),
+  ]);
+}
+
+export async function getSessionUser(request: Request, env: AuthEnv): Promise<SessionUser | null> {
+  const token = cookies(request)[cookieName];
+  if (!token) return null;
+  await ensureAuthSchema(env.DB);
+  const tokenHash = await digest(token);
+  const row = await env.DB.prepare("SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?").bind(tokenHash, new Date().toISOString()).first();
+  if (!row) return null;
+  return {
+    id: String(row.id), name: String(row.name), email: String(row.email), phone: String(row.phone || ""),
+    role: row.role === "admin" ? "admin" : "user", accessStatus: String(row.access_status),
+    complimentaryUntil: row.complimentary_until ? String(row.complimentary_until) : null, billingExempt: Boolean(row.billing_exempt),
+  };
+}
+
+async function sendCode(email: string, code: string, env: AuthEnv) {
+  if (!env.RESEND_API_KEY || !env.EMAIL_FROM) throw new Error("Email delivery is unavailable.");
+  const sent = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json", "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)" },
+    body: JSON.stringify({ from: env.EMAIL_FROM, to: [email], subject: `${code} is your Grocer-Eaze sign-in code`, html: `<h1>Your sign-in code is ${code}</h1><p>It expires in 10 minutes. If you did not request this, you can ignore this email.</p>` }),
+  });
+  if (!sent.ok) throw new Error("Could not send verification email.");
+}
+
+export async function handleAuthRequest(request: Request, env: AuthEnv): Promise<Response | null> {
+  const url = new URL(request.url);
+  if (!url.pathname.startsWith("/api/auth/") && !url.pathname.startsWith("/api/admin/")) return null;
+  await ensureAuthSchema(env.DB);
+
+  if (url.pathname === "/api/auth/me" && request.method === "GET") return response({ user: await getSessionUser(request, env) });
+
+  if (url.pathname === "/api/auth/start" && request.method === "POST") {
+    if (!env.AUTH_SECRET) return response({ error: "Secure signup is being configured. Please try again shortly." }, 503);
+    const body = await request.json() as { name?: string; email?: string; phone?: string };
+    const email = String(body.email || "").trim().toLowerCase();
+    const name = String(body.name || "").trim();
+    const phone = String(body.phone || "").trim();
+    if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || phone.length > 30) return response({ error: "Enter a valid name and email." }, 400);
+    const recent = await env.DB.prepare("SELECT created_at FROM auth_codes WHERE email = ?").bind(email).first();
+    if (recent && Date.now() - new Date(String(recent.created_at)).getTime() < 60_000) return response({ error: "Please wait a minute before requesting another code." }, 429);
+    const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0");
+    const codeHash = await digest(`${email}:${code}:${env.AUTH_SECRET}`);
+    const now = new Date();
+    await env.DB.prepare("INSERT OR REPLACE INTO auth_codes(email, code_hash, name, phone, expires_at, attempts, created_at) VALUES(?,?,?,?,?,?,?)")
+      .bind(email, codeHash, name, phone, new Date(now.getTime() + 10 * 60_000).toISOString(), 0, now.toISOString()).run();
+    await sendCode(email, code, env);
+    return response({ sent: true });
+  }
+
+  if (url.pathname === "/api/auth/verify" && request.method === "POST") {
+    if (!env.AUTH_SECRET) return response({ error: "Secure signup is being configured. Please try again shortly." }, 503);
+    const body = await request.json() as { email?: string; code?: string };
+    const email = String(body.email || "").trim().toLowerCase();
+    const code = String(body.code || "").trim();
+    const record = await env.DB.prepare("SELECT * FROM auth_codes WHERE email = ?").bind(email).first();
+    if (!record || new Date(String(record.expires_at)).getTime() < Date.now() || Number(record.attempts) >= 5) return response({ error: "That code expired. Request a new one." }, 400);
+    const expected = await digest(`${email}:${code}:${env.AUTH_SECRET}`);
+    if (expected !== record.code_hash) {
+      await env.DB.prepare("UPDATE auth_codes SET attempts = attempts + 1 WHERE email = ?").bind(email).run();
+      return response({ error: "That code is incorrect." }, 400);
+    }
+    const now = new Date();
+    const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
+    const id = existing ? String(existing.id) : crypto.randomUUID();
+    const adminEmail = (env.INITIAL_ADMIN_EMAIL || "").toLowerCase();
+    await env.DB.prepare("INSERT INTO users(id,email,name,phone,role,access_status,trial_ends_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET name=excluded.name, phone=excluded.phone, role=CASE WHEN excluded.email = ? THEN 'admin' ELSE users.role END, updated_at=excluded.updated_at")
+      .bind(id, email, record.name, record.phone, email === adminEmail ? "admin" : "user", "trial", new Date(now.getTime() + 30 * 86400_000).toISOString(), now.toISOString(), now.toISOString(), adminEmail).run();
+    const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
+    const token = [...tokenBytes].map((item) => item.toString(16).padStart(2, "0")).join("");
+    await env.DB.prepare("INSERT INTO sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)").bind(await digest(token), id, new Date(now.getTime() + 30 * 86400_000).toISOString(), now.toISOString()).run();
+    await env.DB.prepare("DELETE FROM auth_codes WHERE email = ?").bind(email).run();
+    return response({ verified: true }, 200, { "Set-Cookie": `${cookieName}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000` });
+  }
+
+  if (url.pathname === "/api/auth/signout" && request.method === "POST") {
+    const token = cookies(request)[cookieName];
+    if (token) await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await digest(token)).run();
+    return response({ signedOut: true }, 200, { "Set-Cookie": `${cookieName}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0` });
+  }
+
+  const admin = await getSessionUser(request, env);
+  if (!admin || admin.role !== "admin") return response({ error: "Administrator access required." }, 403);
+
+  if (url.pathname === "/api/admin/users" && request.method === "GET") {
+    const query = `%${url.searchParams.get("q") || ""}%`;
+    const result = await env.DB.prepare("SELECT id,email,name,phone,role,access_status,trial_ends_at,complimentary_until,billing_exempt,created_at FROM users WHERE email LIKE ? OR name LIKE ? ORDER BY created_at DESC LIMIT 100").bind(query, query).all();
+    return response({ users: result.results });
+  }
+
+  if (url.pathname === "/api/admin/users" && request.method === "PATCH") {
+    const body = await request.json() as { userId?: string; action?: string; until?: string | null };
+    if (!body.userId) return response({ error: "A user is required." }, 400);
+    const allowed = ["grant_complimentary", "revoke_complimentary", "billing_exempt", "billing_required", "suspend", "activate", "make_admin", "remove_admin"];
+    if (!allowed.includes(String(body.action))) return response({ error: "Unsupported action." }, 400);
+    if (body.userId === admin.id && ["suspend", "remove_admin"].includes(String(body.action))) return response({ error: "Administrators cannot suspend themselves or remove their own administrator role." }, 400);
+    const updates: Record<string, string | number | null> = {
+      grant_complimentary: "complimentary", revoke_complimentary: "trial", suspend: "suspended", activate: "active",
+      make_admin: "admin", remove_admin: "user",
+    };
+    if (body.action === "billing_exempt" || body.action === "billing_required") {
+      await env.DB.prepare("UPDATE users SET billing_exempt = ?, updated_at = ? WHERE id = ?").bind(body.action === "billing_exempt" ? 1 : 0, new Date().toISOString(), body.userId).run();
+    } else if (body.action === "make_admin" || body.action === "remove_admin") {
+      await env.DB.prepare("UPDATE users SET role = ?, updated_at = ? WHERE id = ?").bind(updates[body.action], new Date().toISOString(), body.userId).run();
+    } else {
+      await env.DB.prepare("UPDATE users SET access_status = ?, complimentary_until = ?, updated_at = ? WHERE id = ?").bind(updates[body.action], body.action === "grant_complimentary" ? body.until || null : null, new Date().toISOString(), body.userId).run();
+    }
+    await env.DB.prepare("INSERT INTO admin_audit_log(id,admin_user_id,target_user_id,action,detail_json,created_at) VALUES(?,?,?,?,?,?)").bind(crypto.randomUUID(), admin.id, body.userId, body.action, JSON.stringify({ until: body.until || null }), new Date().toISOString()).run();
+    return response({ saved: true });
+  }
+
+  if (url.pathname === "/api/admin/audit" && request.method === "GET") {
+    const result = await env.DB.prepare("SELECT a.*, u.email AS target_email FROM admin_audit_log a LEFT JOIN users u ON u.id = a.target_user_id ORDER BY a.created_at DESC LIMIT 100").all();
+    return response({ events: result.results });
+  }
+  return response({ error: "Not found." }, 404);
+}

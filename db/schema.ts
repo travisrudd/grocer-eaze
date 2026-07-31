@@ -36,3 +36,43 @@ export const recipeRatings = sqliteTable("recipe_ratings", {
   ease: integer("ease").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
+
+export const users = sqliteTable("users", {
+  id: text("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  name: text("name").notNull(),
+  phone: text("phone").notNull().default(""),
+  role: text("role").notNull().default("user"),
+  accessStatus: text("access_status").notNull().default("trial"),
+  trialEndsAt: text("trial_ends_at"),
+  complimentaryUntil: text("complimentary_until"),
+  billingExempt: integer("billing_exempt").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const authCodes = sqliteTable("auth_codes", {
+  email: text("email").primaryKey(),
+  codeHash: text("code_hash").notNull(),
+  name: text("name").notNull(),
+  phone: text("phone").notNull().default(""),
+  expiresAt: text("expires_at").notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+});
+
+export const sessions = sqliteTable("sessions", {
+  tokenHash: text("token_hash").primaryKey(),
+  userId: text("user_id").notNull(),
+  expiresAt: text("expires_at").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+export const adminAuditLog = sqliteTable("admin_audit_log", {
+  id: text("id").primaryKey(),
+  adminUserId: text("admin_user_id").notNull(),
+  targetUserId: text("target_user_id").notNull(),
+  action: text("action").notNull(),
+  detailJson: text("detail_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull(),
+});

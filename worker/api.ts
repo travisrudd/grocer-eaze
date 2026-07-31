@@ -3,7 +3,10 @@ type AppEnv = {
   SPOONACULAR_API_KEY?: string;
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
+  AUTH_SECRET?: string;
+  INITIAL_ADMIN_EMAIL?: string;
 };
+import { getSessionUser, handleAuthRequest } from "./auth";
 
 const preferredSources = ["allrecipes.com", "foodnetwork.com", "eatingwell.com"];
 
@@ -82,7 +85,10 @@ function calendarResponse(body: { meals?: Array<{ title: string; detail?: string
 
 export async function handleApiRequest(request: Request, env: AppEnv): Promise<Response> {
   const url = new URL(request.url);
-  const ownerId = request.headers.get("x-grocer-owner") || "";
+  const authResponse = await handleAuthRequest(request, env);
+  if (authResponse) return authResponse;
+  const sessionUser = await getSessionUser(request, env);
+  const ownerId = sessionUser?.id || request.headers.get("x-grocer-owner") || "";
   if (url.pathname === "/api/health") return json({ ok: true });
   if (url.pathname === "/api/recipes/search" && request.method === "GET") return searchRecipes(url, env);
   if (url.pathname === "/api/location/search" && request.method === "GET") return locationLookup(url);

@@ -15,6 +15,13 @@
       "when": 1785465771775,
       "tag": "0001_amusing_legion",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785466268624,
+      "tag": "0002_lumpy_supreme_intelligence",
+      "breakpoints": true
     }
   ]
 }

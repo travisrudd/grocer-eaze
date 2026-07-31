@@ -9,6 +9,8 @@ type Meal = {
 type Member = { id: string; name: string; role: string; allergies: string; preferences?: { glutenFree?: boolean; lowDairy?: boolean; kidFriendly?: boolean } };
 type Rating = { quality: number; ease: number };
 type LocationResult = { label: string; lat?: string; lon?: string };
+type AccountUser = { id: string; name: string; email: string; phone: string; role: "user" | "admin"; accessStatus: string; complimentaryUntil: string | null; billingExempt: boolean };
+type AdminUser = { id: string; name: string; email: string; phone: string; role: string; access_status: string; trial_ends_at?: string; complimentary_until?: string; billing_exempt: number };
 
 const fallbackMeals: Meal[] = [
   { id: "demo-salmon", day: "MON", date: "12", kind: "Dinner", title: "Lemon Herb Salmon", detail: "with roasted asparagus & quinoa", time: "35 min", cost: "$4.80 / serving", tone: "salmon", emoji: "🐟" },
@@ -31,7 +33,7 @@ function Stars({ value, onChange, label }: { value: number; onChange: (value: nu
 }
 
 export default function Home() {
-  const [view, setView] = useState<"plan" | "meals" | "list" | "account" | "family" | "plans">("plan");
+  const [view, setView] = useState<"plan" | "meals" | "list" | "account" | "family" | "plans" | "admin">("plan");
   const [range, setRange] = useState("Week");
   const [mealType, setMealType] = useState("Lunch + dinner");
   const [people, setPeople] = useState(4);
@@ -63,6 +65,12 @@ export default function Home() {
   const [ratingMeal, setRatingMeal] = useState<Meal | null>(null);
   const [similarTo, setSimilarTo] = useState("");
   const [accountStatus, setAccountStatus] = useState("");
+  const [user, setUser] = useState<AccountUser | null>(null);
+  const [authStep, setAuthStep] = useState<"details" | "code">("details");
+  const [authForm, setAuthForm] = useState({ name: "", email: "", phone: "", code: "" });
+  const [authBusy, setAuthBusy] = useState(false);
+  const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
+  const [adminSearch, setAdminSearch] = useState("");
 
   const estimated = useMemo(() => Math.round(people * (range === "Day" ? 9 : range === "Week" ? 27 : 104)), [people, range]);
   const lunchCount = kidLunches && mealType !== "Dinner only" ? 5 : 0;
@@ -76,7 +84,8 @@ export default function Home() {
       fetch("/api/favorites", { headers: { "x-grocer-owner": id } }).then((r) => r.json()),
       fetch("/api/family", { headers: { "x-grocer-owner": id } }).then((r) => r.json()),
       fetch("/api/ratings", { headers: { "x-grocer-owner": id } }).then((r) => r.json()),
-    ]).then(([profileData, favoriteData, familyData, ratingData]) => {
+      fetch("/api/auth/me").then((r) => r.json()),
+    ]).then(([profileData, favoriteData, familyData, ratingData, authData]) => {
       if (profileData.profile) {
         setHousehold(profileData.profile.household_name); setPeople(profileData.profile.people);
         setLocation(profileData.profile.location); setLocationQuery(profileData.profile.location);
@@ -84,8 +93,38 @@ export default function Home() {
       if (favoriteData.favorites) setFavorites(favoriteData.favorites.map((recipe: { title: string }) => recipe.title));
       if (familyData.members) setMembers(familyData.members);
       if (ratingData.ratings) setRatings(Object.fromEntries(ratingData.ratings.map((r: { recipe_id: string; quality: number; ease: number }) => [r.recipe_id, { quality: r.quality, ease: r.ease }])));
+      if (authData.user) { setUser(authData.user); setEmail(authData.user.email); }
     }).catch(() => undefined);
   }, []);
+
+  async function startAuth() {
+    setAuthBusy(true); setAccountStatus("");
+    const result = await fetch("/api/auth/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(authForm) });
+    const data = await result.json(); setAuthBusy(false);
+    if (!result.ok) { setAccountStatus(data.error || "Could not send a code."); return; }
+    setAuthStep("code"); setAccountStatus(`We sent a six-digit code to ${authForm.email}.`);
+  }
+
+  async function verifyAuth() {
+    setAuthBusy(true); setAccountStatus("");
+    const result = await fetch("/api/auth/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: authForm.email, code: authForm.code }) });
+    const data = await result.json(); setAuthBusy(false);
+    if (!result.ok) { setAccountStatus(data.error || "That code could not be verified."); return; }
+    const me = await fetch("/api/auth/me").then((r) => r.json()); setUser(me.user); setEmail(me.user.email); setAccountStatus("Your secure account is ready.");
+  }
+
+  async function loadAdminUsers(query = adminSearch) {
+    const result = await fetch(`/api/admin/users?q=${encodeURIComponent(query)}`);
+    const data = await result.json();
+    if (result.ok) setAdminUsers(data.users || []); else setAccountStatus(data.error || "Admin access required.");
+  }
+
+  async function adminAction(userId: string, action: string) {
+    const result = await fetch("/api/admin/users", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ userId, action, until: null }) });
+    const data = await result.json();
+    setAccountStatus(result.ok ? "Account access updated and recorded in the audit log." : data.error || "Update failed.");
+    if (result.ok) await loadAdminUsers();
+  }
 
   useEffect(() => {
     if (locationQuery.trim().length < 3 || locationQuery === location) { setLocationResults([]); return; }
@@ -186,8 +225,9 @@ export default function Home() {
         <button className={view === "meals" ? "active" : ""} onClick={() => setView("meals")}>My meals</button>
         <button className={view === "list" ? "active" : ""} onClick={() => setView("list")}>Grocery list</button>
         <button className={view === "family" ? "active" : ""} onClick={() => setView("family")}>Family</button>
+        {user?.role === "admin" && <button className={view === "admin" ? "active" : ""} onClick={() => { setView("admin"); loadAdminUsers(); }}>Admin</button>}
       </nav>
-      <button className="avatar" aria-label="Open profile" onClick={() => setView("account")}>TR</button>
+      <button className="avatar" aria-label="Open profile" onClick={() => setView("account")}>{user ? user.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() : "ME"}</button>
     </header>
 
     {view === "plan" && <div className="shell">
@@ -226,7 +266,9 @@ export default function Home() {
 
     {view === "family" && <div className="dashboard narrow"><div className="page-heading"><div><p className="eyebrow">HOUSEHOLD PREFERENCES</p><h2>Your family, thoughtfully fed.</h2><p>Each person’s allergies and preferences shape every recommendation.</p></div></div><div className="family-grid"><section className="settings-card"><h3>Family members</h3>{members.length === 0 && <p className="empty-state">No family members yet. Add the first person below.</p>}{members.map((member) => <article className="member-card" key={member.id}><span className="member-avatar icon-centered">{member.name.slice(0, 1).toUpperCase()}</span><div><strong>{member.name}</strong><small>{member.role} · {member.allergies || "No listed allergies"}</small><p>{member.preferences?.glutenFree ? "Gluten-free · " : ""}{member.preferences?.lowDairy ? "Low dairy · " : ""}{member.preferences?.kidFriendly ? "Kid-friendly" : ""}</p></div><button onClick={() => deleteMember(member.id)} aria-label={`Remove ${member.name}`}>×</button></article>)}</section><section className="settings-card"><h3>Add a family member</h3><div className="field"><label>Name</label><input className="text-input" value={memberDraft.name} onChange={(e) => setMemberDraft({ ...memberDraft, name: e.target.value })} /></div><div className="field"><label>Role</label><select value={memberDraft.role} onChange={(e) => setMemberDraft({ ...memberDraft, role: e.target.value })}><option>Adult</option><option>Teen</option><option>Child</option></select></div><div className="field"><label>Allergies / avoid</label><input className="text-input" placeholder="Peanuts, shellfish…" value={memberDraft.allergies} onChange={(e) => setMemberDraft({ ...memberDraft, allergies: e.target.value })} /></div><Toggle label="Gluten-free" checked={memberDraft.glutenFree} onChange={() => setMemberDraft({ ...memberDraft, glutenFree: !memberDraft.glutenFree })} /><Toggle label="Low dairy" checked={memberDraft.lowDairy} onChange={() => setMemberDraft({ ...memberDraft, lowDairy: !memberDraft.lowDairy })} /><Toggle label="Kid-friendly" checked={memberDraft.kidFriendly} onChange={() => setMemberDraft({ ...memberDraft, kidFriendly: !memberDraft.kidFriendly })} /><button className="primary" onClick={addMember}>Add family member</button></section></div></div>}
 
-    {view === "account" && <div className="dashboard narrow"><div className="page-heading"><div><p className="eyebrow">PROFILE & SECURITY</p><h2>Account management</h2><p>Control your household, privacy, and plan.</p></div></div><div className="settings-stack"><section className="settings-card"><h3>Profile</h3><div className="two-col"><div className="field"><label>Household name</label><input className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /></div><div className="field"><label>Email for recipes</label><input className="text-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" /></div></div><button className="outline" onClick={async () => { await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ householdName: household, people, location, preferences: {} }) }); setAccountStatus("Profile saved."); }}>Save profile</button>{accountStatus && <span className="success-note">{accountStatus}</span>}</section><section className="settings-card security-card"><div className="icon-centered">🔒</div><div><h3>Security</h3><p>Your profile, family preferences, favorites, and ratings are stored separately under your private household identifier. API keys never reach your browser.</p></div></section><section className="settings-card plan-row"><div><span className="mini-label">CURRENT PLAN</span><h3>30-day free trial</h3><p>Choose monthly or yearly billing. You won’t be charged until the trial ends.</p></div><button className="primary compact" onClick={() => setView("plans")}>View plans</button></section><section className="settings-card danger-zone"><h3>Account controls</h3><button className="outline" onClick={() => { window.localStorage.removeItem("grocer-eaze-owner"); window.location.reload(); }}>Sign out of this device</button></section></div></div>}
+    {view === "account" && <div className="dashboard narrow"><div className="page-heading"><div><p className="eyebrow">PROFILE & SECURITY</p><h2>{user ? `Welcome, ${user.name}.` : "Create your account"}</h2><p>{user ? "Control your household, privacy, and plan." : "No password needed. We’ll verify your email with a one-time code."}</p></div></div>{!user ? <section className="settings-card auth-card"><div className="auth-trust"><span className="icon-centered">🔒</span><strong>Secure passwordless signup</strong><small>Only your name and verified email are required. Phone is optional.</small></div>{authStep === "details" ? <><div className="field"><label>Name</label><input className="text-input" autoComplete="name" value={authForm.name} onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })} /></div><div className="field"><label>Email</label><input className="text-input" type="email" autoComplete="email" value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} /></div><div className="field"><label>Phone <small>(optional)</small></label><input className="text-input" type="tel" autoComplete="tel" value={authForm.phone} onChange={(e) => setAuthForm({ ...authForm, phone: e.target.value })} /></div><button className="primary" disabled={authBusy} onClick={startAuth}>{authBusy ? "Sending code…" : "Continue with email"}</button></> : <><div className="field"><label>Six-digit verification code</label><input className="text-input code-input" inputMode="numeric" maxLength={6} value={authForm.code} onChange={(e) => setAuthForm({ ...authForm, code: e.target.value.replace(/\D/g, "") })} /></div><button className="primary" disabled={authBusy || authForm.code.length !== 6} onClick={verifyAuth}>{authBusy ? "Verifying…" : "Verify and create account"}</button><button className="text-button" onClick={() => setAuthStep("details")}>Use a different email</button></>}{accountStatus && <p className="checkout-note">{accountStatus}</p>}</section> : <div className="settings-stack"><section className="settings-card"><h3>Profile</h3><div className="account-identity"><span className="member-avatar icon-centered">{user.name[0].toUpperCase()}</span><div><strong>{user.name}</strong><small>{user.email}{user.phone ? ` · ${user.phone}` : ""}</small></div><em>{user.role}</em></div><div className="two-col"><div className="field"><label>Household name</label><input className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /></div><div className="field"><label>Email for recipes</label><input className="text-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div></div><button className="outline" onClick={async () => { await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ householdName: household, people, location, preferences: {} }) }); setAccountStatus("Profile saved."); }}>Save profile</button>{accountStatus && <span className="success-note">{accountStatus}</span>}</section><section className="settings-card security-card"><div className="icon-centered">🔒</div><div><h3>Security</h3><p>Your email is verified. Your session is stored in a secure, HTTP-only cookie, protected data is checked on the server, and sensitive service keys never reach your browser.</p></div></section><section className="settings-card plan-row"><div><span className="mini-label">ACCESS STATUS</span><h3>{user.billingExempt ? "Billing exempt" : user.accessStatus === "complimentary" ? "Complimentary account" : "30-day free trial"}</h3><p>{user.complimentaryUntil ? `Complimentary through ${user.complimentaryUntil}` : "Choose monthly or yearly billing when you’re ready."}</p></div><button className="primary compact" onClick={() => setView("plans")}>View plans</button></section><section className="settings-card danger-zone"><h3>Account controls</h3><button className="outline" onClick={async () => { await fetch("/api/auth/signout", { method: "POST" }); setUser(null); setAuthStep("details"); }}>Sign out</button></section></div>}</div>}
+
+    {view === "admin" && user?.role === "admin" && <div className="dashboard"><div className="page-heading"><div><p className="eyebrow">SECURE ADMIN CONSOLE</p><h2>User access management</h2><p>Grant free access, exempt billing, suspend accounts, and manage administrators.</p></div></div><section className="admin-toolbar"><input className="text-input" placeholder="Search name or email" value={adminSearch} onChange={(e) => setAdminSearch(e.target.value)} /><button className="outline" onClick={() => loadAdminUsers()}>Search</button></section>{accountStatus && <p className="checkout-note">{accountStatus}</p>}<div className="admin-list">{adminUsers.map((account) => <article className="admin-user" key={account.id}><div><strong>{account.name}</strong><small>{account.email}{account.phone ? ` · ${account.phone}` : ""}</small></div><div className="access-badges"><span>{account.role}</span><span>{account.access_status}</span>{Boolean(account.billing_exempt) && <span>billing exempt</span>}</div><div className="admin-actions"><button onClick={() => adminAction(account.id, account.access_status === "complimentary" ? "revoke_complimentary" : "grant_complimentary")}>{account.access_status === "complimentary" ? "Remove free access" : "Give free access"}</button><button onClick={() => adminAction(account.id, account.billing_exempt ? "billing_required" : "billing_exempt")}>{account.billing_exempt ? "Require payment" : "Turn off payment"}</button><button onClick={() => adminAction(account.id, account.access_status === "suspended" ? "activate" : "suspend")}>{account.access_status === "suspended" ? "Reactivate" : "Suspend"}</button><button onClick={() => adminAction(account.id, account.role === "admin" ? "remove_admin" : "make_admin")}>{account.role === "admin" ? "Remove admin" : "Make admin"}</button></div></article>)}</div>{adminUsers.length === 0 && <p className="empty-state">No users to show yet. Search or wait for the first signup.</p>}</div>}
 
     {view === "plans" && <div className="dashboard narrow"><div className="page-heading"><div><p className="eyebrow">SIMPLE PRICING</p><h2>Try everything free for 30 days.</h2><p>Cancel any time before the trial ends.</p></div></div><div className="pricing-grid"><article className="price-card"><span>MONTHLY</span><h3><b>$10</b> / month</h3><p>Flexible month-to-month access.</p><button onClick={() => setAccountStatus("Monthly plan selected. Secure checkout will open when payments are connected.")}>Start 30-day trial</button></article><article className="price-card featured"><span>BEST VALUE · SAVE $21</span><h3><b>$99</b> / year</h3><p>Everything included, billed annually after your trial.</p><button onClick={() => setAccountStatus("Yearly plan selected. Secure checkout will open when payments are connected.")}>Start 30-day trial</button></article></div>{accountStatus && <p className="checkout-note">{accountStatus}</p>}<button className="outline back-button" onClick={() => setView("account")}>← Back to account</button></div>}
 
