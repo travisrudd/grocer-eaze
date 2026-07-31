@@ -122,9 +122,26 @@ async function locationLookup(url: URL, reverse = false) {
   return json({ results });
 }
 
-function calendarResponse(body: { meals?: Array<{ title: string; detail?: string }> }) {
+function calendarStamp(date: Date) {
+  return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}${String(date.getMinutes()).padStart(2, "0")}00`;
+}
+
+function calendarText(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/\r?\n/g, "\\n").replace(/,/g, "\\,").replace(/;/g, "\\;");
+}
+
+function calendarResponse(body: { meals?: Array<{ id?: string; title: string; detail?: string; kind?: string; sortOrder?: number; sourceUrl?: string }>; randomize?: boolean }) {
   const meals = body.meals?.length ? body.meals : fallbackRecipes;
-  const events = meals.map((meal, index) => `BEGIN:VEVENT\r\nUID:grocer-eaze-${index}@grocer-eaze\r\nDTSTART:202605${String(12 + index).padStart(2, "0")}T173000\r\nDTEND:202605${String(12 + index).padStart(2, "0")}T183000\r\nSUMMARY:${meal.title}\r\nDESCRIPTION:${meal.detail || "Grocer-Eaze meal"}\r\nEND:VEVENT`).join("\r\n");
+  const slots = meals.map((meal, index) => ({ ...meal, sortOrder: meal.sortOrder || Date.now() + index * 86400000 }))
+    .sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder));
+  const recipes = body.randomize ? [...meals].sort(() => Math.random() - .5) : slots;
+  const events = slots.map((slot, index) => {
+    const recipe = recipes[index];
+    const start = new Date(Number(slot.sortOrder));
+    start.setHours(slot.kind === "Dinner" ? 17 : 12, slot.kind === "Dinner" ? 30 : 0, 0, 0);
+    const end = new Date(start.getTime() + 3600000);
+    return `BEGIN:VEVENT\r\nUID:grocer-eaze-${calendarText(String(recipe.id || index))}-${Number(slot.sortOrder)}@grocer-eaze\r\nDTSTAMP:${calendarStamp(new Date())}\r\nDTSTART:${calendarStamp(start)}\r\nDTEND:${calendarStamp(end)}\r\nSUMMARY:${calendarText(`${slot.kind || "Meal"}: ${recipe.title}`)}\r\nDESCRIPTION:${calendarText(`${recipe.detail || "Grocer-Eaze meal"}${recipe.sourceUrl ? `\nRecipe: ${recipe.sourceUrl}` : ""}`)}\r\n${recipe.sourceUrl ? `URL:${calendarText(recipe.sourceUrl)}\r\n` : ""}END:VEVENT`;
+  }).join("\r\n");
   return new Response(`BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Grocer-Eaze//Meal Plan//EN\r\n${events}\r\nEND:VCALENDAR`, {
     headers: { "Content-Type": "text/calendar", "Content-Disposition": 'attachment; filename="grocer-eaze-meal-plan.ics"' },
   });
