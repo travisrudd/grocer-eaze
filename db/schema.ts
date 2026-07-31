@@ -84,6 +84,12 @@ export const sessions = sqliteTable("sessions", {
   createdAt: text("created_at").notNull(),
 });
 
+export const authRateLimits = sqliteTable("auth_rate_limits", {
+  id: text("id").primaryKey(),
+  attempts: integer("attempts").notNull().default(0),
+  expiresAt: text("expires_at").notNull(),
+});
+
 export const adminAuditLog = sqliteTable("admin_audit_log", {
   id: text("id").primaryKey(),
   adminUserId: text("admin_user_id").notNull(),

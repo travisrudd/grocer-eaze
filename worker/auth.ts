@@ -41,6 +41,13 @@ async function digest(value: string) {
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((item) => item.toString(16).padStart(2, "0")).join("");
 }
 
+function constantTimeEqual(left: string, right: string) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index++) difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  return difference === 0;
+}
+
 function cookies(request: Request) {
   return Object.fromEntries((request.headers.get("cookie") || "").split(";").map((item) => item.trim().split("=")).filter(([key]) => key));
 }
@@ -52,8 +59,31 @@ export async function ensureAuthSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS auth_codes (email TEXT PRIMARY KEY, code_hash TEXT NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', expires_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)"),
     db.prepare("CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS auth_rate_limits (id TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS auth_rate_limits_expires_idx ON auth_rate_limits(expires_at)"),
     db.prepare("CREATE TABLE IF NOT EXISTS admin_audit_log (id TEXT PRIMARY KEY, admin_user_id TEXT NOT NULL, target_user_id TEXT NOT NULL, action TEXT NOT NULL, detail_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)"),
   ]);
+}
+
+async function rateLimit(request: Request, env: AuthEnv, action: string, limit: number) {
+  const address = request.headers.get("cf-connecting-ip") || request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  const bucket = Math.floor(Date.now() / (15 * 60_000));
+  const id = await digest(`${action}:${address}:${bucket}:${env.AUTH_SECRET || ""}`);
+  const expiresAt = new Date((bucket + 1) * 15 * 60_000).toISOString();
+  await env.DB.prepare("DELETE FROM auth_rate_limits WHERE expires_at <= ?").bind(new Date().toISOString()).run();
+  await env.DB.prepare("INSERT INTO auth_rate_limits(id,attempts,expires_at) VALUES(?,1,?) ON CONFLICT(id) DO UPDATE SET attempts=attempts+1").bind(id, expiresAt).run();
+  const row = await env.DB.prepare("SELECT attempts FROM auth_rate_limits WHERE id = ?").bind(id).first();
+  return Number(row?.attempts || 0) <= limit;
+}
+
+async function createSession(userId: string, env: AuthEnv) {
+  const now = new Date();
+  const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
+  const token = [...tokenBytes].map((item) => item.toString(16).padStart(2, "0")).join("");
+  await env.DB.prepare("DELETE FROM sessions WHERE expires_at <= ?").bind(now.toISOString()).run();
+  await env.DB.prepare("INSERT INTO sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)")
+    .bind(await digest(token), userId, new Date(now.getTime() + 30 * 86400_000).toISOString(), now.toISOString()).run();
+  return `${cookieName}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`;
 }
 
 export async function getSessionUser(request: Request, env: AuthEnv): Promise<SessionUser | null> {
@@ -93,30 +123,36 @@ export async function handleAuthRequest(request: Request, env: AuthEnv): Promise
   if (url.pathname === "/api/auth/start" && request.method === "POST") {
     if (!env.AUTH_SECRET) return response({ error: "Secure signup is being configured. Please try again shortly." }, 503);
     const body = await request.json() as { name?: string; email?: string; phone?: string };
-    const email = String(body.email || "").trim().toLowerCase();
-    const name = String(body.name || "").trim();
+    const email = String(body.email || "").trim().toLowerCase().slice(0, 254);
+    const submittedName = String(body.name || "").trim().slice(0, 100);
     const phone = String(body.phone || "").trim();
-    if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || phone.length > 30) return response({ error: "Enter a valid name and email." }, 400);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || phone.length > 30) return response({ error: "Enter a valid email address." }, 400);
+    if (!await rateLimit(request, env, "email-start", 12)) return response({ error: "Too many sign-in attempts. Please try again in 15 minutes." }, 429);
+    const existingUser = await env.DB.prepare("SELECT name,phone FROM users WHERE email = ?").bind(email).first();
+    if (!existingUser && !submittedName) return response({ error: "Tell us your name to finish creating your account.", code: "NAME_REQUIRED" }, 409);
+    const name = existingUser ? String(existingUser.name) : submittedName;
+    const savedPhone = existingUser ? String(existingUser.phone || "") : phone;
     const recent = await env.DB.prepare("SELECT created_at FROM auth_codes WHERE email = ?").bind(email).first();
     if (recent && Date.now() - new Date(String(recent.created_at)).getTime() < 60_000) return response({ error: "Please wait a minute before requesting another code." }, 429);
     const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0");
     const codeHash = await digest(`${email}:${code}:${env.AUTH_SECRET}`);
     const now = new Date();
     await env.DB.prepare("INSERT OR REPLACE INTO auth_codes(email, code_hash, name, phone, expires_at, attempts, created_at) VALUES(?,?,?,?,?,?,?)")
-      .bind(email, codeHash, name, phone, new Date(now.getTime() + 10 * 60_000).toISOString(), 0, now.toISOString()).run();
+      .bind(email, codeHash, name, savedPhone, new Date(now.getTime() + 10 * 60_000).toISOString(), 0, now.toISOString()).run();
     await sendCode(email, code, env);
-    return response({ sent: true });
+    return response({ sent: true, returning: Boolean(existingUser) });
   }
 
   if (url.pathname === "/api/auth/verify" && request.method === "POST") {
     if (!env.AUTH_SECRET) return response({ error: "Secure signup is being configured. Please try again shortly." }, 503);
     const body = await request.json() as { email?: string; code?: string };
-    const email = String(body.email || "").trim().toLowerCase();
-    const code = String(body.code || "").trim();
+    const email = String(body.email || "").trim().toLowerCase().slice(0, 254);
+    const code = String(body.code || "").trim().slice(0, 6);
+    if (!await rateLimit(request, env, "email-verify", 30)) return response({ error: "Too many verification attempts. Please try again in 15 minutes." }, 429);
     const record = await env.DB.prepare("SELECT * FROM auth_codes WHERE email = ?").bind(email).first();
     if (!record || new Date(String(record.expires_at)).getTime() < Date.now() || Number(record.attempts) >= 5) return response({ error: "That code expired. Request a new one." }, 400);
     const expected = await digest(`${email}:${code}:${env.AUTH_SECRET}`);
-    if (expected !== record.code_hash) {
+    if (!constantTimeEqual(expected, String(record.code_hash))) {
       await env.DB.prepare("UPDATE auth_codes SET attempts = attempts + 1 WHERE email = ?").bind(email).run();
       return response({ error: "That code is incorrect." }, 400);
     }
@@ -126,11 +162,9 @@ export async function handleAuthRequest(request: Request, env: AuthEnv): Promise
     const adminEmail = (env.INITIAL_ADMIN_EMAIL || "").toLowerCase();
     await env.DB.prepare("INSERT INTO users(id,email,name,phone,role,access_status,trial_ends_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET name=excluded.name, phone=excluded.phone, role=CASE WHEN excluded.email = ? THEN 'admin' ELSE users.role END, updated_at=excluded.updated_at")
       .bind(id, email, record.name, record.phone, email === adminEmail ? "admin" : "user", "pending", null, now.toISOString(), now.toISOString(), adminEmail).run();
-    const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
-    const token = [...tokenBytes].map((item) => item.toString(16).padStart(2, "0")).join("");
-    await env.DB.prepare("INSERT INTO sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)").bind(await digest(token), id, new Date(now.getTime() + 30 * 86400_000).toISOString(), now.toISOString()).run();
+    const sessionCookie = await createSession(id, env);
     await env.DB.prepare("DELETE FROM auth_codes WHERE email = ?").bind(email).run();
-    return response({ verified: true }, 200, { "Set-Cookie": `${cookieName}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000` });
+    return response({ verified: true, returning: Boolean(existing) }, 200, { "Set-Cookie": sessionCookie });
   }
 
   if (url.pathname === "/api/auth/signout" && request.method === "POST") {

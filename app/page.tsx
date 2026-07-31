@@ -18,6 +18,10 @@ type View = "plan" | "meals" | "list" | "account" | "family" | "plans" | "admin"
 type UndoAction = { message: string; restore: () => void };
 type AccountUser = { id: string; name: string; email: string; phone: string; role: "user" | "admin"; accessStatus: string; complimentaryUntil: string | null; billingExempt: boolean; subscriptionStatus: string | null; subscriptionEndsAt: string | null; hasAccess: boolean };
 type AdminUser = { id: string; name: string; email: string; phone: string; role: string; access_status: string; trial_ends_at?: string; complimentary_until?: string; billing_exempt: number };
+type ProfilePayload = { profile?: { household_name: string; people: number; location: string; preferences_json?: string } | null };
+type FavoritesPayload = { favorites?: Array<{ title: string }> };
+type FamilyPayload = { members?: Member[] };
+type RatingsPayload = { ratings?: Array<{ recipe_id: string; quality: number; ease: number }> };
 
 const proteinOptions = ["Beef", "Pork", "Fish", "Shrimp"];
 const storeNames = ["Whole Foods", "Jewel-Osco", "Trader Joe’s"];
@@ -123,7 +127,7 @@ export default function Home() {
   const [similarTo, setSimilarTo] = useState("");
   const [accountStatus, setAccountStatus] = useState("");
   const [user, setUser] = useState<AccountUser | null>(null);
-  const [authStep, setAuthStep] = useState<"details" | "code">("details");
+  const [authStep, setAuthStep] = useState<"email" | "details" | "code">("email");
   const [authForm, setAuthForm] = useState({ name: "", email: "", phone: "", code: "" });
   const [authBusy, setAuthBusy] = useState(false);
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
@@ -264,6 +268,43 @@ export default function Home() {
     || recipeFilters.favoritesOnly;
   const shortLocation = location.split(",").slice(0, 2).join(",").trim() || location;
 
+  function applyPersonalData(profileData: ProfilePayload, favoriteData: FavoritesPayload, familyData: FamilyPayload, ratingData: RatingsPayload) {
+    if (profileData.profile) {
+      setHousehold(profileData.profile.household_name); setPeople(profileData.profile.people);
+      setLocation(profileData.profile.location); setLocationQuery(profileData.profile.location);
+      try {
+        const preferences = JSON.parse(profileData.profile.preferences_json || "{}");
+        if (preferences.range) setRange(preferences.range);
+        if (preferences.planStartDate) setPlanStartDate(preferences.planStartDate);
+        if (preferences.mealType) setMealType(preferences.mealType);
+        if (preferences.budget) setBudget(preferences.budget);
+        if (typeof preferences.leftovers === "boolean") setLeftovers(preferences.leftovers);
+        if (typeof preferences.glutenFree === "boolean") setGlutenFree(preferences.glutenFree);
+        if (typeof preferences.lowDairy === "boolean") setLowDairy(preferences.lowDairy);
+        if (typeof preferences.mediterranean === "boolean") setMediterranean(preferences.mediterranean);
+        if (typeof preferences.kidLunches === "boolean") setKidLunches(preferences.kidLunches);
+        if (typeof preferences.oneStore === "boolean") setOneStore(preferences.oneStore);
+        if (preferences.selectedStore) setSelectedStore(preferences.selectedStore);
+        if (preferences.maxTime) setMaxTime(preferences.maxTime);
+        if (preferences.skill) setSkill(preferences.skill);
+        if (typeof preferences.exclusions === "string") setExclusions(preferences.exclusions);
+      } catch { /* Ignore an older malformed preference record. */ }
+    }
+    if (favoriteData.favorites) setFavorites(favoriteData.favorites.map((recipe: { title: string }) => recipe.title));
+    if (familyData.members) setMembers(familyData.members);
+    if (ratingData.ratings) setRatings(Object.fromEntries(ratingData.ratings.map((rating: { recipe_id: string; quality: number; ease: number }) => [rating.recipe_id, { quality: rating.quality, ease: rating.ease }])));
+  }
+
+  async function reloadPersonalData() {
+    const [profileData, favoriteData, familyData, ratingData] = await Promise.all([
+      fetch("/api/profile").then((response) => response.json()),
+      fetch("/api/favorites").then((response) => response.json()),
+      fetch("/api/family").then((response) => response.json()),
+      fetch("/api/ratings").then((response) => response.json()),
+    ]);
+    applyPersonalData(profileData, favoriteData, familyData, ratingData);
+  }
+
   useEffect(() => {
     let id = window.localStorage.getItem("grocer-eaze-owner");
     if (!id) { id = crypto.randomUUID(); window.localStorage.setItem("grocer-eaze-owner", id); }
@@ -277,30 +318,7 @@ export default function Home() {
       fetch("/api/auth/me").then((r) => r.json()),
     ]).then(([profileData, favoriteData, familyData, ratingData, authData]) => {
       setOwnerId(id);
-      if (profileData.profile) {
-        setHousehold(profileData.profile.household_name); setPeople(profileData.profile.people);
-        setLocation(profileData.profile.location); setLocationQuery(profileData.profile.location);
-        try {
-          const preferences = JSON.parse(profileData.profile.preferences_json || "{}");
-          if (preferences.range) setRange(preferences.range);
-          if (preferences.planStartDate) setPlanStartDate(preferences.planStartDate);
-          if (preferences.mealType) setMealType(preferences.mealType);
-          if (preferences.budget) setBudget(preferences.budget);
-          if (typeof preferences.leftovers === "boolean") setLeftovers(preferences.leftovers);
-          if (typeof preferences.glutenFree === "boolean") setGlutenFree(preferences.glutenFree);
-          if (typeof preferences.lowDairy === "boolean") setLowDairy(preferences.lowDairy);
-          if (typeof preferences.mediterranean === "boolean") setMediterranean(preferences.mediterranean);
-          if (typeof preferences.kidLunches === "boolean") setKidLunches(preferences.kidLunches);
-          if (typeof preferences.oneStore === "boolean") setOneStore(preferences.oneStore);
-          if (preferences.selectedStore) setSelectedStore(preferences.selectedStore);
-          if (preferences.maxTime) setMaxTime(preferences.maxTime);
-          if (preferences.skill) setSkill(preferences.skill);
-          if (typeof preferences.exclusions === "string") setExclusions(preferences.exclusions);
-        } catch { /* Ignore an older malformed preference record. */ }
-      }
-      if (favoriteData.favorites) setFavorites(favoriteData.favorites.map((recipe: { title: string }) => recipe.title));
-      if (familyData.members) setMembers(familyData.members);
-      if (ratingData.ratings) setRatings(Object.fromEntries(ratingData.ratings.map((r: { recipe_id: string; quality: number; ease: number }) => [r.recipe_id, { quality: r.quality, ease: r.ease }])));
+      applyPersonalData(profileData, favoriteData, familyData, ratingData);
       if (authData.user) { setUser(authData.user); setEmail(authData.user.email); }
       const requestedView = window.location.hash.replace("#", "") as View;
       if (["meals", "list"].includes(requestedView) && !authData.user?.hasAccess) {
@@ -448,10 +466,12 @@ export default function Home() {
 
   async function startAuth() {
     setAuthBusy(true); setAccountStatus("");
-    if (!authForm.name.trim()) { setAuthBusy(false); setAccountStatus("Enter your name to continue."); return; }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(authForm.email.trim())) { setAuthBusy(false); setAccountStatus("Enter a valid email address to continue."); return; }
-    const result = await fetch("/api/auth/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(authForm) });
+    if (authStep === "details" && !authForm.name.trim()) { setAuthBusy(false); setAccountStatus("Enter your name to create your account."); return; }
+    const body = authStep === "details" ? { name: authForm.name, email: authForm.email, phone: authForm.phone } : { email: authForm.email };
+    const result = await fetch("/api/auth/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const data = await result.json(); setAuthBusy(false);
+    if (result.status === 409 && data.code === "NAME_REQUIRED") { setAuthStep("details"); setAccountStatus("This email is new. Add your name to finish creating your account."); return; }
     if (!result.ok) { setAccountStatus(data.error || "Could not send a code."); return; }
     setAuthStep("code"); setAccountStatus(`We sent a six-digit code to ${authForm.email}.`);
   }
@@ -461,7 +481,10 @@ export default function Home() {
     const result = await fetch("/api/auth/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: authForm.email, code: authForm.code }) });
     const data = await result.json(); setAuthBusy(false);
     if (!result.ok) { setAccountStatus(data.error || "That code could not be verified."); return; }
-    const me = await fetch("/api/auth/me").then((r) => r.json()); setUser(me.user); setEmail(me.user.email); setAccountStatus("Your secure account is ready. Choose a plan to start your free trial.");
+    const me = await fetch("/api/auth/me").then((r) => r.json());
+    setUser(me.user); setEmail(me.user.email); setAuthForm((current) => ({ ...current, name: me.user.name, phone: me.user.phone || "" }));
+    await reloadPersonalData();
+    setAccountStatus(data.returning ? "Welcome back. Your household information has been restored." : "Your secure account is ready. Choose a plan to start your free trial.");
   }
 
   async function loadAdminUsers(query = adminSearch) {
@@ -1161,7 +1184,7 @@ export default function Home() {
           </div>
         </details>
         {filteredRecipeIdeas.length ? <div className="recipe-card-grid">{visibleRecipeIdeas.map((meal) => <article className="recipe-card" key={`idea-${meal.kind}-${meal.id}-${meal.title}`}>
-          <div className={`recipe-thumb ${meal.tone}`}>{meal.image ? <><img src={meal.image} alt={`${meal.title} recipe`} loading="lazy" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.nextElementSibling?.removeAttribute("hidden"); }} /><span hidden aria-hidden="true">{meal.emoji}</span></> : <span aria-hidden="true">{meal.emoji}</span>}<em>{meal.kind === "School lunch" ? "Kid-friendly lunch" : meal.kind}</em><button className={favorites.includes(meal.title) ? "saved" : ""} onClick={() => toggleFavorite(meal)} aria-label={`${favorites.includes(meal.title) ? "Remove" : "Add"} ${meal.title} ${favorites.includes(meal.title) ? "from" : "to"} favorites`}>{favorites.includes(meal.title) ? "♥" : "♡"}</button></div>
+          <div className={`recipe-thumb ${meal.tone}`}><img src={meal.image || recipeThumbnail(meal)} alt={`${meal.title} recipe`} loading="lazy" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.nextElementSibling?.removeAttribute("hidden"); }} /><span hidden aria-hidden="true">{meal.emoji}</span><em>{meal.kind === "School lunch" ? "Kid-friendly lunch" : meal.kind}</em><button className={favorites.includes(meal.title) ? "saved" : ""} onClick={() => toggleFavorite(meal)} aria-label={`${favorites.includes(meal.title) ? "Remove" : "Add"} ${meal.title} ${favorites.includes(meal.title) ? "from" : "to"} favorites`}>{favorites.includes(meal.title) ? "♥" : "♡"}</button></div>
           <div className="recipe-card-copy"><small>{meal.sourceName}</small><h4>{meal.title}</h4><p>{meal.readyMinutes} min · {meal.cost}</p><div className="recipe-tags">{meal.tags?.slice(0, 6).map((tag) => <span key={tag}>{tag}</span>)}</div><div className="catalog-secondary-actions">{meal.sourceUrl && <a href={meal.sourceUrl} target="_blank" rel="noreferrer">Recipe ↗</a>}<button onClick={() => findSimilar(meal)}>Find similar</button><button onClick={() => setRatingMeal(meal)}>Rate</button></div><div className="add-meal-actions">{activeMealKinds.map((kind) => {
             const target = mealTargets[kind as keyof typeof mealTargets];
             const full = plannedMeals.filter((item) => item.kind === kind).length >= target;
@@ -1241,18 +1264,22 @@ export default function Home() {
     {view === "family" && <div className="dashboard narrow" id="page-content"><div className="page-heading"><div><p className="eyebrow">HOUSEHOLD PREFERENCES</p><h2>Your family, thoughtfully fed.</h2><p>Allergies, avoided ingredients, and favorite proteins shape every catalog search.</p></div></div>{familyStatus && <p className="form-notice success" aria-live="polite">{familyStatus}</p>}<div className="family-grid"><section className="settings-card"><h3>Family members</h3>{members.length === 0 && <p className="empty-state">No family members yet. Add the first person below.</p>}{members.map((member) => <article className="member-card" key={member.id}><span className="member-avatar icon-centered">{member.name.slice(0, 1).toUpperCase()}</span><div><strong>{member.name}</strong><small>{member.role} · {member.allergies || "No listed allergies"}</small><p>{[member.preferences?.glutenFree && "Gluten-free", member.preferences?.lowDairy && "Low dairy", member.preferences?.kidFriendly && "Kid-friendly", member.preferences?.avoidOnions && "Avoid onions", ...(member.preferences?.proteins || []).map((protein) => `${protein} favorite`)].filter(Boolean).join(" · ") || "No preferences yet"}</p></div><div className="member-actions"><button onClick={() => editMember(member)}>Edit</button><button onClick={() => deleteMember(member.id)} aria-label={`Remove ${member.name}`}>Remove</button></div></article>)}</section><section className="settings-card"><h3>{editingMemberId ? "Edit family member" : "Add a family member"}</h3><div className="field"><label htmlFor="family-member-name">Name</label><input id="family-member-name" className="text-input" value={memberDraft.name} onChange={(e) => setMemberDraft({ ...memberDraft, name: e.target.value })} /></div><div className="field"><label htmlFor="family-member-role">Role</label><select id="family-member-role" value={memberDraft.role} onChange={(e) => setMemberDraft({ ...memberDraft, role: e.target.value })}><option>Adult</option><option>Teen</option><option>Child</option></select></div><div className="field"><label htmlFor="family-member-allergies">Allergies / avoid</label><input id="family-member-allergies" className="text-input" placeholder="Peanuts, shellfish…" value={memberDraft.allergies} onChange={(e) => setMemberDraft({ ...memberDraft, allergies: e.target.value })} /></div><div className="field"><label>Favorite proteins</label><div className="preference-check-grid" role="group" aria-label="Favorite proteins">{proteinOptions.map((protein) => <button type="button" key={protein} className={memberDraft.proteins.includes(protein) ? "selected" : ""} aria-pressed={memberDraft.proteins.includes(protein)} onClick={() => setMemberDraft({ ...memberDraft, proteins: memberDraft.proteins.includes(protein) ? memberDraft.proteins.filter((item) => item !== protein) : [...memberDraft.proteins, protein] })}>{protein}</button>)}</div></div><Toggle label="Avoid onions" checked={memberDraft.avoidOnions} onChange={() => setMemberDraft({ ...memberDraft, avoidOnions: !memberDraft.avoidOnions })} /><Toggle label="Gluten-free" checked={memberDraft.glutenFree} onChange={() => setMemberDraft({ ...memberDraft, glutenFree: !memberDraft.glutenFree })} /><Toggle label="Low dairy" checked={memberDraft.lowDairy} onChange={() => setMemberDraft({ ...memberDraft, lowDairy: !memberDraft.lowDairy })} /><Toggle label="Kid-friendly" checked={memberDraft.kidFriendly} onChange={() => setMemberDraft({ ...memberDraft, kidFriendly: !memberDraft.kidFriendly })} /><button className="primary" onClick={saveMember}>{editingMemberId ? "Save changes" : "Add family member"}</button>{editingMemberId && <button className="text-button" onClick={() => { setEditingMemberId(""); setMemberDraft({ name: "", role: "Adult", allergies: "", glutenFree: true, lowDairy: false, kidFriendly: false, avoidOnions: false, proteins: [] }); }}>Cancel editing</button>}</section></div></div>}
 
     {view === "account" && <div className="dashboard narrow" id="page-content">
-      <div className="page-heading"><div><p className="eyebrow">PROFILE & SECURITY</p><h2>{user ? `Welcome, ${user.name}.` : "Create your account"}</h2><p>{user ? "Control your household, privacy, and plan." : "No password needed. We’ll verify your email with a one-time code."}</p></div></div>
+      <div className="page-heading"><div><p className="eyebrow">PROFILE & SECURITY</p><h2>{user ? `Welcome, ${user.name}.` : "Sign in or create an account"}</h2><p>{user ? "Control your household, privacy, and plan." : "Use your email and a one-time code. Returning households are restored automatically."}</p></div></div>
       {!user ? <section className="settings-card auth-card">
-        <div className="auth-trust"><span className="icon-centered" aria-hidden="true">🔒</span><strong>Secure passwordless signup</strong><small>Only your name and verified email are required. Phone is optional.</small></div>
-        {authStep === "details" ? <>
-          <div className="field"><label htmlFor="signup-name">Name</label><input id="signup-name" className="text-input" autoComplete="name" required value={authForm.name} onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })} /></div>
+        <div className="auth-trust"><span className="icon-centered" aria-hidden="true">🔒</span><strong>Secure passwordless sign-in</strong><small>Returning users only enter their email. New accounts add a name; phone is optional.</small></div>
+        {authStep === "email" ? <>
           <div className="field"><label htmlFor="signup-email">Email</label><input id="signup-email" className="text-input" type="email" autoComplete="email" required value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} /></div>
+          <button className="primary" disabled={authBusy || !authForm.email.trim()} onClick={startAuth}>{authBusy ? "Checking email…" : "Continue with email"}</button>
+        </> : authStep === "details" ? <>
+          <div className="field"><label htmlFor="signup-email-confirmed">Email</label><input id="signup-email-confirmed" className="text-input" type="email" value={authForm.email} disabled /></div>
+          <div className="field"><label htmlFor="signup-name">Name</label><input id="signup-name" className="text-input" autoComplete="name" required value={authForm.name} onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })} /></div>
           <div className="field"><label htmlFor="signup-phone">Phone <small>(optional)</small></label><input id="signup-phone" className="text-input" type="tel" autoComplete="tel" value={authForm.phone} onChange={(e) => setAuthForm({ ...authForm, phone: e.target.value })} /></div>
-          <button className="primary" disabled={authBusy || !authForm.name.trim() || !authForm.email.trim()} onClick={startAuth}>{authBusy ? "Sending code…" : "Continue with email"}</button>
+          <button className="primary" disabled={authBusy || !authForm.name.trim()} onClick={startAuth}>{authBusy ? "Sending code…" : "Create account and send code"}</button>
+          <button className="text-button" onClick={() => { setAuthStep("email"); setAccountStatus(""); }}>Use a different email</button>
         </> : <>
           <div className="field"><label htmlFor="verification-code">Six-digit verification code</label><input id="verification-code" className="text-input code-input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={authForm.code} onChange={(e) => setAuthForm({ ...authForm, code: e.target.value.replace(/\D/g, "") })} /></div>
-          <button className="primary" disabled={authBusy || authForm.code.length !== 6} onClick={verifyAuth}>{authBusy ? "Verifying…" : "Verify and create account"}</button>
-          <button className="text-button" onClick={() => setAuthStep("details")}>Use a different email</button>
+          <button className="primary" disabled={authBusy || authForm.code.length !== 6} onClick={verifyAuth}>{authBusy ? "Verifying…" : "Verify and sign in"}</button>
+          <button className="text-button" onClick={() => { setAuthStep("email"); setAccountStatus(""); }}>Use a different email</button>
         </>}
         {accountStatus && <p className="checkout-note" role="status">{accountStatus}</p>}
       </section> : <div className="settings-stack">
@@ -1264,7 +1291,7 @@ export default function Home() {
         </section>
         <section className="settings-card security-card"><div className="icon-centered" aria-hidden="true">🔒</div><div><h3>Security</h3><p>Your email is verified. Your session is stored in a secure, HTTP-only cookie, protected data is checked on the server, and sensitive service keys never reach your browser.</p></div></section>
         <section className="settings-card plan-row"><div><span className="mini-label">ACCESS STATUS</span><h3>{user.billingExempt ? "Billing exempt" : user.accessStatus === "complimentary" ? "Complimentary account" : user.subscriptionStatus === "active" ? "Active membership" : user.subscriptionStatus === "trialing" ? "30-day free trial" : "Plan required"}</h3><p>{user.complimentaryUntil ? `Complimentary through ${user.complimentaryUntil}` : user.subscriptionEndsAt ? `Current period ends ${new Date(user.subscriptionEndsAt).toLocaleDateString()}` : user.hasAccess ? "Your Grocer-Eaze tools are unlocked." : "Choose monthly or yearly billing to start your 30-day trial."}</p></div>{user.subscriptionStatus ? <button className="primary compact" disabled={billingBusy} onClick={() => openBilling("portal")}>Manage billing</button> : <button className="primary compact" onClick={() => navigateTo("plans")}>View plans</button>}</section>
-        <section className="settings-card danger-zone"><h3>Account controls</h3><button className="outline" onClick={async () => { await fetch("/api/auth/signout", { method: "POST" }); setUser(null); setAuthStep("details"); }}>Sign out</button></section>
+        <section className="settings-card danger-zone"><h3>Account controls</h3><button className="outline" onClick={async () => { await fetch("/api/auth/signout", { method: "POST" }); setUser(null); setAuthStep("email"); }}>Sign out</button></section>
       </div>}
     </div>}
 

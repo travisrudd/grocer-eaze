@@ -9,14 +9,21 @@ async function source(path) {
 }
 
 test("ships product-specific metadata and no starter preview", async () => {
-  const [layout, page, packageJson] = await Promise.all([
+  const [layout, page, packageJson, robots, sitemap] = await Promise.all([
     source("app/layout.tsx"),
     source("app/page.tsx"),
     source("package.json"),
+    source("app/robots.ts"),
+    source("app/sitemap.ts"),
   ]);
 
   assert.match(layout, /Grocer-Eaze \| Better Food, Less Waste/);
   assert.match(layout, /metadataBase: new URL\("https:\/\/grocer-eaze\.com"\)/);
+  assert.match(layout, /alternates: \{ canonical: "\/" \}/);
+  assert.match(layout, /robots: \{ index: true, follow: true/);
+  assert.match(layout, /"@type": "WebApplication"/);
+  assert.match(robots, /sitemap: "https:\/\/grocer-eaze\.com\/sitemap\.xml"/);
+  assert.match(sitemap, /url: "https:\/\/grocer-eaze\.com\/"/);
   assert.doesNotMatch(page, /SkeletonPreview|codex-preview/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
 });
@@ -122,7 +129,26 @@ test("resolves recipe thumbnails from source metadata with a licensed fallback",
   ]);
 
   assert.match(page, /\/api\/recipe-image/);
+  assert.match(page, /meal\.image \|\| recipeThumbnail\(meal\)/);
   assert.match(api, /"og:image"/);
   assert.match(api, /api\.pexels\.com\/v1\/search/);
   assert.match(api, /PEXELS_API_KEY/);
+});
+
+test("restores returning accounts and hardens passwordless sign-in", async () => {
+  const [page, auth, api, worker] = await Promise.all([
+    source("app/page.tsx"),
+    source("worker/auth.ts"),
+    source("worker/api.ts"),
+    source("worker/index.ts"),
+  ]);
+
+  assert.match(page, /Returning households are restored automatically/);
+  assert.match(page, /reloadPersonalData/);
+  assert.match(auth, /code: "NAME_REQUIRED"/);
+  assert.match(auth, /auth_rate_limits/);
+  assert.match(auth, /constantTimeEqual/);
+  assert.match(api, /sec-fetch-site/);
+  assert.match(worker, /X-Content-Type-Options/);
+  assert.match(worker, /Strict-Transport-Security/);
 });

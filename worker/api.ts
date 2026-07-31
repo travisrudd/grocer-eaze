@@ -500,6 +500,12 @@ function calendarResponse(body: { meals?: Array<{ id?: string; title: string; de
 
 export async function handleApiRequest(request: Request, env: AppEnv): Promise<Response> {
   const url = new URL(request.url);
+  const isMutation = !["GET", "HEAD", "OPTIONS"].includes(request.method);
+  const origin = request.headers.get("origin");
+  const crossSite = request.headers.get("sec-fetch-site") === "cross-site";
+  if (isMutation && url.pathname !== "/api/stripe/webhook" && ((origin && origin !== url.origin) || crossSite)) {
+    return json({ error: "This request did not come from Grocer-Eaze." }, 403);
+  }
   const billingResponse = await handleBillingRequest(request, env);
   if (billingResponse) return billingResponse;
   const authResponse = await handleAuthRequest(request, env);
