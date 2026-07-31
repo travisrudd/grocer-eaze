@@ -13,7 +13,7 @@ type AppEnv = {
 import { getSessionUser, handleAuthRequest } from "./auth";
 import { handleBillingRequest } from "./billing";
 
-const preferredSources = ["allrecipes.com", "foodnetwork.com", "eatingwell.com"];
+const preferredSources = ["allrecipes.com", "foodnetwork.com", "eatingwell.com", "seriouseats.com", "simplyrecipes.com"];
 
 const fallbackTitles = [
   "Lemon Herb Salmon", "Tuscan White Bean Skillet", "Chicken Souvlaki Bowls", "Tomato Basil Turkey Meatballs",
@@ -30,15 +30,16 @@ const fallbackTitles = [
 const fallbackRecipes = fallbackTitles.map((title, index) => ({
   id: `demo-${index + 1}`,
   title,
-  sourceName: ["EatingWell", "Food Network", "Allrecipes"][index % 3],
-  sourceUrl: ["https://www.eatingwell.com/recipes/", "https://www.foodnetwork.com/recipes", "https://www.allrecipes.com/recipes/"][index % 3],
+  sourceName: ["EatingWell", "Food Network", "Allrecipes", "Serious Eats", "Simply Recipes"][index % 5],
+  sourceUrl: ["https://www.eatingwell.com/recipes/", "https://www.foodnetwork.com/recipes", "https://www.allrecipes.com/recipes/", "https://www.seriouseats.com/recipes-5117985", "https://www.simplyrecipes.com/recipes-5090746"][index % 5],
   readyInMinutes: 20 + (index % 5) * 5,
   servings: 4,
   glutenFree: true,
   dairyFree: index % 3 !== 0,
   image: "",
   pricePerServing: 280 + (index % 7) * 55,
-  extendedIngredients: [{ original: "Fresh vegetables" }, { original: "Lean protein or beans" }, { original: "Herbs and pantry staples" }],
+  diets: ["gluten free", "Mediterranean"],
+  extendedIngredients: [{ name: "fresh vegetables", aisle: "Produce", original: "Fresh vegetables" }, { name: title.toLowerCase().includes("salmon") ? "salmon fillets" : title.toLowerCase().includes("shrimp") ? "shrimp" : "lean protein or beans", aisle: "Meat & seafood", original: "Lean protein or beans" }, { name: "herbs and pantry staples", aisle: "Pantry", original: "Herbs and pantry staples" }],
 }));
 
 function variedFallback() {
@@ -75,7 +76,11 @@ async function searchRecipes(url: URL, env: AppEnv) {
     addRecipeInformation: "true",
     fillIngredients: "true",
     instructionsRequired: "true",
-    ...(url.searchParams.get("glutenFree") === "false" ? {} : { diet: "gluten free" }),
+    ...(url.searchParams.get("mediterranean") === "true" ? { diet: "Mediterranean" } : {}),
+    ...((url.searchParams.get("glutenFree") !== "false" || url.searchParams.get("lowDairy") === "true")
+      ? { intolerances: [url.searchParams.get("glutenFree") !== "false" ? "gluten" : "", url.searchParams.get("lowDairy") === "true" ? "dairy" : ""].filter(Boolean).join(",") }
+      : {}),
+    ...(url.searchParams.get("excludeIngredients") ? { excludeIngredients: url.searchParams.get("excludeIngredients") || "" } : {}),
     maxReadyTime: maxTime,
     sort: "random",
   });
@@ -85,7 +90,10 @@ async function searchRecipes(url: URL, env: AppEnv) {
   const preferred = (data.results || []).sort((a, b) => {
     const aUrl = String(a.sourceUrl || "");
     const bUrl = String(b.sourceUrl || "");
-    return Number(preferredSources.some((host) => bUrl.includes(host))) - Number(preferredSources.some((host) => aUrl.includes(host)));
+    const sourceScore = Number(preferredSources.some((host) => bUrl.includes(host))) - Number(preferredSources.some((host) => aUrl.includes(host)));
+    if (sourceScore) return sourceScore;
+    if (url.searchParams.get("schoolLunch") === "true") return Number(a.readyInMinutes || 99) - Number(b.readyInMinutes || 99);
+    return 0;
   });
   const used = new Set(preferred.map((recipe) => String(recipe.title).toLowerCase()));
   const supplemental = variedFallback().filter((recipe) => !used.has(recipe.title.toLowerCase()));
