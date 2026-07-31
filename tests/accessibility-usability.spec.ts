@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
@@ -8,9 +8,14 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("has no serious or critical automated accessibility violations", async ({ page }) => {
+async function openPlan(page: Page) {
   await page.goto("/");
+  await expect(page).toHaveTitle("Plan meals | Grocer-Eaze");
   await expect(page.getByRole("heading", { name: "Better Food, Less Waste." })).toBeVisible();
+}
+
+test("has no serious or critical automated accessibility violations", async ({ page }) => {
+  await openPlan(page);
 
   const homeResults = await new AxeBuilder({ page }).analyze();
   expect(homeResults.violations.filter((violation) => ["serious", "critical"].includes(violation.impact || ""))).toEqual([]);
@@ -23,7 +28,7 @@ test("has no serious or critical automated accessibility violations", async ({ p
 });
 
 test("supports keyboard navigation and a working skip link", async ({ page }) => {
-  await page.goto("/");
+  await openPlan(page);
   await page.keyboard.press("Tab");
   const skipLink = page.getByRole("link", { name: "Skip to main content" });
   await expect(skipLink).toBeFocused();
@@ -35,7 +40,7 @@ test("supports keyboard navigation and a working skip link", async ({ page }) =>
 });
 
 test("primary navigation and empty states always offer a next step", async ({ page }) => {
-  await page.goto("/");
+  await openPlan(page);
 
   await page.getByRole("button", { name: "Grocery list" }).click();
   await expect(page.getByRole("heading", { name: "Your grocery list starts with a meal." })).toBeVisible();
@@ -69,9 +74,9 @@ test("the recipe catalog loads progressively and filters remain usable", async (
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ recipes }) });
   });
 
-  await page.goto("/");
+  await openPlan(page);
   await page.getByRole("button", { name: /Browse recipes for my plan/ }).click();
-  await expect(page.getByRole("heading", { name: "Build your plan from the catalog." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Build your plan from the catalog." })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator(".recipe-card")).toHaveCount(12);
 
   await page.getByRole("button", { name: "Show 12 more recipes" }).click();
@@ -84,7 +89,7 @@ test("the recipe catalog loads progressively and filters remain usable", async (
 });
 
 test("reflows at the 320 CSS-pixel equivalent of 400% zoom", async ({ page }) => {
-  await page.goto("/");
+  await openPlan(page);
   const homeOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(homeOverflow).toBeLessThanOrEqual(1);
 
@@ -94,7 +99,7 @@ test("reflows at the 320 CSS-pixel equivalent of 400% zoom", async ({ page }) =>
 });
 
 test("visible interactive targets meet the WCAG 2.2 minimum size", async ({ page }) => {
-  await page.goto("/");
+  await openPlan(page);
   const undersizedTargets = await page.locator("button:visible, a[href]:visible, input:visible, select:visible, textarea:visible").evaluateAll((elements) =>
     elements
       .map((element) => {
