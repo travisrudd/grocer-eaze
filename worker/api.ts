@@ -22,6 +22,10 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS profiles (owner_id TEXT PRIMARY KEY, household_name TEXT NOT NULL, people INTEGER NOT NULL DEFAULT 4, location TEXT NOT NULL DEFAULT 'Uptown, Chicago, IL', preferences_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS favorites (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, recipe_id TEXT NOT NULL, recipe_json TEXT NOT NULL, created_at TEXT NOT NULL)"),
     db.prepare("CREATE INDEX IF NOT EXISTS favorites_owner_idx ON favorites(owner_id)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS family_members (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL, preferences_json TEXT NOT NULL DEFAULT '{}', allergies TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS family_members_owner_idx ON family_members(owner_id)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS recipe_ratings (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, recipe_id TEXT NOT NULL, quality INTEGER NOT NULL, ease INTEGER NOT NULL, updated_at TEXT NOT NULL)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS recipe_ratings_owner_idx ON recipe_ratings(owner_id)"),
   ]);
 }
 
@@ -36,7 +40,7 @@ async function searchRecipes(url: URL, env: AppEnv) {
     addRecipeInformation: "true",
     fillIngredients: "true",
     instructionsRequired: "true",
-    diet: "gluten free",
+    ...(url.searchParams.get("glutenFree") === "false" ? {} : { diet: "gluten free" }),
     maxReadyTime: maxTime,
   });
   const response = await fetch(`https://api.spoonacular.com/recipes/complexSearch?${params}`);
@@ -48,6 +52,24 @@ async function searchRecipes(url: URL, env: AppEnv) {
     return Number(preferredSources.some((host) => bUrl.includes(host))) - Number(preferredSources.some((host) => aUrl.includes(host)));
   });
   return json({ recipes: preferred, demo: false });
+}
+
+async function locationLookup(url: URL, reverse = false) {
+  const endpoint = reverse ? "reverse" : "search";
+  const params = reverse
+    ? new URLSearchParams({ lat: url.searchParams.get("lat") || "", lon: url.searchParams.get("lon") || "", format: "jsonv2", zoom: "14" })
+    : new URLSearchParams({ q: url.searchParams.get("q") || "", format: "jsonv2", addressdetails: "1", limit: "6", countrycodes: "us" });
+  const response = await fetch(`https://nominatim.openstreetmap.org/${endpoint}?${params}`, {
+    headers: { "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)", "Accept-Language": "en-US,en" },
+  });
+  if (!response.ok) return json({ error: "Location search is temporarily unavailable." }, 502);
+  const payload = await response.json() as Array<{ display_name?: string; lat?: string; lon?: string }> | { display_name?: string; lat?: string; lon?: string };
+  const results = (Array.isArray(payload) ? payload : [payload]).filter(Boolean).map((item) => ({
+    label: item.display_name || "Current location",
+    lat: item.lat,
+    lon: item.lon,
+  }));
+  return json({ results });
 }
 
 function calendarResponse(body: { meals?: Array<{ title: string; detail?: string }> }) {
@@ -63,6 +85,8 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
   const ownerId = request.headers.get("x-grocer-owner") || "";
   if (url.pathname === "/api/health") return json({ ok: true });
   if (url.pathname === "/api/recipes/search" && request.method === "GET") return searchRecipes(url, env);
+  if (url.pathname === "/api/location/search" && request.method === "GET") return locationLookup(url);
+  if (url.pathname === "/api/location/reverse" && request.method === "GET") return locationLookup(url, true);
   if (url.pathname === "/api/calendar" && request.method === "POST") return calendarResponse(await request.json());
   if (!ownerId) return json({ error: "Missing household identifier." }, 400);
   await ensureSchema(env.DB);
@@ -96,6 +120,38 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
       const recipeId = url.searchParams.get("recipeId");
       await env.DB.prepare("DELETE FROM favorites WHERE owner_id = ? AND recipe_id = ?").bind(ownerId, recipeId).run();
       return json({ deleted: true });
+    }
+  }
+
+  if (url.pathname === "/api/family") {
+    if (request.method === "GET") {
+      const result = await env.DB.prepare("SELECT * FROM family_members WHERE owner_id = ? ORDER BY created_at").bind(ownerId).all();
+      return json({ members: result.results.map((row) => ({ ...row, preferences: JSON.parse(String(row.preferences_json || "{}")) })) });
+    }
+    if (request.method === "POST") {
+      const body = await request.json() as { id?: string; name: string; role: string; preferences?: unknown; allergies?: string };
+      const id = body.id || crypto.randomUUID();
+      const now = new Date().toISOString();
+      await env.DB.prepare("INSERT INTO family_members(id, owner_id, name, role, preferences_json, allergies, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, role=excluded.role, preferences_json=excluded.preferences_json, allergies=excluded.allergies, updated_at=excluded.updated_at")
+        .bind(id, ownerId, body.name, body.role, JSON.stringify(body.preferences || {}), body.allergies || "", now, now).run();
+      return json({ saved: true, id });
+    }
+    if (request.method === "DELETE") {
+      await env.DB.prepare("DELETE FROM family_members WHERE owner_id = ? AND id = ?").bind(ownerId, url.searchParams.get("id")).run();
+      return json({ deleted: true });
+    }
+  }
+
+  if (url.pathname === "/api/ratings") {
+    if (request.method === "GET") {
+      const result = await env.DB.prepare("SELECT recipe_id, quality, ease FROM recipe_ratings WHERE owner_id = ?").bind(ownerId).all();
+      return json({ ratings: result.results });
+    }
+    if (request.method === "POST") {
+      const body = await request.json() as { recipeId: string; quality: number; ease: number };
+      await env.DB.prepare("INSERT OR REPLACE INTO recipe_ratings(id, owner_id, recipe_id, quality, ease, updated_at) VALUES(?,?,?,?,?,?)")
+        .bind(`${ownerId}:${body.recipeId}`, ownerId, body.recipeId, Math.max(1, Math.min(5, body.quality)), Math.max(1, Math.min(5, body.ease)), new Date().toISOString()).run();
+      return json({ saved: true });
     }
   }
 
