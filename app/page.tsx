@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 type Meal = {
   id: string; day: string; date: string; kind: string; title: string; detail: string;
   time: string; cost: string; tone: string; emoji: string; sourceUrl?: string; image?: string; sortOrder?: number;
+  sourceName?: string; readyMinutes?: number;
 };
 type Member = { id: string; name: string; role: string; allergies: string; preferences?: { glutenFree?: boolean; lowDairy?: boolean; kidFriendly?: boolean } };
 type Rating = { quality: number; ease: number };
@@ -72,10 +73,25 @@ export default function Home() {
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
   const [adminSearch, setAdminSearch] = useState("");
   const [billingBusy, setBillingBusy] = useState(false);
+  const [recipeIdeas, setRecipeIdeas] = useState<Meal[]>([]);
+  const [recipePage, setRecipePage] = useState(1);
+  const [recipeLoading, setRecipeLoading] = useState(false);
+  const [recipeNotice, setRecipeNotice] = useState("");
+  const [recipeFilters, setRecipeFilters] = useState({ query: "", kind: "All meals", maxTime: "Any time", source: "All sources", favoritesOnly: false });
 
   const estimated = useMemo(() => Math.round(people * (range === "Day" ? 9 : range === "Week" ? 27 : 104)), [people, range]);
   const dinnerTarget = range === "Day" ? 1 : range === "Week" ? 7 : 30;
   const lunchTarget = kidLunches && mealType !== "Dinner only" ? (range === "Day" ? 1 : range === "Week" ? 5 : 22) : 0;
+  const recipeSources = useMemo(() => [...new Set(recipeIdeas.map((meal) => meal.sourceName).filter(Boolean) as string[])].sort(), [recipeIdeas]);
+  const filteredRecipeIdeas = useMemo(() => recipeIdeas.filter((meal) => {
+    const query = recipeFilters.query.trim().toLowerCase();
+    const max = recipeFilters.maxTime === "Any time" ? Infinity : Number(recipeFilters.maxTime);
+    return (!query || `${meal.title} ${meal.detail}`.toLowerCase().includes(query))
+      && (recipeFilters.kind === "All meals" || meal.kind === recipeFilters.kind)
+      && Number(meal.readyMinutes || 0) <= max
+      && (recipeFilters.source === "All sources" || meal.sourceName === recipeFilters.source)
+      && (!recipeFilters.favoritesOnly || favorites.includes(meal.title));
+  }), [recipeIdeas, recipeFilters, favorites]);
 
   useEffect(() => {
     let id = window.localStorage.getItem("grocer-eaze-owner");
@@ -168,6 +184,8 @@ export default function Home() {
       sourceUrl: String(recipe.sourceUrl || ""),
       image: String(recipe.image || ""),
       sortOrder: mealDate.getTime(),
+      sourceName: String(recipe.sourceName || "Recipe source"),
+      readyMinutes: Number(recipe.readyInMinutes || 35),
     };
   }
 
@@ -176,18 +194,42 @@ export default function Home() {
     const minutes = maxTime.match(/\d+/)?.[0] || "45";
     const dinnerQuery = queryOverride || `${mediterranean ? "Mediterranean " : ""}family dinner ${exclusions ? `without ${exclusions}` : ""}`;
     try {
-      const requests = [fetch(`/api/recipes/search?${new URLSearchParams({ q: dinnerQuery, maxTime: minutes, glutenFree: String(glutenFree), number: String(dinnerTarget) })}`)];
-      if (lunchTarget) requests.push(fetch(`/api/recipes/search?${new URLSearchParams({ q: `school lunch kid friendly packable ${exclusions ? `without ${exclusions}` : ""}`, maxTime: "20", glutenFree: String(glutenFree), number: String(lunchTarget) })}`));
+      const requests = [fetch(`/api/recipes/search?${new URLSearchParams({ q: dinnerQuery, maxTime: minutes, glutenFree: String(glutenFree), number: String(Math.min(100, dinnerTarget + 12)) })}`)];
+      if (lunchTarget) requests.push(fetch(`/api/recipes/search?${new URLSearchParams({ q: `school lunch kid friendly packable ${exclusions ? `without ${exclusions}` : ""}`, maxTime: "20", glutenFree: String(glutenFree), number: String(Math.min(100, lunchTarget + 6)) })}`));
       const responses = await Promise.all(requests);
       const dinnerData = await responses[0].json();
       const lunchData = responses[1] ? await responses[1].json() : { recipes: [] };
       const unique = (recipes: Array<Record<string, unknown>>) => [...new Map(recipes.map((recipe) => [String(recipe.title).toLowerCase(), recipe])).values()];
       const dinners = unique(dinnerData.recipes || []).slice(0, dinnerTarget).map((r, i) => mapRecipe(r, i));
       const lunches = unique(lunchData.recipes || []).slice(0, lunchTarget).map((r, i) => mapRecipe(r, i, "School lunch"));
+      const dinnerIdeas = unique(dinnerData.recipes || []).slice(dinnerTarget).map((r, i) => mapRecipe(r, i));
+      const lunchIdeas = unique(lunchData.recipes || []).slice(lunchTarget).map((r, i) => mapRecipe(r, i, "School lunch"));
       if (dinners.length) setPlannedMeals([...dinners, ...lunches].sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder) || a.kind.localeCompare(b.kind)));
+      setRecipeIdeas([...dinnerIdeas, ...lunchIdeas]); setRecipePage(1); setRecipeNotice("");
       if (ownerId) await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, maxTime, skill, exclusions } }) });
       setSimilarTo(queryOverride || ""); setView("meals"); window.scrollTo({ top: 0, behavior: "smooth" });
     } finally { setPlanning(false); }
+  }
+
+  async function loadMoreRecipes() {
+    setRecipeLoading(true); setRecipeNotice("");
+    const kind = recipeFilters.kind === "School lunch" ? "School lunch" : "Dinner";
+    const query = recipeFilters.query.trim() || (kind === "School lunch" ? "school lunch kid friendly packable" : `${mediterranean ? "Mediterranean " : ""}family dinner`);
+    const maxTimeFilter = recipeFilters.maxTime === "Any time" ? (maxTime.match(/\d+/)?.[0] || "60") : recipeFilters.maxTime;
+    try {
+      const response = await fetch(`/api/recipes/search?${new URLSearchParams({ q: query, maxTime: maxTimeFilter, glutenFree: String(glutenFree), number: "18", offset: String(recipePage * 18) })}`);
+      const data = await response.json();
+      if (!response.ok) { setRecipeNotice(data.error || "More recipes are temporarily unavailable."); return; }
+      const incoming = (data.recipes || []).map((recipe: Record<string, unknown>, index: number) => mapRecipe(recipe, recipeIdeas.length + index, kind));
+      const existing = new Set(recipeIdeas.map((meal) => `${meal.id}:${meal.title.toLowerCase()}`));
+      const fresh = incoming.filter((meal: Meal) => !existing.has(`${meal.id}:${meal.title.toLowerCase()}`));
+      setRecipeIdeas((current) => [...current, ...fresh]); setRecipePage((page) => page + 1);
+      setRecipeNotice(fresh.length ? `${fresh.length} more recipes added.` : "No new matches in that batch. Try broader filters or load another batch.");
+    } catch {
+      setRecipeNotice("More recipes are temporarily unavailable.");
+    } finally {
+      setRecipeLoading(false);
+    }
   }
 
   async function locateMe() {
@@ -284,6 +326,22 @@ export default function Home() {
         <div className="meal-copy"><p>{meal.kind.toUpperCase()}</p><h3>{meal.title}</h3><span>{meal.detail}</span><footer><small>◷ {meal.time}</small><small>{meal.cost}</small>{ratings[meal.id] && <small>★ {ratings[meal.id].quality}/5 quality · {ratings[meal.id].ease}/5 ease</small>}</footer><div className="recipe-actions"><button onClick={() => setRatingMeal(meal)}>Rate</button><button onClick={() => generatePlan(meal.title)}>Find similar</button>{meal.sourceUrl && <a href={meal.sourceUrl} target="_blank" rel="noreferrer">Recipe ↗</a>}</div></div>
         <button className={`favorite icon-centered ${favorites.includes(meal.title) ? "saved" : ""}`} onClick={() => toggleFavorite(meal)} aria-label={`${favorites.includes(meal.title) ? "Remove" : "Add"} favorite`}>{favorites.includes(meal.title) ? "♥" : "♡"}</button>
       </article>)}</div>
+      <section className="recipe-library">
+        <div className="library-heading"><div><p className="eyebrow">ENDLESS RECIPE IDEAS</p><h3>Keep browsing.</h3><span>Filter the current collection or load another batch of recipes that match your household.</span></div><strong>{filteredRecipeIdeas.length} shown · {recipeIdeas.length} loaded</strong></div>
+        <div className="recipe-filters">
+          <div className="filter-search"><span className="icon-centered">⌕</span><input aria-label="Filter recipes by name or ingredient" placeholder="Search recipes or ingredients" value={recipeFilters.query} onChange={(event) => setRecipeFilters({ ...recipeFilters, query: event.target.value })} /></div>
+          <select aria-label="Filter by meal type" value={recipeFilters.kind} onChange={(event) => setRecipeFilters({ ...recipeFilters, kind: event.target.value })}><option>All meals</option><option>Dinner</option><option>School lunch</option></select>
+          <select aria-label="Filter by cook time" value={recipeFilters.maxTime} onChange={(event) => setRecipeFilters({ ...recipeFilters, maxTime: event.target.value })}><option>Any time</option><option value="20">20 minutes or less</option><option value="30">30 minutes or less</option><option value="45">45 minutes or less</option><option value="60">60 minutes or less</option></select>
+          <select aria-label="Filter by recipe source" value={recipeFilters.source} onChange={(event) => setRecipeFilters({ ...recipeFilters, source: event.target.value })}><option>All sources</option>{recipeSources.map((source) => <option key={source}>{source}</option>)}</select>
+          <button className={recipeFilters.favoritesOnly ? "active" : ""} onClick={() => setRecipeFilters({ ...recipeFilters, favoritesOnly: !recipeFilters.favoritesOnly })}>♡ Favorites</button>
+          <button onClick={() => setRecipeFilters({ query: "", kind: "All meals", maxTime: "Any time", source: "All sources", favoritesOnly: false })}>Clear</button>
+        </div>
+        {filteredRecipeIdeas.length ? <div className="recipe-card-grid">{filteredRecipeIdeas.map((meal) => <article className="recipe-card" key={`idea-${meal.id}-${meal.title}`}>
+          <div className={`recipe-thumb ${meal.tone}`}>{meal.image ? <><img src={meal.image} alt="" loading="lazy" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.nextElementSibling?.removeAttribute("hidden"); }} /><span hidden>{meal.emoji}</span></> : <span>{meal.emoji}</span>}<em>{meal.kind}</em><button className={favorites.includes(meal.title) ? "saved" : ""} onClick={() => toggleFavorite(meal)} aria-label={`${favorites.includes(meal.title) ? "Remove" : "Add"} favorite`}>{favorites.includes(meal.title) ? "♥" : "♡"}</button></div>
+          <div className="recipe-card-copy"><small>{meal.sourceName}</small><h4>{meal.title}</h4><p>{meal.readyMinutes} min · {meal.cost}</p><div>{meal.sourceUrl && <a href={meal.sourceUrl} target="_blank" rel="noreferrer">View recipe ↗</a>}<button onClick={() => generatePlan(meal.title)}>Find similar</button></div></div>
+        </article>)}</div> : <p className="empty-state">No loaded recipes match these filters. Clear a filter or load more choices.</p>}
+        <div className="load-more-row"><button className="primary compact" disabled={recipeLoading} onClick={loadMoreRecipes}>{recipeLoading ? "Finding more recipes…" : "Load more recipes"}</button>{recipeNotice && <span>{recipeNotice}</span>}</div>
+      </section>
       <div className="action-bar"><p><strong>Looks good?</strong> Your ingredients are combined and sorted by store.</p><button className="primary compact" onClick={() => setView("list")}>Review grocery list →</button></div>
     </div>}
 

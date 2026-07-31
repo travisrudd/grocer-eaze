@@ -71,6 +71,7 @@ async function searchRecipes(url: URL, env: AppEnv) {
     apiKey: env.SPOONACULAR_API_KEY,
     query,
     number: String(requested),
+    offset: String(Math.max(0, Number(url.searchParams.get("offset") || 0))),
     addRecipeInformation: "true",
     fillIngredients: "true",
     instructionsRequired: "true",

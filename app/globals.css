@@ -177,6 +177,34 @@ summary small { color: var(--muted); font-weight: 500; }
 .lunch-banner strong { font-size: 12px; }.lunch-banner p { margin: 3px 0 0; color: var(--muted); font-size: 10px; }.lunch-banner > span { color: #906f27; font-size: 9px; font-weight: 800; }
 .recipe-actions { display: flex; gap: 7px; margin-top: 11px; }
 .recipe-actions button, .recipe-actions a { border: 1px solid #cbd2cc; background: white; color: var(--green-dark); padding: 5px 8px; text-decoration: none; font-size: 8px; font-weight: 800; cursor: pointer; border-radius: 2px; }
+.recipe-library { margin-top: 34px; padding-top: 30px; border-top: 1px solid var(--line); }
+.library-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 18px; }
+.library-heading h3 { margin: 4px 0 6px; font-size: 31px; font-weight: 500; }
+.library-heading span { color: var(--muted); font-size: 10px; }
+.library-heading > strong { color: var(--green); font-size: 9px; white-space: nowrap; }
+.recipe-filters { display: grid; grid-template-columns: minmax(210px, 1.5fr) repeat(3, minmax(125px, .75fr)) auto auto; gap: 8px; padding: 12px; margin-bottom: 18px; background: #e8ece5; border: 1px solid #d7ddd8; }
+.recipe-filters select { height: 40px; font-size: 10px; }
+.recipe-filters > button { min-height: 40px; padding: 0 12px; border: 1px solid #c5cec7; background: white; color: var(--green-dark); font-size: 9px; font-weight: 800; cursor: pointer; white-space: nowrap; }
+.recipe-filters > button.active { background: var(--green); border-color: var(--green); color: white; }
+.filter-search { height: 40px; display: grid; grid-template-columns: 34px 1fr; align-items: center; background: white; border: 1px solid #c5cec7; }
+.filter-search span { color: var(--green); font-size: 18px; }
+.filter-search input { width: 100%; height: 100%; padding: 0 12px 0 2px; border: 0; outline: 0; background: transparent; font-size: 10px; }
+.recipe-card-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; }
+.recipe-card { min-width: 0; background: var(--paper); border: 1px solid #deddd4; }
+.recipe-thumb { position: relative; display: grid; place-items: center; height: 155px; overflow: hidden; font-size: 46px; }
+.recipe-thumb.salmon { background: #e8c9aa; }.recipe-thumb.gold { background: #e6d39f; }.recipe-thumb.green { background: #bdcda8; }.recipe-thumb.blue { background: #b7d1cf; }
+.recipe-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.recipe-thumb em { position: absolute; left: 9px; bottom: 9px; padding: 4px 7px; background: rgba(255,255,255,.92); color: var(--green-dark); font-size: 7px; font-style: normal; font-weight: 800; text-transform: uppercase; }
+.recipe-thumb button { position: absolute; top: 8px; right: 8px; display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 50%; background: rgba(255,255,255,.93); color: #7b877f; font-size: 18px; cursor: pointer; }
+.recipe-thumb button.saved { color: var(--orange); }
+.recipe-card-copy { padding: 14px; }
+.recipe-card-copy > small { color: var(--orange); font-size: 7px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+.recipe-card-copy h4 { min-height: 39px; margin: 6px 0; font: 18px/1.1 Georgia, serif; }
+.recipe-card-copy p { margin: 0 0 12px; color: var(--muted); font-size: 9px; }
+.recipe-card-copy > div { display: flex; gap: 6px; }
+.recipe-card-copy a, .recipe-card-copy button { padding: 6px 8px; border: 1px solid #cbd2cc; background: white; color: var(--green-dark); font-size: 8px; font-weight: 800; text-decoration: none; cursor: pointer; }
+.load-more-row { display: flex; align-items: center; gap: 14px; margin-top: 18px; }
+.load-more-row span { color: var(--muted); font-size: 9px; }
 .narrow { max-width: 920px; }
 .family-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; align-items: start; }
 .settings-stack { display: grid; gap: 16px; }
@@ -239,4 +267,8 @@ summary small { color: var(--muted); font-weight: 500; }
   .lunch-banner { grid-template-columns: 42px 1fr; }.lunch-banner > span { grid-column: 2; }
   .plan-row, .danger-zone { align-items: stretch; flex-direction: column; }
   .admin-user { grid-template-columns: 1fr; }.admin-actions { justify-content: flex-start; }
+  .library-heading { align-items: start; flex-direction: column; }
+  .recipe-filters { grid-template-columns: 1fr 1fr; }
+  .filter-search { grid-column: 1 / -1; }
+  .recipe-card-grid { grid-template-columns: 1fr; }
 }
