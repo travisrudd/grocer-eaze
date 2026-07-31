@@ -196,9 +196,25 @@ export default function Home() {
     setExportStatus("Calendar file downloaded.");
   }
 
-  function emailRecipes() {
+  async function emailRecipes() {
     const subject = encodeURIComponent("My Grocer-Eaze recipes · May 12–18");
     const body = encodeURIComponent(plannedMeals.map((meal) => `${meal.day}: ${meal.title}\n${meal.detail}`).join("\n\n"));
+    if (email) {
+      const response = await fetch("/api/email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId },
+        body: JSON.stringify({
+          to: email,
+          subject: "My Grocer-Eaze recipes · May 12–18",
+          html: `<h1>Your Grocer-Eaze meal plan</h1>${plannedMeals.map((meal) => `<h2>${meal.day}: ${meal.title}</h2><p>${meal.detail} · ${meal.time}</p>`).join("")}`,
+        }),
+      });
+      if (response.ok) {
+        setExportStatus(`Recipes sent to ${email}.`);
+        return;
+      }
+      setExportStatus("Automatic delivery needs the email service key; opening your email app instead.");
+    }
     window.location.href = `mailto:?subject=${subject}&body=${body}`;
     setExportStatus("Opening your email app.");
   }
