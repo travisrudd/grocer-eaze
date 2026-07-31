@@ -97,6 +97,13 @@ async function searchRecipes(url: URL, env: AppEnv) {
   });
   const used = new Set(preferred.map((recipe) => String(recipe.title).toLowerCase()));
   const supplemental = variedFallback().filter((recipe) => !used.has(recipe.title.toLowerCase()));
+  if (url.searchParams.get("schoolLunch") === "true") {
+    supplemental.sort((a, b) => {
+      const lunchPattern = /box|bento|roll-up|quesadilla|bites|lunch|pita|snack/i;
+      const kidScore = Number(lunchPattern.test(b.title)) - Number(lunchPattern.test(a.title));
+      return kidScore || a.readyInMinutes - b.readyInMinutes;
+    });
+  }
   return json({ recipes: [...preferred, ...supplemental].slice(0, requested), demo: false });
 }
 
