@@ -76,7 +76,6 @@ async function searchRecipes(url: URL, env: AppEnv) {
     addRecipeInformation: "true",
     fillIngredients: "true",
     instructionsRequired: "true",
-    ...(url.searchParams.get("mediterranean") === "true" ? { diet: "Mediterranean" } : {}),
     ...((url.searchParams.get("glutenFree") !== "false" || url.searchParams.get("lowDairy") === "true")
       ? { intolerances: [url.searchParams.get("glutenFree") !== "false" ? "gluten" : "", url.searchParams.get("lowDairy") === "true" ? "dairy" : ""].filter(Boolean).join(",") }
       : {}),
