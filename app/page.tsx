@@ -28,6 +28,7 @@ const recipeSourceLinks = [
 ];
 const proteinOptions = ["Beef", "Pork", "Fish", "Shrimp"];
 const storeNames = ["Whole Foods", "Jewel-Osco", "Trader Joe’s"];
+const defaultRecipeFilters = { query: "", kind: "All meals", maxTime: "Any time", source: "All sources", protein: "All proteins", favoritesOnly: false };
 const onboardingSteps = [
   { eyebrow: "STEP 1 OF 4", title: "Start with your household.", body: "Choose your dates, meals, budget, and dietary needs. Family preferences are included automatically." },
   { eyebrow: "STEP 2 OF 4", title: "Browse a catalog built for you.", body: "Filter a large recipe collection, save favorites, and add each recipe to lunch, dinner, or school lunch." },
@@ -135,7 +136,7 @@ export default function Home() {
   const [ingredientAdjustments, setIngredientAdjustments] = useState<Record<string, string>>({});
   const [reviewedPlanSignature, setReviewedPlanSignature] = useState("");
   const [familyStatus, setFamilyStatus] = useState("");
-  const [recipeFilters, setRecipeFilters] = useState({ query: "", kind: "All meals", maxTime: "Any time", source: "All sources", protein: "All proteins", favoritesOnly: false });
+  const [recipeFilters, setRecipeFilters] = useState(defaultRecipeFilters);
 
   const dinnerTarget = range === "Day" ? 1 : range === "Week" ? 7 : 30;
   const schoolLunchTarget = kidLunches ? (range === "Day" ? 1 : range === "Week" ? 5 : 22) : 0;
@@ -453,12 +454,17 @@ export default function Home() {
       });
       const uniqueIdeas = [...new Map(ideas.map((meal) => [`${meal.kind}:${meal.title.toLowerCase()}`, meal])).values()]
         .sort((a, b) => Number(Boolean(b.tags?.includes("Budget fit"))) - Number(Boolean(a.tags?.includes("Budget fit"))));
+      if (!uniqueIdeas.length) throw new Error("No recipes matched this search. Try relaxing one preference and search again.");
       const previousPlan = plannedMeals;
       if (previousPlan.length) {
         setUndoAction({ message: "Your previous schedule was cleared for the new catalog.", restore: () => setPlannedMeals(previousPlan) });
       }
       setPlannedMeals([]);
-      setRecipeIdeas(uniqueIdeas); setRecipePage(1); setRecipeNotice(`${uniqueIdeas.length} recipes ready to browse.`);
+      setRecipeIdeas(uniqueIdeas);
+      setRecipeFilters({ ...defaultRecipeFilters });
+      setRecipePage(1);
+      const fallbackActive = payloads.some((data) => data.demo);
+      setRecipeNotice(`${uniqueIdeas.length} recipes ready to browse.${fallbackActive ? " The live recipe provider is unavailable, so backup recipes are included." : ""}`);
       if (ownerId) await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, planStartDate, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, maxTime, skill, exclusions } }) });
       setSimilarTo(queryOverride || ""); setView("meals"); window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (error) {
@@ -487,7 +493,7 @@ export default function Home() {
       const existing = new Set(recipeIdeas.map((meal) => `${meal.kind}:${meal.id}:${meal.title.toLowerCase()}`));
       const fresh = incoming.filter((meal: Meal) => !existing.has(`${meal.kind}:${meal.id}:${meal.title.toLowerCase()}`));
       setRecipeIdeas((current) => [...current, ...fresh]); setRecipePage((page) => page + 1);
-      setRecipeNotice(fresh.length ? `${fresh.length} more recipes added.` : "No new matches in that batch. Try broader filters or load another batch.");
+      setRecipeNotice(fresh.length ? `${fresh.length} more recipes added.${data.demo ? " Backup recipes are active while the live provider is unavailable." : ""}` : "No new matches in that batch. Try broader filters or load another batch.");
     } catch {
       setRecipeNotice("More recipes are temporarily unavailable.");
     } finally {
@@ -850,7 +856,7 @@ export default function Home() {
           <select aria-label="Filter by cook time" value={recipeFilters.maxTime} onChange={(event) => setRecipeFilters({ ...recipeFilters, maxTime: event.target.value })}><option>Any time</option><option value="20">20 minutes or less</option><option value="30">30 minutes or less</option><option value="45">45 minutes or less</option><option value="60">60 minutes or less</option></select>
           <select aria-label="Filter by recipe source" value={recipeFilters.source} onChange={(event) => setRecipeFilters({ ...recipeFilters, source: event.target.value })}><option>All sources</option>{recipeSources.map((source) => <option key={source}>{source}</option>)}</select>
           <button className={recipeFilters.favoritesOnly ? "active" : ""} onClick={() => setRecipeFilters({ ...recipeFilters, favoritesOnly: !recipeFilters.favoritesOnly })}>♡ Favorites</button>
-          <button onClick={() => setRecipeFilters({ query: "", kind: "All meals", maxTime: "Any time", source: "All sources", protein: "All proteins", favoritesOnly: false })}>Clear</button>
+          <button onClick={() => setRecipeFilters({ ...defaultRecipeFilters })}>Clear</button>
           </div>
         </details>
         {filteredRecipeIdeas.length ? <div className="recipe-card-grid">{filteredRecipeIdeas.map((meal) => <article className="recipe-card" key={`idea-${meal.kind}-${meal.id}-${meal.title}`}>

@@ -26,6 +26,21 @@ const fallbackTitles = [
   "Greek Turkey Lettuce Cups", "Eggplant Lentil Moussaka", "Orange Herb Roast Chicken", "Shrimp and White Bean Sauté",
   "Rainbow Hummus Lunch Box", "Turkey Cucumber Roll-Ups", "Sunflower Butter Berry Box", "Chicken Pita Bento",
   "Mediterranean Pasta Salad Box", "Egg and Veggie Snack Box", "Bean and Corn Quesadilla Box", "Apple Cheddar Turkey Bites",
+  "Za’atar Chicken Grain Bowls", "White Bean Pesto Pasta", "Honey Mustard Salmon", "Turkey Taco Lettuce Wraps",
+  "Roasted Cauliflower Shawarma", "Beef and Broccoli Rice Bowls", "Lemon Dill Cod Packets", "Pork Tenderloin with Pears",
+  "Crispy Chickpea Greek Salad", "Chicken Orzo Vegetable Soup", "Shrimp Fajita Bowls", "Balsamic Mushroom Polenta",
+  "Salmon Cucumber Sushi Bowls", "Turkey Spinach Stuffed Peppers", "Herbed Pork and Sweet Potatoes", "White Bean Tomato Bruschetta",
+  "Chicken Tzatziki Flatbreads", "Garlic Lime Shrimp Tacos", "Beef Kofta Salad Bowls", "Roasted Red Pepper Lentil Soup",
+  "Tuna White Bean Picnic Salad", "Chicken Caprese Sheet Pan", "Pork and Pineapple Rice Bowls", "Cedar Plank Salmon",
+  "Vegetable Hummus Pinwheels", "Turkey Avocado Bento", "Chicken Caesar Pasta Box", "Mini Falafel Pita Pockets",
+  "Sunflower Butter Banana Roll-Ups", "Greek Yogurt Berry Snack Box", "Tuna Cucumber Cracker Kit", "Egg Salad Lettuce Cups",
+  "Chicken Apple Wraps", "Black Bean Corn Pinwheels", "Turkey Hummus Pita Box", "Mediterranean Chickpea Bento",
+  "Caprese Skewer Lunch Box", "Salmon Salad Cucumber Boats", "Veggie Fried Rice Cups", "Chicken Quinoa Mason Jar Salad",
+  "Miso Glazed Salmon and Greens", "Skillet Beef Stuffed Zucchini", "Rosemary Chicken White Bean Soup", "Pork Souvlaki Plates",
+  "Shrimp Tomato Couscous", "Spinach Feta Turkey Burgers", "Lentil Walnut Lettuce Cups", "Cod with Olive Tapenade",
+  "Chicken Ratatouille Bake", "Beef Tomato Zucchini Skillet", "Coconut Lime Shrimp Curry", "Pork Chops with Fennel",
+  "Salmon with Warm Lentil Salad", "Tuscan Chicken and Kale", "Greek Beef Stuffed Eggplant", "Chickpea Spinach Shakshuka",
+  "Turkey Meatloaf with Green Beans", "Shrimp and Broccoli Noodles", "White Bean Artichoke Bake", "Chicken Lemon Rice Soup",
 ];
 const fallbackRecipes = fallbackTitles.map((title, index) => ({
   id: `demo-${index + 1}`,
@@ -42,9 +57,17 @@ const fallbackRecipes = fallbackTitles.map((title, index) => ({
   extendedIngredients: [{ name: "fresh vegetables", aisle: "Produce", original: "Fresh vegetables" }, { name: title.toLowerCase().includes("salmon") ? "salmon fillets" : title.toLowerCase().includes("shrimp") ? "shrimp" : "lean protein or beans", aisle: "Meat & seafood", original: "Lean protein or beans" }, { name: "herbs and pantry staples", aisle: "Pantry", original: "Herbs and pantry staples" }],
 }));
 
-function variedFallback() {
-  const start = crypto.getRandomValues(new Uint32Array(1))[0] % fallbackRecipes.length;
-  return [...fallbackRecipes.slice(start), ...fallbackRecipes.slice(0, start)];
+function fallbackPage(url: URL, requested: number) {
+  const query = url.searchParams.get("q") || "";
+  const offset = Math.max(0, Number(url.searchParams.get("offset") || 0));
+  const seed = [...query].reduce((sum, character) => sum + character.charCodeAt(0), 0) % fallbackRecipes.length;
+  const ordered = [...fallbackRecipes.slice(seed), ...fallbackRecipes.slice(0, seed)];
+  if (url.searchParams.get("schoolLunch") === "true") {
+    const lunchPattern = /box|bento|roll-up|pinwheel|wrap|pita|pocket|skewer|boats|cups|lunch|snack|picnic/i;
+    ordered.sort((a, b) => Number(lunchPattern.test(b.title)) - Number(lunchPattern.test(a.title)) || a.readyInMinutes - b.readyInMinutes);
+  }
+  const start = offset % ordered.length;
+  return [...ordered.slice(start), ...ordered.slice(0, start)].slice(0, requested);
 }
 
 function json(value: unknown, status = 200) {
@@ -67,7 +90,7 @@ async function searchRecipes(url: URL, env: AppEnv) {
   const query = url.searchParams.get("q") || "Mediterranean dinner";
   const maxTime = url.searchParams.get("maxTime") || "45";
   const requested = Math.max(1, Math.min(100, Number(url.searchParams.get("number") || 18)));
-  if (!env.SPOONACULAR_API_KEY) return json({ recipes: variedFallback().slice(0, requested), demo: true });
+  if (!env.SPOONACULAR_API_KEY) return json({ recipes: fallbackPage(url, requested), demo: true, providerStatus: "fallback" });
   const params = new URLSearchParams({
     apiKey: env.SPOONACULAR_API_KEY,
     query,
@@ -81,8 +104,13 @@ async function searchRecipes(url: URL, env: AppEnv) {
     maxReadyTime: maxTime,
     sort: "random",
   });
-  const response = await fetch(`https://api.spoonacular.com/recipes/complexSearch?${params}`);
-  if (!response.ok) return json({ error: "Recipe provider is temporarily unavailable." }, 502);
+  let response: Response;
+  try {
+    response = await fetch(`https://api.spoonacular.com/recipes/complexSearch?${params}`);
+  } catch {
+    return json({ recipes: fallbackPage(url, requested), demo: true, providerStatus: "unreachable" });
+  }
+  if (!response.ok) return json({ recipes: fallbackPage(url, requested), demo: true, providerStatus: `error-${response.status}` });
   const data = await response.json() as { results?: Array<Record<string, unknown>> };
   const preferred = (data.results || []).sort((a, b) => {
     const aUrl = String(a.sourceUrl || "");
@@ -93,7 +121,7 @@ async function searchRecipes(url: URL, env: AppEnv) {
     return 0;
   });
   const used = new Set(preferred.map((recipe) => String(recipe.title).toLowerCase()));
-  const supplemental = variedFallback().filter((recipe) => !used.has(recipe.title.toLowerCase()));
+  const supplemental = fallbackPage(url, fallbackRecipes.length).filter((recipe) => !used.has(recipe.title.toLowerCase()));
   if (url.searchParams.get("schoolLunch") === "true") {
     supplemental.sort((a, b) => {
       const lunchPattern = /box|bento|roll-up|quesadilla|bites|lunch|pita|snack/i;
