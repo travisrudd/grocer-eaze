@@ -104,7 +104,11 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
     const body = await request.json() as { to: string; subject: string; html: string };
     const sent = await fetch("https://api.resend.com/emails", {
       method: "POST",
-      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+      headers: {
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+        "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)",
+      },
       body: JSON.stringify({ from: env.EMAIL_FROM, to: [body.to], subject: body.subject, html: body.html }),
     });
     return json(await sent.json(), sent.status);
