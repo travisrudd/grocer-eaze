@@ -76,9 +76,7 @@ async function searchRecipes(url: URL, env: AppEnv) {
     addRecipeInformation: "true",
     fillIngredients: "true",
     instructionsRequired: "true",
-    ...((url.searchParams.get("glutenFree") !== "false" || url.searchParams.get("lowDairy") === "true")
-      ? { intolerances: [url.searchParams.get("glutenFree") !== "false" ? "gluten" : "", url.searchParams.get("lowDairy") === "true" ? "dairy" : ""].filter(Boolean).join(",") }
-      : {}),
+    ...(url.searchParams.get("glutenFree") !== "false" ? { intolerances: "gluten" } : {}),
     ...(url.searchParams.get("excludeIngredients") ? { excludeIngredients: url.searchParams.get("excludeIngredients") || "" } : {}),
     maxReadyTime: maxTime,
     sort: "random",

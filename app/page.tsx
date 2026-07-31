@@ -167,9 +167,8 @@ export default function Home() {
       && (recipeFilters.source === "All sources" || meal.sourceName === recipeFilters.source)
       && (recipeFilters.protein === "All proteins" || meal.title.toLowerCase().includes(recipeFilters.protein.toLowerCase()))
       && (!glutenFree || meal.tags?.includes("Gluten-free"))
-      && (!lowDairy || meal.tags?.includes("Low dairy"))
       && (!recipeFilters.favoritesOnly || favorites.includes(meal.title));
-  }), [recipeIdeas, recipeFilters, favorites, glutenFree, lowDairy]);
+  }), [recipeIdeas, recipeFilters, favorites, glutenFree]);
 
   useEffect(() => {
     let id = window.localStorage.getItem("grocer-eaze-owner");
@@ -280,15 +279,16 @@ export default function Home() {
   async function generatePlan(queryOverride?: string) {
     setPlanning(true);
     const minutes = maxTime.match(/\d+/)?.[0] || "45";
-    const proteinPrompt = familyProteins.length ? `${familyProteins.join(" ")} ` : "";
+    const proteinPrompt = familyProteins[0] || "healthy";
     const avoidPrompt = familyAvoids.length ? `without ${familyAvoids.join(", ")}` : "";
-    const dinnerQuery = queryOverride || `${mediterranean ? "Mediterranean " : ""}${proteinPrompt}family dinner ${avoidPrompt}`;
-    const lunchQuery = `${mediterranean ? "Mediterranean " : ""}${proteinPrompt}easy lunch ${avoidPrompt}`;
-    const schoolQuery = `simple kid friendly packable school lunch no heat ${avoidPrompt}`;
+    const dinnerQuery = queryOverride || `${mediterranean ? "Mediterranean " : ""}${proteinPrompt} dinner ${avoidPrompt}`;
+    const lunchQuery = `${mediterranean ? "Mediterranean " : ""}${proteinPrompt} lunch ${avoidPrompt}`;
+    const schoolQuery = `wrap ${avoidPrompt}`;
+    const providerExclusions = [...familyAvoids, ...(lowDairy ? ["cream cheese", "heavy cream"] : [])];
     const resultCount = range === "Month" ? "48" : "30";
     const searchParams = (q: string, time: string) => new URLSearchParams({
       q, maxTime: time, glutenFree: String(glutenFree), lowDairy: String(lowDairy), mediterranean: String(mediterranean),
-      excludeIngredients: familyAvoids.join(","), number: resultCount,
+      excludeIngredients: providerExclusions.join(","), number: resultCount,
     });
     try {
       const searches: Array<{ kind: string; request: Promise<Response> }> = [
@@ -318,13 +318,14 @@ export default function Home() {
   async function loadMoreRecipes() {
     setRecipeLoading(true); setRecipeNotice("");
     const kind = recipeFilters.kind !== "All meals" ? recipeFilters.kind : activeMealKinds[recipePage % activeMealKinds.length] || "Dinner";
-    const proteinPrompt = recipeFilters.protein === "All proteins" ? familyProteins.join(" ") : recipeFilters.protein;
-    const query = recipeFilters.query.trim() || (kind === "School lunch" ? "simple kid friendly packable school lunch no heat" : `${mediterranean ? "Mediterranean " : ""}${proteinPrompt} ${kind.toLowerCase()}`);
+    const proteinPrompt = recipeFilters.protein === "All proteins" ? (familyProteins[0] || "healthy") : recipeFilters.protein;
+    const query = recipeFilters.query.trim() || (kind === "School lunch" ? "wrap" : `${mediterranean ? "Mediterranean " : ""}${proteinPrompt} ${kind.toLowerCase()}`);
     const maxTimeFilter = recipeFilters.maxTime === "Any time" ? (maxTime.match(/\d+/)?.[0] || "60") : recipeFilters.maxTime;
+    const providerExclusions = [...familyAvoids, ...(lowDairy ? ["cream cheese", "heavy cream"] : [])];
     try {
       const response = await fetch(`/api/recipes/search?${new URLSearchParams({
         q: query, maxTime: kind === "School lunch" ? "20" : maxTimeFilter, glutenFree: String(glutenFree), lowDairy: String(lowDairy),
-        mediterranean: String(mediterranean), excludeIngredients: familyAvoids.join(","), number: "24", offset: String(recipePage * 24),
+        mediterranean: String(mediterranean), excludeIngredients: providerExclusions.join(","), number: "24", offset: String(recipePage * 24),
         ...(kind === "School lunch" ? { schoolLunch: "true" } : {}),
       })}`);
       const data = await response.json();
