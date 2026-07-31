@@ -318,6 +318,7 @@ summary small { color: var(--muted); font-weight: 500; }
   .plan-row, .danger-zone { align-items: stretch; flex-direction: column; }
   .admin-user { grid-template-columns: 1fr; }.admin-actions { justify-content: flex-start; }
   .library-heading { align-items: start; flex-direction: column; }
+  .library-heading > strong { max-width: 100%; white-space: normal; overflow-wrap: anywhere; line-height: 1.45; }
   .recipe-filters { grid-template-columns: 1fr 1fr; }
   .filter-search { grid-column: 1 / -1; }
   .recipe-card-grid { grid-template-columns: 1fr; }
