@@ -154,7 +154,8 @@ test("restores returning accounts and hardens passwordless sign-in", async () =>
 });
 
 test("recovers approved administrators after the hosting migration", async () => {
-  const [auth, worker, config, workflow] = await Promise.all([
+  const [page, auth, worker, config, workflow] = await Promise.all([
+    source("app/page.tsx"),
     source("worker/auth.ts"),
     source("worker/index.ts"),
     source("wrangler.production.jsonc"),
@@ -164,6 +165,8 @@ test("recovers approved administrators after the hosting migration", async () =>
   assert.match(auth, /INITIAL_ADMIN_EMAILS/);
   assert.match(auth, /split\(","\)/);
   assert.match(auth, /isInitialAdmin \? "admin" : "user"/);
+  assert.match(page, /Administrator access/);
+  assert.match(page, /administrator account does not require billing/);
   assert.match(worker, /INITIAL_ADMIN_EMAILS/);
   assert.match(config, /"database_name": "grocer-eaze-production"/);
   assert.match(config, /"INITIAL_ADMIN_EMAILS"/);

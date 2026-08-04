@@ -468,23 +468,35 @@ export default function Home() {
     setAuthBusy(true); setAccountStatus("");
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(authForm.email.trim())) { setAuthBusy(false); setAccountStatus("Enter a valid email address to continue."); return; }
     if (authStep === "details" && !authForm.name.trim()) { setAuthBusy(false); setAccountStatus("Enter your name to create your account."); return; }
-    const body = authStep === "details" ? { name: authForm.name, email: authForm.email, phone: authForm.phone } : { email: authForm.email };
-    const result = await fetch("/api/auth/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    const data = await result.json(); setAuthBusy(false);
-    if (result.status === 409 && data.code === "NAME_REQUIRED") { setAuthStep("details"); setAccountStatus("This email is new. Add your name to finish creating your account."); return; }
-    if (!result.ok) { setAccountStatus(data.error || "Could not send a code."); return; }
-    setAuthStep("code"); setAccountStatus(`We sent a six-digit code to ${authForm.email}.`);
+    try {
+      const body = authStep === "details" ? { name: authForm.name, email: authForm.email, phone: authForm.phone } : { email: authForm.email };
+      const result = await fetch("/api/auth/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const data = await result.json().catch(() => ({ error: "Email delivery is temporarily unavailable." }));
+      if (result.status === 409 && data.code === "NAME_REQUIRED") { setAuthStep("details"); setAccountStatus("This email is new. Add your name to finish creating your account."); return; }
+      if (!result.ok) { setAccountStatus(data.error || "Could not send a code."); return; }
+      setAuthStep("code"); setAccountStatus(`We sent a six-digit code to ${authForm.email}.`);
+    } catch {
+      setAccountStatus("Email delivery is temporarily unavailable. Please try again.");
+    } finally {
+      setAuthBusy(false);
+    }
   }
 
   async function verifyAuth() {
     setAuthBusy(true); setAccountStatus("");
-    const result = await fetch("/api/auth/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: authForm.email, code: authForm.code }) });
-    const data = await result.json(); setAuthBusy(false);
-    if (!result.ok) { setAccountStatus(data.error || "That code could not be verified."); return; }
-    const me = await fetch("/api/auth/me").then((r) => r.json());
-    setUser(me.user); setEmail(me.user.email); setAuthForm((current) => ({ ...current, name: me.user.name, phone: me.user.phone || "" }));
-    await reloadPersonalData();
-    setAccountStatus(data.returning ? "Welcome back. Your household information has been restored." : "Your secure account is ready. Choose a plan to start your free trial.");
+    try {
+      const result = await fetch("/api/auth/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: authForm.email, code: authForm.code }) });
+      const data = await result.json().catch(() => ({ error: "That code could not be verified." }));
+      if (!result.ok) { setAccountStatus(data.error || "That code could not be verified."); return; }
+      const me = await fetch("/api/auth/me").then((r) => r.json());
+      setUser(me.user); setEmail(me.user.email); setAuthForm((current) => ({ ...current, name: me.user.name, phone: me.user.phone || "" }));
+      await reloadPersonalData();
+      setAccountStatus(data.returning ? "Welcome back. Your household information has been restored." : "Your secure account is ready. Choose a plan to start your free trial.");
+    } catch {
+      setAccountStatus("That code could not be verified. Please try again.");
+    } finally {
+      setAuthBusy(false);
+    }
   }
 
   async function loadAdminUsers(query = adminSearch) {
@@ -1290,7 +1302,14 @@ export default function Home() {
           <button className="outline" onClick={async () => { await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, planStartDate, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, maxTime, skill, exclusions } }) }); setAccountStatus("Profile saved."); }}>Save profile</button>{accountStatus && <span className="success-note" role="status">{accountStatus}</span>}
         </section>
         <section className="settings-card security-card"><div className="icon-centered" aria-hidden="true">🔒</div><div><h3>Security</h3><p>Your email is verified. Your session is stored in a secure, HTTP-only cookie, protected data is checked on the server, and sensitive service keys never reach your browser.</p></div></section>
-        <section className="settings-card plan-row"><div><span className="mini-label">ACCESS STATUS</span><h3>{user.billingExempt ? "Billing exempt" : user.accessStatus === "complimentary" ? "Complimentary account" : user.subscriptionStatus === "active" ? "Active membership" : user.subscriptionStatus === "trialing" ? "30-day free trial" : "Plan required"}</h3><p>{user.complimentaryUntil ? `Complimentary through ${user.complimentaryUntil}` : user.subscriptionEndsAt ? `Current period ends ${new Date(user.subscriptionEndsAt).toLocaleDateString()}` : user.hasAccess ? "Your Grocer-Eaze tools are unlocked." : "Choose monthly or yearly billing to start your 30-day trial."}</p></div>{user.subscriptionStatus ? <button className="primary compact" disabled={billingBusy} onClick={() => openBilling("portal")}>Manage billing</button> : <button className="primary compact" onClick={() => navigateTo("plans")}>View plans</button>}</section>
+        <section className="settings-card plan-row">
+          <div>
+            <span className="mini-label">ACCESS STATUS</span>
+            <h3>{user.subscriptionStatus === "active" ? "Active membership" : user.subscriptionStatus === "trialing" ? "30-day free trial" : user.role === "admin" ? "Administrator access" : user.billingExempt ? "Billing exempt" : user.accessStatus === "complimentary" ? "Complimentary account" : "Plan required"}</h3>
+            <p>{user.subscriptionEndsAt ? `Current period ends ${new Date(user.subscriptionEndsAt).toLocaleDateString()}` : user.complimentaryUntil ? `Complimentary through ${user.complimentaryUntil}` : user.role === "admin" ? "Your administrator account does not require billing." : user.hasAccess ? "Your Grocer-Eaze tools are unlocked." : "Choose monthly or yearly billing to start your 30-day trial."}</p>
+          </div>
+          {user.subscriptionStatus ? <button className="primary compact" disabled={billingBusy} onClick={() => openBilling("portal")}>Manage billing</button> : user.role === "admin" ? null : <button className="primary compact" onClick={() => navigateTo("plans")}>View plans</button>}
+        </section>
         <section className="settings-card danger-zone"><h3>Account controls</h3><button className="outline" onClick={async () => { await fetch("/api/auth/signout", { method: "POST" }); setUser(null); setAuthStep("email"); }}>Sign out</button></section>
       </div>}
     </div>}
