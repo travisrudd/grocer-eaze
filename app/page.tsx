@@ -25,6 +25,9 @@ type FamilyPayload = { members?: Member[] };
 type RatingsPayload = { ratings?: Array<{ recipe_id: string; quality: number; ease: number }> };
 type CapabilitiesPayload = { instacartShopping?: boolean };
 type IngredientReport = { key: string; name: string; amount: string; originals: string[]; sources: Array<{ title: string; sourceName: string; sourceUrl: string }> };
+type DeliverySelections = { recipes: boolean; grocery: boolean; calendar: boolean };
+type DeliveryRecipient = { id: string; name: string; channel: "email" | "text"; address: string; selections: DeliverySelections };
+type DeliveryRecipientDraft = { id: string; name: string; channel: "email" | "text"; address: string };
 
 const proteinOptions = ["Beef", "Pork", "Fish", "Shrimp"];
 const defaultStores: StorePreference[] = [
@@ -43,6 +46,8 @@ const schoolLunchSideIngredients: Record<string, { name: string; aisle: string }
   "Crunchy vegetables": { name: "baby carrots", aisle: "Produce" },
   "Snack bars": { name: "gluten-free snack bars", aisle: "Pantry" },
 };
+const defaultDeliverySelections: DeliverySelections = { recipes: true, grocery: true, calendar: true };
+const emailAddressPattern = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
 const onboardingSteps = [
   { eyebrow: "STEP 1 OF 4", title: "Start with your household.", body: "Choose your dates, meals, budget, and dietary needs. Family preferences are included automatically." },
   { eyebrow: "STEP 2 OF 4", title: "Browse a catalog built for you.", body: "Filter a large recipe collection, save favorites, and add each recipe to lunch, dinner, or school lunch." },
@@ -72,6 +77,46 @@ function parseNumber(value: string) {
     return denominator ? numerator / denominator : 0;
   }
   return Number(value) || 0;
+}
+
+function normalizeDeliveryAddress(channel: "email" | "text", value: string) {
+  const trimmed = value.trim();
+  if (channel === "email") return emailAddressPattern.test(trimmed) ? trimmed.toLowerCase() : "";
+  const digits = trimmed.replace(/\D/g, "");
+  if (digits.length < 7 || digits.length > 15) return "";
+  return trimmed.startsWith("+") ? `+${digits}` : digits;
+}
+
+function validDeliverySelections(value: unknown): DeliverySelections {
+  const selections = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return { recipes: Boolean(selections.recipes), grocery: Boolean(selections.grocery), calendar: Boolean(selections.calendar) };
+}
+
+function sanitizeDeliveryRecipients(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  return value.flatMap((entry): DeliveryRecipient[] => {
+    if (!entry || typeof entry !== "object") return [];
+    const record = entry as Record<string, unknown>;
+    const channel = record.channel === "text" ? "text" : record.channel === "email" ? "email" : null;
+    if (!channel) return [];
+    const address = normalizeDeliveryAddress(channel, String(record.address || ""));
+    const dedupeKey = `${channel}:${address}`;
+    if (!address || seen.has(dedupeKey)) return [];
+    seen.add(dedupeKey);
+    const selections = validDeliverySelections(record.selections);
+    return [{
+      id: String(record.id || crypto.randomUUID()).slice(0, 100),
+      name: String(record.name || "").trim().slice(0, 80),
+      channel,
+      address,
+      selections: channel === "text" ? { ...selections, calendar: false } : selections,
+    }];
+  }).slice(0, 10);
+}
+
+function hasDeliverySelection(selections: DeliverySelections) {
+  return selections.recipes || selections.grocery || selections.calendar;
 }
 
 function parseIngredientMeasurement(original: string) {
@@ -338,15 +383,14 @@ export default function Home() {
   const [planStorageOwnerId, setPlanStorageOwnerId] = useState("");
   const [planSaveStatus, setPlanSaveStatus] = useState("");
   const [instacartEnabled, setInstacartEnabled] = useState(false);
-  const [deliveryActions, setDeliveryActions] = useState({ grocery: true, email: false, calendar: false, instacart: false });
-  const [groceryDestination, setGroceryDestination] = useState<"text" | "email" | "copy" | "notes">("text");
+  const [selfDeliverySelections, setSelfDeliverySelections] = useState<DeliverySelections>(defaultDeliverySelections);
+  const [deliveryRecipients, setDeliveryRecipients] = useState<DeliveryRecipient[]>([]);
+  const [recipientDraft, setRecipientDraft] = useState<DeliveryRecipientDraft | null>(null);
+  const [recipientError, setRecipientError] = useState("");
+  const [deviceActions, setDeviceActions] = useState({ copy: false, notes: false, calendar: false, instacart: false });
   const [calendarProvider, setCalendarProvider] = useState<"google" | "apple">("google");
-  const [emailRecipients, setEmailRecipients] = useState("");
-  const [emailDialogOpen, setEmailDialogOpen] = useState(false);
-  const [groceryEmailRecipients, setGroceryEmailRecipients] = useState("");
-  const [groceryTextRecipient, setGroceryTextRecipient] = useState("");
-  const [groceryRecipientDialog, setGroceryRecipientDialog] = useState<"email" | "text" | null>(null);
-  const [groceryRecipientError, setGroceryRecipientError] = useState("");
+  const [pendingTextRecipients, setPendingTextRecipients] = useState<DeliveryRecipient[]>([]);
+  const [pendingTextReaderLinks, setPendingTextReaderLinks] = useState<Record<string, string>>({});
   const [deliveryBusy, setDeliveryBusy] = useState(false);
   const [familyStatus, setFamilyStatus] = useState("");
   const [recipeFilters, setRecipeFilters] = useState(defaultRecipeFilters);
@@ -526,9 +570,16 @@ export default function Home() {
     || recipeFilters.protein !== defaultRecipeFilters.protein
     || recipeFilters.favoritesOnly;
   const shortLocation = location.split(",").slice(0, 2).join(",").trim() || location;
-  const availableDeliveryActionKeys = useMemo(() => (["grocery", "email", "calendar", ...(instacartEnabled ? ["instacart"] : [])] as Array<keyof typeof deliveryActions>), [instacartEnabled]);
-  const selectedDeliveryActionCount = availableDeliveryActionKeys.filter((key) => deliveryActions[key]).length;
-  const allDeliveryActionsSelected = availableDeliveryActionKeys.every((key) => deliveryActions[key]);
+  const selfDeliveryRecipient = useMemo<DeliveryRecipient | null>(() => user ? ({ id: "self", name: user.name || "Me", channel: "email", address: user.email, selections: selfDeliverySelections }) : null, [user, selfDeliverySelections]);
+  const externalDeliveryRecipients = useMemo(() => deliveryRecipients.filter((recipient) => !(selfDeliveryRecipient && recipient.channel === "email" && recipient.address === selfDeliveryRecipient.address)), [deliveryRecipients, selfDeliveryRecipient]);
+  const allDeliveryRecipients = useMemo(() => selfDeliveryRecipient ? [selfDeliveryRecipient, ...externalDeliveryRecipients] : externalDeliveryRecipients, [selfDeliveryRecipient, externalDeliveryRecipients]);
+  const effectiveDeliveryRecipients = useMemo(() => allDeliveryRecipients.map((recipient) => ({ ...recipient, selections: { ...recipient.selections, grocery: groceryGroups.length > 0 && recipient.selections.grocery } })), [allDeliveryRecipients, groceryGroups.length]);
+  const selectedRecipientCount = effectiveDeliveryRecipients.filter((recipient) => hasDeliverySelection(recipient.selections)).length;
+  const selectedDeviceActionCount = [groceryGroups.length > 0 && deviceActions.copy, groceryGroups.length > 0 && deviceActions.notes, deviceActions.calendar, groceryGroups.length > 0 && instacartEnabled && deviceActions.instacart].filter(Boolean).length;
+  const selectedDeliveryActionCount = selectedRecipientCount + selectedDeviceActionCount;
+  const allDeliveryActionsSelected = allDeliveryRecipients.length > 0
+    && allDeliveryRecipients.every((recipient) => recipient.selections.recipes && (!groceryGroups.length || recipient.selections.grocery) && (recipient.channel === "text" || recipient.selections.calendar))
+    && (!groceryGroups.length || (deviceActions.copy && deviceActions.notes)) && deviceActions.calendar && (!instacartEnabled || !groceryGroups.length || deviceActions.instacart);
   const profilePreferences = useMemo(() => ({
     planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
     kidLunches, schoolLunchSides, oneStore, selectedStore, maxTime, skill, exclusions,
@@ -628,15 +679,28 @@ export default function Home() {
       if (typeof saved.confirmedIngredientsSignature === "string") setConfirmedIngredientsSignature(saved.confirmedIngredientsSignature);
       else if (typeof saved.reviewedPlanSignature === "string") setConfirmedIngredientsSignature(saved.reviewedPlanSignature);
       if (typeof saved.reviewedPlanSignature === "string") setReviewedPlanSignature(saved.reviewedPlanSignature);
-      if (saved.deliveryActions && typeof saved.deliveryActions === "object") {
-        const actions = saved.deliveryActions as Record<string, unknown>;
-        setDeliveryActions({ grocery: Boolean(actions.grocery), email: Boolean(actions.email), calendar: Boolean(actions.calendar), instacart: Boolean(actions.instacart) });
+      if (saved.selfDeliverySelections && typeof saved.selfDeliverySelections === "object") setSelfDeliverySelections(validDeliverySelections(saved.selfDeliverySelections));
+      if (Array.isArray(saved.deliveryRecipients)) setDeliveryRecipients(sanitizeDeliveryRecipients(saved.deliveryRecipients));
+      else {
+        const legacyEmailSelections = new Map<string, DeliverySelections>();
+        const legacyRecipeEmails = String(saved.emailRecipients || "").split(/[;,\n]/).map((value) => normalizeDeliveryAddress("email", value)).filter(Boolean);
+        const legacyGroceryEmails = String(saved.groceryEmailRecipients || "").split(/[;,\n]/).map((value) => normalizeDeliveryAddress("email", value)).filter(Boolean);
+        legacyRecipeEmails.forEach((address) => legacyEmailSelections.set(address, { recipes: true, grocery: legacyGroceryEmails.includes(address), calendar: false }));
+        legacyGroceryEmails.forEach((address) => legacyEmailSelections.set(address, { ...(legacyEmailSelections.get(address) || { recipes: false, grocery: false, calendar: false }), grocery: true }));
+        const migratedRecipients: DeliveryRecipient[] = [...legacyEmailSelections].map(([address, selections]) => ({ id: crypto.randomUUID(), name: "", channel: "email", address, selections }));
+        const legacyText = normalizeDeliveryAddress("text", String(saved.groceryTextRecipient || ""));
+        if (legacyText) migratedRecipients.push({ id: crypto.randomUUID(), name: "", channel: "text", address: legacyText, selections: { recipes: false, grocery: true, calendar: false } });
+        setDeliveryRecipients(migratedRecipients.slice(0, 10));
       }
-      if (["text", "email", "copy", "notes"].includes(String(saved.groceryDestination))) setGroceryDestination(saved.groceryDestination as "text" | "email" | "copy" | "notes");
+      if (saved.deviceActions && typeof saved.deviceActions === "object") {
+        const actions = saved.deviceActions as Record<string, unknown>;
+        setDeviceActions({ copy: Boolean(actions.copy), notes: Boolean(actions.notes), calendar: Boolean(actions.calendar), instacart: Boolean(actions.instacart) });
+      } else if (saved.deliveryActions && typeof saved.deliveryActions === "object") {
+        const actions = saved.deliveryActions as Record<string, unknown>;
+        const destination = String(saved.groceryDestination || "");
+        setDeviceActions({ copy: Boolean(actions.grocery) && destination === "copy", notes: Boolean(actions.grocery) && destination === "notes", calendar: Boolean(actions.calendar), instacart: Boolean(actions.instacart) });
+      }
       if (saved.calendarProvider === "apple" || saved.calendarProvider === "google") setCalendarProvider(saved.calendarProvider);
-      if (typeof saved.emailRecipients === "string") setEmailRecipients(saved.emailRecipients.slice(0, 2000));
-      if (typeof saved.groceryEmailRecipients === "string") setGroceryEmailRecipients(saved.groceryEmailRecipients.slice(0, 2000));
-      if (typeof saved.groceryTextRecipient === "string") setGroceryTextRecipient(saved.groceryTextRecipient.slice(0, 40));
     } catch { /* Ignore a corrupted device cache. */ }
   }
 
@@ -687,9 +751,6 @@ export default function Home() {
         window.localStorage.removeItem("grocer-eaze-active-plan");
         if (authData.user) {
           setUser(authData.user); setEmail(authData.user.email); setPlanStorageOwnerId(authData.user.id);
-          setEmailRecipients(authData.user.email);
-          setGroceryEmailRecipients(authData.user.email);
-          setGroceryTextRecipient(authData.user.phone || "");
         }
         const requestedView = window.location.hash.replace("#", "") as View;
         if (["meals", "list", "shopping", "delivery"].includes(requestedView) && !authData.user?.hasAccess) {
@@ -730,7 +791,7 @@ export default function Home() {
       planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
       kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder,
       ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, asNeededIngredients, confirmedIngredientsSignature, reviewedPlanSignature,
-      deliveryActions, groceryDestination, calendarProvider, emailRecipients, groceryEmailRecipients, groceryTextRecipient,
+      selfDeliverySelections, deviceActions, calendarProvider,
     };
     try { window.localStorage.setItem(`grocer-eaze-active-plan:${planStorageOwnerId}`, JSON.stringify(plan)); }
     catch { /* The account copy remains authoritative if device storage is unavailable. */ }
@@ -745,7 +806,7 @@ export default function Home() {
       }
     }, 750);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, asNeededIngredients, confirmedIngredientsSignature, reviewedPlanSignature, deliveryActions, groceryDestination, calendarProvider, emailRecipients, groceryEmailRecipients, groceryTextRecipient]);
+  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, asNeededIngredients, confirmedIngredientsSignature, reviewedPlanSignature, selfDeliverySelections, deviceActions, calendarProvider]);
 
   useEffect(() => {
     if (!planHydrated || !user) return;
@@ -839,7 +900,7 @@ export default function Home() {
     const handleDialogKeys = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         if (ingredientReport) setIngredientReport(null);
-        else if (emailDialogOpen) setEmailDialogOpen(false);
+        else if (recipientDraft) { setRecipientDraft(null); setRecipientError(""); }
         else if (ratingMeal) setRatingMeal(null);
         else finishOnboarding();
         return;
@@ -869,7 +930,7 @@ export default function Home() {
       });
       if (previouslyFocused?.isConnected) previouslyFocused.focus();
     };
-  }, [onboardingStep, ratingMeal, emailDialogOpen, ingredientReport]);
+  }, [onboardingStep, ratingMeal, recipientDraft, ingredientReport]);
 
   async function startAuth() {
     setAuthBusy(true); setAccountStatus("");
@@ -897,9 +958,6 @@ export default function Home() {
       if (!result.ok) { setAccountStatus(data.error || "That code could not be verified."); return; }
       const me = await fetch("/api/auth/me").then((r) => r.json());
       setUser(me.user); setEmail(me.user.email); setPlanStorageOwnerId(me.user.id); setAuthForm((current) => ({ ...current, name: me.user.name, phone: me.user.phone || "" }));
-      setEmailRecipients(me.user.email);
-      setGroceryEmailRecipients(me.user.email);
-      setGroceryTextRecipient(me.user.phone || "");
       const cloudPlan = await fetch("/api/active-plan").then((response) => response.ok ? response.json() : { plan: null });
       if (cloudPlan.plan) applySavedPlan(cloudPlan.plan);
       else applySavedPlan(window.localStorage.getItem(`grocer-eaze-active-plan:${me.user.id}`));
@@ -1557,44 +1615,11 @@ export default function Home() {
     return `${groceryListTitle()}\n\n${groceryGroups.map((group) => `${group.title}\n${group.items.map((entry) => `☐ ${groceryItemName(entry)} — ${groceryItemQuantity(entry)}`).join("\n")}`).join("\n\n")}`;
   }
 
-  function parsedGroceryEmailRecipients() {
-    return [...new Set(groceryEmailRecipients.split(/[;,\n]/).map((address) => address.trim().toLowerCase()).filter(Boolean))];
-  }
-
-  function validGroceryEmailRecipients() {
-    const recipients = parsedGroceryEmailRecipients();
-    return recipients.length > 0 && recipients.length <= 10 && recipients.every((address) => /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(address));
-  }
-
-  function normalizedGroceryTextRecipient() {
-    const value = groceryTextRecipient.trim();
-    const digits = value.replace(/\D/g, "");
-    if (digits.length < 7 || digits.length > 15) return "";
-    return value.startsWith("+") ? `+${digits}` : digits;
-  }
-
-  function openGroceryRecipientDialog(destination: "email" | "text") {
-    setGroceryRecipientError("");
-    setGroceryRecipientDialog(destination);
-  }
-
-  async function shareGroceryList(destination: "text" | "email" | "copy" | "notes" = groceryDestination) {
+  async function shareGroceryList(destination: "copy" | "notes") {
     if (!groceryListApproved) throw new Error("Approve the grocery list before sending it.");
     if (!groceryGroups.length) throw new Error("Every ingredient is marked as already on hand, so there is no shopping list to send.");
     const title = groceryListTitle();
     const text = groceryListText();
-    if (destination === "text") {
-      const recipient = normalizedGroceryTextRecipient();
-      if (!recipient) throw new Error("Add a valid phone number before texting the grocery list.");
-      window.location.href = `sms:${encodeURIComponent(recipient)}?&body=${encodeURIComponent(text)}`;
-      return "Text message draft opened with your grocery list.";
-    }
-    if (destination === "email") {
-      const recipients = parsedGroceryEmailRecipients();
-      if (!validGroceryEmailRecipients()) throw new Error("Add up to 10 valid email recipients before emailing the grocery list.");
-      window.location.href = `mailto:${recipients.map((address) => encodeURIComponent(address)).join(",")}?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(text)}`;
-      return "Email draft opened with your grocery list.";
-    }
     if (destination === "copy") {
       await navigator.clipboard.writeText(text);
       return "Grocery list copied to your clipboard.";
@@ -1638,7 +1663,7 @@ export default function Home() {
       throw error instanceof Error ? error : new Error("Instacart is temporarily unavailable.");
     }
   }
-  async function downloadCalendar(provider: "google" | "apple" = calendarProvider) {
+  async function prepareRecipeReaderLinks() {
     if (!plannedMeals.length) throw new Error("Add recipes to your plan before exporting a calendar.");
     if (!groceryListApproved) throw new Error("Approve the grocery list before exporting a calendar.");
     const readerResponse = await fetch("/api/recipe-readers", {
@@ -1661,6 +1686,10 @@ export default function Home() {
     if (!readerResponse.ok) throw new Error(readerData.error || "Clean recipe links could not be prepared. Please try the calendar export again.");
     const readerLinks = new Map((readerData.readers || []).flatMap((reader) => reader.mealId && reader.url ? [[reader.mealId, reader.url] as const] : []));
     if (readerLinks.size < plannedMeals.length) throw new Error("One or more clean recipe links could not be prepared. Check that each selected recipe has an original source and try again.");
+    return readerLinks;
+  }
+
+  function calendarDeliveryMeals(readerLinks: Map<string, string>) {
     const slots = [...plannedMeals].sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder));
     const shuffledByKind = new Map<string, Meal[]>();
     if (calendarOrder === "random") {
@@ -1674,30 +1703,74 @@ export default function Home() {
       shuffledIndexes.set(slot.kind, index + 1);
       return shuffledByKind.get(slot.kind)?.[index] || slot;
     }) : slots;
-    const events = slots.map((slot, index) => {
+    return slots.map((slot, index) => {
       const recipe = recipes[index];
-      const start = new Date(Number(slot.sortOrder) || Date.now());
-      start.setHours(slot.kind === "Dinner" ? 17 : 12, slot.kind === "Dinner" ? 30 : 0, 0, 0);
+      return {
+        id: recipe.recipeId || recipe.id,
+        title: recipe.title,
+        detail: recipe.detail,
+        kind: slot.kind,
+        sortOrder: Number(slot.sortOrder),
+        sourceUrl: recipe.sourceUrl,
+        readerUrl: readerLinks.get(recipe.id) || "",
+      };
+    });
+  }
+
+  function calendarFileText(meals: ReturnType<typeof calendarDeliveryMeals>) {
+    const events = meals.map((recipe, index) => {
+      const start = new Date(Number(recipe.sortOrder) || Date.now());
+      start.setHours(recipe.kind === "Dinner" ? 17 : 12, recipe.kind === "Dinner" ? 30 : 0, 0, 0);
       const end = new Date(start.getTime() + 60 * 60 * 1000);
-      const readerUrl = readerLinks.get(recipe.id) || "";
-      const recipeLine = `\nClean recipe: ${readerUrl}${recipe.sourceUrl ? `\nOriginal source: ${recipe.sourceUrl}` : ""}`;
-      return `BEGIN:VEVENT\r\nUID:grocer-eaze-${calendarText(recipe.recipeId || recipe.id)}-${Number(slot.sortOrder)}@grocer-eaze\r\nDTSTAMP:${calendarStamp(new Date())}\r\nDTSTART:${calendarStamp(start)}\r\nDTEND:${calendarStamp(end)}\r\nSUMMARY:${calendarText(`${slot.kind}: ${recipe.title}`)}\r\nDESCRIPTION:${calendarText(`${recipe.detail} · ${recipe.time}${recipeLine}`)}\r\nURL:${calendarText(readerUrl)}\r\nEND:VEVENT`;
+      const recipeLine = `\nClean recipe: ${recipe.readerUrl}${recipe.sourceUrl ? `\nOriginal source: ${recipe.sourceUrl}` : ""}`;
+      return `BEGIN:VEVENT\r\nUID:grocer-eaze-${calendarText(String(recipe.id || index))}-${Number(recipe.sortOrder)}@grocer-eaze\r\nDTSTAMP:${calendarStamp(new Date())}\r\nDTSTART:${calendarStamp(start)}\r\nDTEND:${calendarStamp(end)}\r\nSUMMARY:${calendarText(`${recipe.kind}: ${recipe.title}`)}\r\nDESCRIPTION:${calendarText(`${recipe.detail || "Grocer-Eaze meal"}${recipeLine}`)}\r\nURL:${calendarText(recipe.readerUrl)}\r\nEND:VEVENT`;
     }).join("\r\n");
-    const file = new Blob([`BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Grocer-Eaze//Meal Plan//EN\r\n${events}\r\nEND:VCALENDAR`], { type: "text/calendar" });
+    return `BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Grocer-Eaze//Meal Plan//EN\r\n${events}\r\nEND:VCALENDAR`;
+  }
+
+  async function downloadCalendar(provider: "google" | "apple" = calendarProvider, preparedLinks?: Map<string, string>, preparedMeals?: ReturnType<typeof calendarDeliveryMeals>) {
+    const readerLinks = preparedLinks || await prepareRecipeReaderLinks();
+    const calendarMeals = preparedMeals || calendarDeliveryMeals(readerLinks);
+    const file = new Blob([calendarFileText(calendarMeals)], { type: "text/calendar" });
     const link = document.createElement("a"); link.href = URL.createObjectURL(file); link.download = "grocer-eaze-meal-plan.ics"; link.click(); URL.revokeObjectURL(link.href);
     return `${provider === "google" ? "Google" : "Apple"} Calendar file downloaded in ${calendarOrder === "random" ? "a shuffled order within each meal category" : "your selected recipe order"}.`;
   }
-  function parsedEmailRecipients() {
-    return [...new Set(emailRecipients.split(/[;,\n]/).map((address) => address.trim().toLowerCase()).filter(Boolean))];
+
+  async function emailDelivery(recipient: DeliveryRecipient, readerLinks: Map<string, string>, calendarMeals: ReturnType<typeof calendarDeliveryMeals>) {
+    const response = await fetch("/api/email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        deliveryId: crypto.randomUUID(),
+        to: recipient.address,
+        recipientName: recipient.name,
+        selections: recipient.selections,
+        groceryTitle: groceryListTitle(),
+        groceryGroups: groceryGroups.map((group) => ({ title: group.title, items: group.items.map((entry) => ({ name: groceryItemName(entry), quantity: groceryItemQuantity(entry) })) })),
+        meals: plannedMeals.map(({ id, day, date, kind, title, detail, time, sourceUrl }) => ({ id, day, date, kind, title, detail, time, sourceUrl, readerUrl: readerLinks.get(id) || "" })),
+        calendarMeals,
+      }),
+    });
+    const data = await response.json().catch(() => ({})) as { error?: string };
+    if (!response.ok) throw new Error(data.error || `We couldn’t email ${recipient.name || recipient.address}. Please try again.`);
+    return `Sent to ${recipient.name || recipient.address}.`;
   }
 
-  async function emailRecipes(recipients = parsedEmailRecipients()) {
-    if (!groceryListApproved) throw new Error("Approve the grocery list before emailing recipes.");
-    if (!recipients.length || recipients.some((address) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) || recipients.length > 10) throw new Error("Add up to 10 valid recipient email addresses.");
-    const response = await fetch("/api/email", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: recipients, subject: "My Grocer-Eaze recipes", meals: plannedMeals.map(({ day, title, detail, time, sourceUrl }) => ({ day, title, detail, time, sourceUrl })) }) });
-    const data = await response.json().catch(() => ({})) as { error?: string };
-    if (!response.ok) throw new Error(data.error || "We couldn’t send those recipes. Please try again.");
-    return `Recipes sent to ${recipients.length} ${recipients.length === 1 ? "recipient" : "recipients"}.`;
+  function textDeliveryMessage(recipient: DeliveryRecipient, readerLinks: Map<string, string>) {
+    const sections: string[] = [`Grocer-Eaze plan · ${groceryDateLabel()}`];
+    if (recipient.selections.recipes) {
+      sections.push(`Recipes\n${plannedMeals.map((meal) => `${meal.day} ${meal.kind}: ${meal.title}\n${readerLinks.get(meal.id) || meal.sourceUrl || ""}`).join("\n")}`);
+    }
+    if (recipient.selections.grocery) sections.push(groceryListText());
+    const message = sections.join("\n\n");
+    if (message.length > 4000) throw new Error(`The text for ${recipient.name || recipient.address} is too long. Choose recipes or groceries—not both—or use email.`);
+    return message;
+  }
+
+  function openTextDraft(recipient: DeliveryRecipient, readerLinks: Map<string, string>) {
+    const message = textDeliveryMessage(recipient, readerLinks);
+    window.location.href = `sms:${encodeURIComponent(recipient.address)}?&body=${encodeURIComponent(message)}`;
+    return `Text draft opened for ${recipient.name || recipient.address}.`;
   }
 
   function confirmIngredients() {
@@ -1762,77 +1835,129 @@ export default function Home() {
     navigateTo("delivery");
   }
 
-  async function executeDeliveryActions() {
-    const selectedCount = Object.entries(deliveryActions).filter(([key, selected]) => selected && (key !== "instacart" || instacartEnabled)).length;
-    if (!selectedCount) { setExportStatus("Select at least one action to continue."); return; }
-    if (deliveryActions.grocery && groceryDestination === "text" && !normalizedGroceryTextRecipient()) {
-      setGroceryRecipientError("Enter a valid phone number with 7 to 15 digits.");
-      setGroceryRecipientDialog("text");
-      setExportStatus("Add a valid text recipient before continuing.");
+  function openRecipientEditor(recipient?: DeliveryRecipient) {
+    if (!recipient && allDeliveryRecipients.length >= 10) { setExportStatus("You can send to up to 10 people at a time."); return; }
+    setRecipientError("");
+    setRecipientDraft(recipient
+      ? { id: recipient.id, name: recipient.name, channel: recipient.channel, address: recipient.address }
+      : { id: "", name: "", channel: "email", address: "" });
+  }
+
+  function saveRecipient() {
+    if (!recipientDraft) return;
+    const address = normalizeDeliveryAddress(recipientDraft.channel, recipientDraft.address);
+    if (!address) {
+      setRecipientError(recipientDraft.channel === "email" ? "Enter a valid email address." : "Enter a valid phone number with 7 to 15 digits.");
       return;
     }
-    if (deliveryActions.grocery && groceryDestination === "email" && !validGroceryEmailRecipients()) {
-      setGroceryRecipientError("Enter up to 10 valid email addresses, separated by commas or new lines.");
-      setGroceryRecipientDialog("email");
-      setExportStatus("Add valid grocery-list email recipients before continuing.");
+    if (allDeliveryRecipients.some((recipient) => recipient.id !== recipientDraft.id && recipient.channel === recipientDraft.channel && recipient.address === address)) {
+      setRecipientError("That recipient is already on this plan.");
       return;
     }
-    if (deliveryActions.email) {
-      const recipients = parsedEmailRecipients();
-      if (!recipients.length || recipients.some((address) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) || recipients.length > 10) {
-        setEmailDialogOpen(true);
-        setExportStatus("Add up to 10 valid email recipients before continuing.");
-        return;
-      }
+    setDeliveryRecipients((current) => {
+      const existing = current.find((recipient) => recipient.id === recipientDraft.id);
+      const nextRecipient: DeliveryRecipient = {
+        id: existing?.id || crypto.randomUUID(),
+        name: recipientDraft.name.trim().slice(0, 80),
+        channel: recipientDraft.channel,
+        address,
+        selections: existing
+          ? { ...existing.selections, calendar: recipientDraft.channel === "email" && existing.selections.calendar }
+          : { recipes: true, grocery: true, calendar: false },
+      };
+      return existing ? current.map((recipient) => recipient.id === existing.id ? nextRecipient : recipient) : [...current, nextRecipient].slice(0, 10);
+    });
+    setRecipientDraft(null);
+    setRecipientError("");
+    setExportStatus(`${recipientDraft.name.trim() || address} is ready.`);
+  }
+
+  function removeRecipient(id: string) {
+    setDeliveryRecipients((current) => current.filter((recipient) => recipient.id !== id));
+    setPendingTextRecipients((current) => current.filter((recipient) => recipient.id !== id));
+    setExportStatus("Recipient removed.");
+  }
+
+  function updateRecipientSelection(id: string, key: keyof DeliverySelections, selected: boolean) {
+    if (id === "self") {
+      setSelfDeliverySelections((current) => ({ ...current, [key]: selected }));
+      return;
     }
+    setDeliveryRecipients((current) => current.map((recipient) => recipient.id === id
+      ? { ...recipient, selections: { ...recipient.selections, [key]: key === "calendar" && recipient.channel === "text" ? false : selected } }
+      : recipient));
+  }
+
+  function setAllDeliveryActions(selected: boolean) {
+    setSelfDeliverySelections({ recipes: selected, grocery: groceryGroups.length > 0 && selected, calendar: selected });
+    setDeliveryRecipients((current) => current.map((recipient) => ({ ...recipient, selections: { recipes: selected, grocery: groceryGroups.length > 0 && selected, calendar: recipient.channel === "email" && selected } })));
+    setDeviceActions({ copy: groceryGroups.length > 0 && selected, notes: groceryGroups.length > 0 && selected, calendar: selected, instacart: groceryGroups.length > 0 && instacartEnabled && selected });
+    setPendingTextRecipients([]);
+    setPendingTextReaderLinks({});
+    setExportStatus("");
+  }
+
+  async function executeDeliveryActions(options?: { selfOnly?: boolean }) {
+    const recipients = options?.selfOnly && selfDeliveryRecipient
+      ? [{ ...selfDeliveryRecipient, selections: { ...defaultDeliverySelections, grocery: groceryGroups.length > 0 } }]
+      : effectiveDeliveryRecipients.filter((recipient) => hasDeliverySelection(recipient.selections));
+    const activeDeviceActions = options?.selfOnly ? { copy: false, notes: false, calendar: false, instacart: false } : {
+      ...deviceActions,
+      copy: groceryGroups.length > 0 && deviceActions.copy,
+      notes: groceryGroups.length > 0 && deviceActions.notes,
+      instacart: groceryGroups.length > 0 && deviceActions.instacart,
+    };
+    const deviceActionCount = [activeDeviceActions.copy, activeDeviceActions.notes, activeDeviceActions.calendar, instacartEnabled && activeDeviceActions.instacart].filter(Boolean).length;
+    if (!recipients.length && !deviceActionCount) { setExportStatus("Choose at least one item for a recipient or device action."); return; }
     setDeliveryBusy(true);
-    setExportStatus("Completing your selected actions…");
-    const tasks: Array<Promise<string>> = [];
-    if (deliveryActions.instacart && instacartEnabled) tasks.push(shopOnInstacart());
-    if (deliveryActions.grocery) tasks.push(shareGroceryList(groceryDestination));
-    if (deliveryActions.calendar) tasks.push(downloadCalendar(calendarProvider));
-    if (deliveryActions.email) tasks.push(emailRecipes());
-    const results = await Promise.allSettled(tasks);
-    const completed = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-    const failed = results.flatMap((result) => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "One selected action could not be completed."] : []);
-    setExportStatus([...completed, ...failed].join(" "));
-    setDeliveryBusy(false);
-  }
-
-  function confirmEmailRecipients() {
-    const recipients = parsedEmailRecipients();
-    if (!recipients.length || recipients.some((address) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) || recipients.length > 10) {
-      setExportStatus("Enter up to 10 valid email addresses, separated by commas or new lines.");
-      return;
-    }
-    setEmailRecipients(recipients.join(", "));
-    setDeliveryActions((current) => ({ ...current, email: true }));
-    setEmailDialogOpen(false);
-    setExportStatus(`${recipients.length} email ${recipients.length === 1 ? "recipient" : "recipients"} ready.`);
-  }
-
-  function confirmGroceryRecipient() {
-    if (groceryRecipientDialog === "email") {
-      const recipients = parsedGroceryEmailRecipients();
-      if (!validGroceryEmailRecipients()) {
-        setGroceryRecipientError("Enter up to 10 valid email addresses, separated by commas or new lines.");
-        return;
+    setPendingTextRecipients([]);
+    setPendingTextReaderLinks({});
+    setExportStatus("Preparing your selected deliveries…");
+    const completed: string[] = [];
+    const failed: string[] = [];
+    const immediateTasks: Array<Promise<string>> = [];
+    if (activeDeviceActions.instacart && instacartEnabled) immediateTasks.push(shopOnInstacart());
+    if (activeDeviceActions.copy) immediateTasks.push(shareGroceryList("copy"));
+    if (activeDeviceActions.notes) immediateTasks.push(shareGroceryList("notes"));
+    try {
+      const needsReaderLinks = activeDeviceActions.calendar || recipients.some((recipient) => recipient.selections.recipes || recipient.selections.calendar);
+      const readerLinks = needsReaderLinks ? await prepareRecipeReaderLinks() : new Map<string, string>();
+      const calendarMeals = needsReaderLinks ? calendarDeliveryMeals(readerLinks) : [];
+      if (activeDeviceActions.calendar) immediateTasks.push(downloadCalendar(calendarProvider, readerLinks, calendarMeals));
+      const immediateResults = await Promise.allSettled(immediateTasks);
+      completed.push(...immediateResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
+      failed.push(...immediateResults.flatMap((result) => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "One device action could not be completed."] : []));
+      for (const recipient of recipients.filter((item) => item.channel === "email")) {
+        try { completed.push(await emailDelivery(recipient, readerLinks, calendarMeals)); }
+        catch (error) { failed.push(error instanceof Error ? error.message : `We couldn’t email ${recipient.name || recipient.address}.`); }
       }
-      setGroceryEmailRecipients(recipients.join(", "));
-      setGroceryRecipientDialog(null);
-      setGroceryRecipientError("");
-      setExportStatus(`${recipients.length} grocery-list email ${recipients.length === 1 ? "recipient" : "recipients"} ready.`);
-      return;
+      const textRecipients = recipients.filter((recipient) => recipient.channel === "text");
+      for (const recipient of textRecipients) textDeliveryMessage(recipient, readerLinks);
+      if (textRecipients.length) {
+        const [first, ...remaining] = textRecipients;
+        setPendingTextRecipients(remaining);
+        setPendingTextReaderLinks(Object.fromEntries(readerLinks));
+        completed.push(`Text draft 1 of ${textRecipients.length} is ready. Return here${remaining.length ? " to open the next text" : " after reviewing it"}.`);
+        setExportStatus([...completed, ...failed].join(" "));
+        openTextDraft(first, readerLinks);
+      } else setExportStatus([...completed, ...failed].join(" ") || "Your selected actions are complete.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "One selected action could not be completed.";
+      const immediateResults = await Promise.allSettled(immediateTasks);
+      completed.push(...immediateResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
+      setExportStatus([...completed, message].join(" "));
+    } finally {
+      setDeliveryBusy(false);
     }
-    const recipient = normalizedGroceryTextRecipient();
-    if (!recipient) {
-      setGroceryRecipientError("Enter a valid phone number with 7 to 15 digits.");
-      return;
-    }
-    setGroceryTextRecipient(recipient);
-    setGroceryRecipientDialog(null);
-    setGroceryRecipientError("");
-    setExportStatus("Text recipient ready.");
+  }
+
+  async function openNextTextRecipient() {
+    const [next, ...remaining] = pendingTextRecipients;
+    if (!next) return;
+    setPendingTextRecipients(remaining);
+    const readerLinks = new Map(Object.entries(pendingTextReaderLinks));
+    setExportStatus(`Text draft opened for ${next.name || next.address}.${remaining.length ? ` ${remaining.length} text${remaining.length === 1 ? "" : "s"} remaining.` : " All text drafts have been prepared."}`);
+    openTextDraft(next, readerLinks);
   }
 
   async function submitAccessibilityFeedback(event: React.FormEvent<HTMLFormElement>) {
@@ -1941,6 +2066,23 @@ export default function Home() {
 
   function startOnboarding() {
     setOnboardingStep(0);
+  }
+
+  function deliveryRecipientCard(recipient: DeliveryRecipient, isSelf = false) {
+    const label = isSelf ? "Myself" : recipient.name || (recipient.channel === "email" ? "Email recipient" : "Text recipient");
+    return <article className={`delivery-recipient-card ${hasDeliverySelection(recipient.selections) ? "selected" : ""}`} key={recipient.id}>
+      <div className="delivery-recipient-identity">
+        <span className="recipient-avatar" aria-hidden="true">{isSelf ? "ME" : (recipient.name || recipient.address).slice(0, 1).toUpperCase()}</span>
+        <div><span className="recipient-name-line"><strong>{label}</strong>{isSelf && <em>ACCOUNT</em>}<i>{recipient.channel === "email" ? "EMAIL" : "TEXT"}</i></span><small>{recipient.address}</small></div>
+        {!isSelf && <div className="recipient-row-actions"><button type="button" onClick={() => openRecipientEditor(recipient)}>Edit</button><button type="button" onClick={() => removeRecipient(recipient.id)} aria-label={`Remove ${label}`}>Remove</button></div>}
+      </div>
+      <fieldset className="recipient-content-options">
+        <legend>Choose what {isSelf ? "you receive" : `${label} receives`}</legend>
+        <label><input type="checkbox" checked={recipient.selections.recipes} onChange={(event) => updateRecipientSelection(recipient.id, "recipes", event.target.checked)} /><span><strong>Recipes</strong><small>Clean recipe links without the extra page clutter</small></span></label>
+        <label className={!groceryGroups.length ? "disabled" : ""}><input type="checkbox" disabled={!groceryGroups.length} checked={groceryGroups.length > 0 && recipient.selections.grocery} onChange={(event) => updateRecipientSelection(recipient.id, "grocery", event.target.checked)} /><span><strong>Grocery list</strong><small>{groceryGroups.length ? `${shoppingEntries.length} items; ingredients already on hand stay excluded` : "Nothing to buy; every ingredient is already on hand"}</small></span></label>
+        <label className={recipient.channel === "text" ? "disabled" : ""}><input type="checkbox" disabled={recipient.channel === "text"} checked={recipient.channel === "email" && recipient.selections.calendar} onChange={(event) => updateRecipientSelection(recipient.id, "calendar", event.target.checked)} /><span><strong>Calendar invite</strong><small>{recipient.channel === "text" ? "Requires an email recipient" : "Includes the dated meal plan as an .ics attachment"}</small></span></label>
+      </fieldset>
+    </article>;
   }
 
   return <div className="app">
@@ -2148,28 +2290,30 @@ export default function Home() {
     </div>}
 
     {view === "delivery" && <div className="dashboard narrow delivery-dashboard" id="page-content" tabIndex={-1}>
-      <div className="page-heading"><div><p className="eyebrow">GROCERIES · STEP 3 OF 3</p><h2>Choose what happens next.</h2><p>Select one or more actions. Grocer-Eaze won’t run anything until you press the final button.</p></div><button className="outline" onClick={() => navigateTo("shopping")}>← Review shopping list</button></div>
+      <div className="page-heading"><div><p className="eyebrow">GROCERIES · STEP 3 OF 3</p><h2>Who should receive your plan?</h2><p>Choose each person, then select whether they should receive clean recipe links, the final grocery list, or a calendar invite. Nothing sends until you confirm below.</p></div><button className="outline" onClick={() => navigateTo("shopping")}>← Review shopping list</button></div>
       {plannedMeals.length && groceryListApproved ? <>
-        <div className="delivery-toolbar"><div><strong>{selectedDeliveryActionCount} selected</strong><small>{plannedMeals.length} meals · {shoppingEntries.length} shopping items</small></div><button type="button" className="outline compact" onClick={() => setDeliveryActions((current) => ({ grocery: !allDeliveryActionsSelected, email: !allDeliveryActionsSelected, calendar: !allDeliveryActionsSelected, instacart: instacartEnabled ? !allDeliveryActionsSelected : current.instacart }))}>{allDeliveryActionsSelected ? "Clear all" : "Select all"}</button></div>
-        <section className="delivery-action-grid" aria-label="Send and save options">
-          <article className={deliveryActions.grocery ? "selected" : ""}>
-            <label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.grocery} onChange={() => setDeliveryActions((current) => ({ ...current, grocery: !current.grocery }))} /><span><strong>Send grocery list</strong><small>{shoppingEntries.length} items; “already have” ingredients stay excluded</small></span></label>
-            {deliveryActions.grocery && <fieldset>
-              <legend>Send as</legend>
-              <label><input type="radio" name="grocery-destination" checked={groceryDestination === "text"} onChange={() => { setGroceryDestination("text"); if (!normalizedGroceryTextRecipient()) openGroceryRecipientDialog("text"); }} /> Text list</label>
-              <label><input type="radio" name="grocery-destination" checked={groceryDestination === "email"} onChange={() => { setGroceryDestination("email"); if (!validGroceryEmailRecipients()) openGroceryRecipientDialog("email"); }} /> Email list</label>
-              <label><input type="radio" name="grocery-destination" checked={groceryDestination === "copy"} onChange={() => setGroceryDestination("copy")} /> Copy list to clipboard</label>
-              <label><input type="radio" name="grocery-destination" checked={groceryDestination === "notes"} onChange={() => setGroceryDestination("notes")} /> Note</label>
-              <small>{groceryDestination === "text" ? "Opens a prefilled message addressed to your selected phone number." : groceryDestination === "email" ? "Opens a prefilled email addressed to your selected recipients." : groceryDestination === "copy" ? "Copies the list so you can paste it into Reminders or any other app." : "Opens your device’s share menu so you can choose Notes, Keep, or another installed app."}</small>
-              {groceryDestination === "text" && <div className="delivery-action-settings"><span>{normalizedGroceryTextRecipient() ? "Text recipient ready" : "Phone number needed"}</span><button type="button" className="outline compact" onClick={() => openGroceryRecipientDialog("text")}>Add or edit phone number</button></div>}
-              {groceryDestination === "email" && <div className="delivery-action-settings"><span>{validGroceryEmailRecipients() ? `${parsedGroceryEmailRecipients().length} recipient${parsedGroceryEmailRecipients().length === 1 ? "" : "s"}` : "Recipients needed"}</span><button type="button" className="outline compact" onClick={() => openGroceryRecipientDialog("email")}>Add or edit recipients</button></div>}
-            </fieldset>}
-          </article>
-          <article className={deliveryActions.email ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.email} onChange={() => { const next = !deliveryActions.email; setDeliveryActions((current) => ({ ...current, email: next })); if (next && !emailRecipients.trim()) setEmailDialogOpen(true); }} /><span><strong>Email recipes</strong><small>Recipe names link to their original pages</small></span></label>{deliveryActions.email && <div className="delivery-action-settings"><span>{parsedEmailRecipients().length ? `${parsedEmailRecipients().length} recipient${parsedEmailRecipients().length === 1 ? "" : "s"}` : "Recipients needed"}</span><button type="button" className="outline compact" onClick={() => setEmailDialogOpen(true)}>Add or edit recipients</button></div>}</article>
-          <article className={deliveryActions.calendar ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.calendar} onChange={() => setDeliveryActions((current) => ({ ...current, calendar: !current.calendar }))} /><span><strong>Save meal plan to calendar</strong><small>Each recipe, link, and meal type appears on its scheduled date</small></span></label>{deliveryActions.calendar && <fieldset><legend>Calendar</legend><label><input type="radio" name="calendar-provider" checked={calendarProvider === "google"} onChange={() => setCalendarProvider("google")} /> Google Calendar</label><label><input type="radio" name="calendar-provider" checked={calendarProvider === "apple"} onChange={() => setCalendarProvider("apple")} /> Apple Calendar</label><label className="delivery-select">Recipe order<select value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle within each meal type</option></select></label><small>A standard calendar file downloads, ready to open or import into your chosen calendar.</small></fieldset>}</article>
-          {instacartEnabled && <article className={deliveryActions.instacart ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.instacart} onChange={() => setDeliveryActions((current) => ({ ...current, instacart: !current.instacart }))} /><span><strong>Open in Instacart</strong><small>Match your shopping list, choose a store, and review before checkout</small></span></label></article>}
+        <section className="self-delivery-card" aria-labelledby="self-delivery-heading">
+          <div><span className="mini-label">FASTEST OPTION</span><h3 id="self-delivery-heading">Send everything to myself</h3><p>Uses your signed-in email, sends clean recipe links and the grocery list, and attaches the dated meal calendar.</p></div>
+          <button type="button" className="primary compact" disabled={deliveryBusy || !selfDeliveryRecipient} onClick={() => executeDeliveryActions({ selfOnly: true })}>{deliveryBusy ? "Preparing…" : "Send all to me →"}</button>
         </section>
-        <div className="delivery-confirm"><p><strong>Ready when you are.</strong> Your selected actions may open your device share menu, download a calendar file, or open a provider in a new tab.</p><button className="primary" disabled={deliveryBusy || selectedDeliveryActionCount === 0} onClick={executeDeliveryActions}>{deliveryBusy ? "Completing actions…" : `Run ${selectedDeliveryActionCount || "selected"} action${selectedDeliveryActionCount === 1 ? "" : "s"} →`}</button></div>
+        <div className="delivery-toolbar"><div><strong>{selectedRecipientCount} recipient{selectedRecipientCount === 1 ? "" : "s"} · {selectedDeviceActionCount} device action{selectedDeviceActionCount === 1 ? "" : "s"}</strong><small>{plannedMeals.length} meals · {shoppingEntries.length} shopping items</small></div><button type="button" className="outline compact" onClick={() => setAllDeliveryActions(!allDeliveryActionsSelected)}>{allDeliveryActionsSelected ? "Clear all" : "Select everything"}</button></div>
+        <section className="delivery-recipient-section" aria-labelledby="delivery-recipients-heading">
+          <div className="delivery-section-heading"><div><span className="mini-label">RECIPIENTS</span><h3 id="delivery-recipients-heading">Choose what each person receives</h3><p>Email recipients can receive calendar attachments. Text recipients can receive recipe links and grocery lists as prefilled drafts for you to review. For privacy, added recipient details are kept only for this visit.</p></div><button type="button" className="outline compact" disabled={allDeliveryRecipients.length >= 10} onClick={() => openRecipientEditor()}>+ Add recipient</button></div>
+          <div className="delivery-recipient-list">{selfDeliveryRecipient && deliveryRecipientCard(selfDeliveryRecipient, true)}{externalDeliveryRecipients.map((recipient) => deliveryRecipientCard(recipient))}</div>
+          {!externalDeliveryRecipients.length && <p className="recipient-empty-note">Add family or friends by email or phone whenever someone else should receive part of the plan.</p>}
+        </section>
+        <section className="device-action-section" aria-labelledby="device-actions-heading">
+          <div className="delivery-section-heading"><div><span className="mini-label">ON THIS DEVICE</span><h3 id="device-actions-heading">Optional ways to save or shop</h3><p>These actions stay on your device and don’t add another recipient.</p></div></div>
+          <div className="device-action-grid">
+            <label className={`${deviceActions.copy ? "selected" : ""} ${!groceryGroups.length ? "disabled" : ""}`}><input type="checkbox" disabled={!groceryGroups.length} checked={groceryGroups.length > 0 && deviceActions.copy} onChange={(event) => setDeviceActions((current) => ({ ...current, copy: event.target.checked }))} /><span><strong>Copy grocery list</strong><small>{groceryGroups.length ? "Paste it into Reminders or any app" : "Nothing to copy; every ingredient is already on hand"}</small></span></label>
+            <label className={`${deviceActions.notes ? "selected" : ""} ${!groceryGroups.length ? "disabled" : ""}`}><input type="checkbox" disabled={!groceryGroups.length} checked={groceryGroups.length > 0 && deviceActions.notes} onChange={(event) => setDeviceActions((current) => ({ ...current, notes: event.target.checked }))} /><span><strong>Share to Notes or Keep</strong><small>{groceryGroups.length ? "Uses your device’s share menu" : "Nothing to share; every ingredient is already on hand"}</small></span></label>
+            <label className={deviceActions.calendar ? "selected" : ""}><input type="checkbox" checked={deviceActions.calendar} onChange={(event) => setDeviceActions((current) => ({ ...current, calendar: event.target.checked }))} /><span><strong>Download my calendar</strong><small>Save an import-ready calendar file</small></span></label>
+            {instacartEnabled && <label className={`${deviceActions.instacart ? "selected" : ""} ${!groceryGroups.length ? "disabled" : ""}`}><input type="checkbox" disabled={!groceryGroups.length} checked={groceryGroups.length > 0 && deviceActions.instacart} onChange={(event) => setDeviceActions((current) => ({ ...current, instacart: event.target.checked }))} /><span><strong>Open in Instacart</strong><small>{groceryGroups.length ? "Review matched items before checkout" : "Nothing to shop; every ingredient is already on hand"}</small></span></label>}
+          </div>
+          {deviceActions.calendar && <div className="calendar-device-settings"><label>Calendar<select value={calendarProvider} onChange={(event) => setCalendarProvider(event.target.value as "google" | "apple")}><option value="google">Google Calendar</option><option value="apple">Apple Calendar</option></select></label><label>Recipe order<select value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle within each meal type</option></select></label></div>}
+        </section>
+        {pendingTextRecipients.length > 0 && <div className="pending-text-banner" role="status"><div><strong>{pendingTextRecipients.length} text draft{pendingTextRecipients.length === 1 ? "" : "s"} still to open</strong><small>Each recipient gets a separate private draft.</small></div><button type="button" className="outline compact" onClick={openNextTextRecipient}>Open next text</button></div>}
+        <div className="delivery-confirm"><p><strong>Review your choices, then send.</strong> Emails are sent separately so recipients don’t see one another. Texts open as private drafts for your review.</p><button className="primary" disabled={deliveryBusy || selectedDeliveryActionCount === 0} onClick={() => executeDeliveryActions()}>{deliveryBusy ? "Preparing deliveries…" : `Send or save ${selectedDeliveryActionCount || "selected"} choice${selectedDeliveryActionCount === 1 ? "" : "s"} →`}</button></div>
         {exportStatus && <p className="export-status delivery-status" aria-live="polite">{exportStatus}</p>}
       </> : <section className="empty-journey"><h3>Approve your shopping list first.</h3><p>Confirm ingredients, review the final shopping list, and approve it before choosing how to send or save the plan.</p><div><button className="primary compact" onClick={() => navigateTo(ingredientsConfirmed ? "shopping" : "list")}>{ingredientsConfirmed ? "Review shopping list" : "Confirm ingredients"}</button></div></section>}
     </div>}
@@ -2199,7 +2343,7 @@ export default function Home() {
         <section className="settings-card">
           <h3>Profile</h3>
           <div className="account-identity"><span className="member-avatar icon-centered">{user.name[0].toUpperCase()}</span><div><strong>{user.name}</strong><small>{user.email}{user.phone ? ` · ${user.phone}` : ""}</small></div><em>{user.role}</em></div>
-          <div className="two-col"><div className="field"><label htmlFor="profile-household">Household name</label><input id="profile-household" className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /></div><div className="field"><label htmlFor="profile-email">Default recipe email</label><input id="profile-email" className="text-input" type="email" value={email} onChange={(e) => { setEmail(e.target.value); setEmailRecipients(e.target.value); }} /></div></div>
+          <div className="two-col"><div className="field"><label htmlFor="profile-household">Household name</label><input id="profile-household" className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /></div><div className="field"><label htmlFor="profile-email">Default recipe email</label><input id="profile-email" className="text-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div></div>
           <button className="outline" onClick={async () => { await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ householdName: household, people, location, preferences: profilePreferences }) }); setAccountStatus("Profile saved."); }}>Save profile</button>{accountStatus && <span className="success-note" role="status">{accountStatus}</span>}
         </section>
         <section className="settings-card security-card"><div className="icon-centered" aria-hidden="true">🔒</div><div><h3>Security</h3><p>Your email is verified. Your session is stored in a secure, HTTP-only cookie, protected data is checked on the server, and sensitive service keys never reach your browser.</p></div></section>
@@ -2254,9 +2398,7 @@ export default function Home() {
 
     {ratingMeal && <div className="modal-backdrop" onClick={() => setRatingMeal(null)}><section className="rating-modal" role="dialog" aria-modal="true" aria-labelledby="rating-title" tabIndex={-1} onClick={(e) => e.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close recipe rating" onClick={() => setRatingMeal(null)}>×</button><span className="mini-label">RATE THIS RECIPE</span><h3 id="rating-title">{ratingMeal.title}</h3><label>Meal quality</label><Stars label="Meal quality" value={ratings[ratingMeal.id]?.quality || 0} onChange={(quality) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality, ease: current[ratingMeal.id]?.ease || 0 } }))} /><label>Ease of preparation</label><Stars label="Ease of preparation" value={ratings[ratingMeal.id]?.ease || 0} onChange={(ease) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality: current[ratingMeal.id]?.quality || 0, ease } }))} /><button className="primary" disabled={!ratings[ratingMeal.id]?.quality || !ratings[ratingMeal.id]?.ease} onClick={() => saveRating(ratingMeal, ratings[ratingMeal.id])}>Save rating</button></section></div>}
 
-    {groceryRecipientDialog && <div className="modal-backdrop" onClick={() => { setGroceryRecipientDialog(null); setGroceryRecipientError(""); }}><section className="email-recipient-modal" role="dialog" aria-modal="true" aria-labelledby="grocery-recipient-title" tabIndex={-1} onClick={(event) => event.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close grocery list recipients" onClick={() => { setGroceryRecipientDialog(null); setGroceryRecipientError(""); }}>×</button><span className="mini-label">{groceryRecipientDialog === "email" ? "EMAIL GROCERY LIST" : "TEXT GROCERY LIST"}</span><h3 id="grocery-recipient-title">Who should receive the grocery list?</h3>{groceryRecipientDialog === "email" ? <><p>Add up to 10 addresses. Separate them with commas or put each address on a new line.</p><label htmlFor="grocery-email-recipients">Email recipients</label><textarea id="grocery-email-recipients" autoComplete="email" value={groceryEmailRecipients} onChange={(event) => { setGroceryEmailRecipients(event.target.value); setGroceryRecipientError(""); }} placeholder="you@example.com, family@example.com" /></> : <><p>Enter one phone number. Your device will open a prefilled text message for you to review before sending.</p><label htmlFor="grocery-text-recipient">Phone number</label><input id="grocery-text-recipient" className="text-input" type="tel" inputMode="tel" autoComplete="tel" value={groceryTextRecipient} onChange={(event) => { setGroceryTextRecipient(event.target.value.slice(0, 40)); setGroceryRecipientError(""); }} placeholder="(312) 555-0123" /></>}{groceryRecipientError && <p className="form-notice error" role="alert">{groceryRecipientError}</p>}<div className="modal-actions"><button className="outline" type="button" onClick={() => { setGroceryRecipientDialog(null); setGroceryRecipientError(""); }}>Cancel</button><button className="primary compact" type="button" onClick={confirmGroceryRecipient}>Save recipient{groceryRecipientDialog === "email" ? "s" : ""}</button></div></section></div>}
-
-    {emailDialogOpen && <div className="modal-backdrop" onClick={() => setEmailDialogOpen(false)}><section className="email-recipient-modal" role="dialog" aria-modal="true" aria-labelledby="email-recipient-title" tabIndex={-1} onClick={(event) => event.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close email recipients" onClick={() => setEmailDialogOpen(false)}>×</button><span className="mini-label">EMAIL RECIPES</span><h3 id="email-recipient-title">Who should receive the plan?</h3><p>Add up to 10 addresses. Separate them with commas or put each address on a new line.</p><label htmlFor="recipe-email-recipients">Email recipients</label><textarea id="recipe-email-recipients" autoComplete="email" value={emailRecipients} onChange={(event) => setEmailRecipients(event.target.value)} placeholder="you@example.com, family@example.com" /><div className="modal-actions"><button className="outline" type="button" onClick={() => setEmailDialogOpen(false)}>Cancel</button><button className="primary compact" type="button" onClick={confirmEmailRecipients}>Save recipients</button></div></section></div>}
+    {recipientDraft && <div className="modal-backdrop" onClick={() => { setRecipientDraft(null); setRecipientError(""); }}><section className="email-recipient-modal recipient-modal" role="dialog" aria-modal="true" aria-labelledby="recipient-modal-title" tabIndex={-1} onClick={(event) => event.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close recipient editor" onClick={() => { setRecipientDraft(null); setRecipientError(""); }}>×</button><span className="mini-label">{recipientDraft.id ? "EDIT RECIPIENT" : "ADD RECIPIENT"}</span><h3 id="recipient-modal-title">{recipientDraft.id ? "Update this person" : "Who else should receive the plan?"}</h3><p>Add one email address or phone number. After saving, choose exactly what this person should receive.</p><div className="field"><label htmlFor="recipient-name">Name <small>(optional)</small></label><input id="recipient-name" className="text-input" autoComplete="name" maxLength={80} value={recipientDraft.name} onChange={(event) => { setRecipientDraft({ ...recipientDraft, name: event.target.value }); setRecipientError(""); }} placeholder="e.g. Alex" /></div><div className="field"><label htmlFor="recipient-channel">Send by</label><select id="recipient-channel" value={recipientDraft.channel} onChange={(event) => { setRecipientDraft({ ...recipientDraft, channel: event.target.value as "email" | "text", address: "" }); setRecipientError(""); }}><option value="email">Email</option><option value="text">Text message</option></select></div><div className="field"><label htmlFor="recipient-address">{recipientDraft.channel === "email" ? "Email address" : "Phone number"}</label><input id="recipient-address" className="text-input" type={recipientDraft.channel === "email" ? "email" : "tel"} inputMode={recipientDraft.channel === "email" ? "email" : "tel"} autoComplete={recipientDraft.channel === "email" ? "email" : "tel"} maxLength={recipientDraft.channel === "email" ? 254 : 40} value={recipientDraft.address} onChange={(event) => { setRecipientDraft({ ...recipientDraft, address: event.target.value }); setRecipientError(""); }} placeholder={recipientDraft.channel === "email" ? "alex@example.com" : "(312) 555-0123"} /></div>{recipientError && <p className="form-notice error" role="alert">{recipientError}</p>}<div className="modal-actions"><button className="outline" type="button" onClick={() => { setRecipientDraft(null); setRecipientError(""); }}>Cancel</button><button className="primary compact" type="button" onClick={saveRecipient}>Save recipient</button></div></section></div>}
 
     {ingredientReport && <div className="modal-backdrop" onClick={() => setIngredientReport(null)}><section className="ingredient-report-modal" role="dialog" aria-modal="true" aria-labelledby="ingredient-report-title" tabIndex={-1} onClick={(event) => event.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close ingredient report" onClick={() => setIngredientReport(null)}>×</button><span className="mini-label">REPORT A LIST ISSUE</span><h3 id="ingredient-report-title">Help us correct {ingredientReport.name}</h3><p>We’ll include the recipe source and returned value automatically. Your report goes securely to the Grocer-Eaze team.</p><form onSubmit={submitIngredientReport}><label htmlFor="ingredient-report-category">What looks wrong?</label><select id="ingredient-report-category" value={ingredientReportCategory} onChange={(event) => setIngredientReportCategory(event.target.value)}><option>Incorrect amount</option><option>Incorrect ingredient</option><option>Duplicate ingredient</option><option>Other</option></select><label htmlFor="ingredient-report-correction">Correct amount or value <small>(optional)</small></label><input id="ingredient-report-correction" className="text-input" value={ingredientReportCorrection} onChange={(event) => setIngredientReportCorrection(event.target.value)} maxLength={200} placeholder="e.g. 2 cups" /><label htmlFor="ingredient-report-details">Anything else? <small>(optional)</small></label><textarea id="ingredient-report-details" value={ingredientReportDetails} onChange={(event) => setIngredientReportDetails(event.target.value)} maxLength={1000} placeholder="Tell us what you expected to see." />{ingredientReportStatus && <p className="form-notice error" role="alert">{ingredientReportStatus}</p>}<div className="modal-actions"><button className="outline" type="button" onClick={() => setIngredientReport(null)}>Cancel</button><button className="primary compact" type="submit" disabled={ingredientReportBusy}>{ingredientReportBusy ? "Sending report…" : "Send report"}</button></div></form></section></div>}
 
