@@ -6,6 +6,16 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "preview_urls": true,
+  "routes": [
+    {
+      "pattern": "grocer-eaze.com",
+      "custom_domain": true
+    },
+    {
+      "pattern": "www.grocer-eaze.com",
+      "custom_domain": true
+    }
+  ],
   "no_bundle": true,
   "rules": [
     {
