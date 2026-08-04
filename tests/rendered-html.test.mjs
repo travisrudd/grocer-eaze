@@ -176,6 +176,9 @@ test("keeps school lunches separate and turns merged ingredients into editable t
   assert.match(page, /Review the list you’ll take shopping/);
   assert.match(page, /This is your final shopping list—not optional add-ons/);
   assert.match(page, /Approve list & choose how to send or save/);
+  assert.match(page, /canonicalIngredientKey/);
+  assert.match(page, /mergeIngredientQuantities/);
+  assert.match(page, /grocery-approval-actions/);
   assert.match(page, /confirmedIngredientsSignature/);
   assert.match(api, /WHERE id = \? AND owner_id = \?/);
 });

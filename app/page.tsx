@@ -84,7 +84,7 @@ function formatIngredientAmount(value: number) {
   const rounded = Math.round(value * 100) / 100;
   const whole = Math.floor(rounded);
   const decimal = Math.round((rounded - whole) * 100) / 100;
-  const fractions: Record<string, string> = { "0.25": "¼", "0.33": "⅓", "0.5": "½", "0.67": "⅔", "0.75": "¾" };
+  const fractions: Record<string, string> = { "0.13": "⅛", "0.25": "¼", "0.33": "⅓", "0.38": "⅜", "0.5": "½", "0.63": "⅝", "0.67": "⅔", "0.75": "¾", "0.88": "⅞" };
   const fraction = fractions[String(decimal)];
   if (fraction) return whole ? `${whole}${fraction}` : fraction;
   return rounded.toLocaleString("en-US", { maximumFractionDigits: 2 });
@@ -94,6 +94,71 @@ function formatMeasurement(quantity: number, unit: string) {
   const plurals: Record<string, string> = { bunch: "bunches", large: "large", medium: "medium", small: "small" };
   const label = unit === "each" ? "" : ` ${quantity === 1 ? unit : plurals[unit] || `${unit}s`}`;
   return `${formatIngredientAmount(quantity)}${label}`;
+}
+
+const ingredientPluralAliases: Record<string, string> = {
+  tomatoes: "tomato", potatoes: "potato", leaves: "leaf", loaves: "loaf", halves: "half",
+};
+
+function canonicalIngredientKey(value: string) {
+  const normalized = value.normalize("NFKC").toLowerCase()
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/[-–—/&+]/g, " ")
+    .replace(/[^a-z0-9'\s]/g, " ")
+    .replace(/\b(?:finely|roughly|coarsely)\b/g, " ")
+    .replace(/\b(?:chopped|diced|minced|sliced|shredded|grated|crushed|peeled|seeded|drained|rinsed|divided|softened|melted)\b/g, " ")
+    .replace(/\b(?:for garnish|for serving|to taste|as needed)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return "";
+  const words = normalized.split(" ");
+  const last = words.at(-1) || "";
+  if (ingredientPluralAliases[last]) words[words.length - 1] = ingredientPluralAliases[last];
+  else if (last.length > 4 && last.endsWith("ies")) words[words.length - 1] = `${last.slice(0, -3)}y`;
+  else if (last.length > 3 && last.endsWith("s") && !/(?:ss|us|is|ous)$/.test(last)) words[words.length - 1] = last.slice(0, -1);
+  return words.join(" ");
+}
+
+const convertibleMeasurements: Record<string, { dimension: "volume" | "weight"; factor: number }> = {
+  teaspoon: { dimension: "volume", factor: 1 }, tablespoon: { dimension: "volume", factor: 3 },
+  milliliter: { dimension: "volume", factor: 0.202884 }, cup: { dimension: "volume", factor: 48 },
+  pint: { dimension: "volume", factor: 96 }, quart: { dimension: "volume", factor: 192 },
+  liter: { dimension: "volume", factor: 202.884 }, gallon: { dimension: "volume", factor: 768 },
+  gram: { dimension: "weight", factor: 1 }, ounce: { dimension: "weight", factor: 28.3495 },
+  pound: { dimension: "weight", factor: 453.592 }, kilogram: { dimension: "weight", factor: 1000 },
+};
+
+function mergeIngredientQuantities(values: string[], occurrences: number) {
+  const dimensions = new Map<string, { total: number; largestUnit: string; largestFactor: number }>();
+  const exactUnits = new Map<string, number>();
+  const notes: string[] = [];
+  values.flatMap((value) => value.split(/\s+\+\s+/)).forEach((value) => {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    const measurement = parseIngredientMeasurement(trimmed);
+    if (!measurement) {
+      if (!notes.some((note) => note.toLowerCase() === trimmed.toLowerCase())) notes.push(trimmed);
+      return;
+    }
+    const convertible = convertibleMeasurements[measurement.unit];
+    if (!convertible) {
+      exactUnits.set(measurement.unit, (exactUnits.get(measurement.unit) || 0) + measurement.quantity);
+      return;
+    }
+    const current = dimensions.get(convertible.dimension) || { total: 0, largestUnit: measurement.unit, largestFactor: convertible.factor };
+    current.total += measurement.quantity * convertible.factor;
+    if (convertible.factor > current.largestFactor) {
+      current.largestUnit = measurement.unit;
+      current.largestFactor = convertible.factor;
+    }
+    dimensions.set(convertible.dimension, current);
+  });
+  const quantities = [
+    ...[...dimensions.values()].map((measurement) => formatMeasurement(measurement.total / measurement.largestFactor, measurement.largestUnit)),
+    ...[...exactUnits.entries()].map(([unit, quantity]) => formatMeasurement(quantity, unit)),
+    ...notes,
+  ];
+  return quantities.join(" + ") || `Needed for ${occurrences} recipe${occurrences === 1 ? "" : "s"}`;
 }
 
 function grocerySection(name: string, aisle = "") {
@@ -325,7 +390,8 @@ export default function Home() {
     groceryIngredients.forEach(({ ingredient, scale }) => {
       const name = (ingredient.name || ingredient.original || "").trim();
       if (!name) return;
-      const key = name.toLowerCase();
+      const key = canonicalIngredientKey(name);
+      if (!key) return;
       const current = merged.get(key) || { name: name[0].toUpperCase() + name.slice(1), aisle: ingredient.aisle || "", occurrences: 0, originals: [], totals: {} };
       current.occurrences += 1;
       if (ingredient.original && !current.originals.includes(ingredient.original)) current.originals.push(ingredient.original);
@@ -337,10 +403,34 @@ export default function Home() {
       key,
       ...value,
       suggestedQuantity: Object.entries(value.totals).length
-        ? Object.entries(value.totals).map(([unit, quantity]) => formatMeasurement(quantity, unit)).join(" + ")
+        ? mergeIngredientQuantities(Object.entries(value.totals).map(([unit, quantity]) => formatMeasurement(quantity, unit)), value.occurrences)
         : value.originals.join(" + ") || `Needed for ${value.occurrences} recipe${value.occurrences === 1 ? "" : "s"}`,
     })).sort((a, b) => a.name.localeCompare(b.name));
   }, [groceryIngredients]);
+  const { shoppingEntries, alreadyHaveEntries } = useMemo(() => {
+    const consolidate = (entries: typeof groceryEntries) => {
+      const merged = new Map<string, (typeof groceryEntries)[number] & { quantities: string[] }>();
+      entries.forEach((entry) => {
+        const name = ingredientNameEdits[entry.key]?.trim() || entry.name;
+        const key = canonicalIngredientKey(name);
+        if (!key) return;
+        const current = merged.get(key) || { ...entry, key: `final:${key}`, name, occurrences: 0, originals: [], quantities: [] };
+        current.occurrences += entry.occurrences;
+        entry.originals.forEach((original) => { if (!current.originals.includes(original)) current.originals.push(original); });
+        current.quantities.push(ingredientAdjustments[entry.key]?.trim() || entry.suggestedQuantity);
+        if (!current.aisle && entry.aisle) current.aisle = entry.aisle;
+        merged.set(key, current);
+      });
+      return [...merged.values()].map(({ quantities, ...entry }) => ({
+        ...entry,
+        suggestedQuantity: mergeIngredientQuantities(quantities, entry.occurrences),
+      })).sort((a, b) => a.name.localeCompare(b.name));
+    };
+    return {
+      shoppingEntries: consolidate(groceryEntries.filter((entry) => !alreadyHaveIngredients.includes(entry.key))),
+      alreadyHaveEntries: consolidate(groceryEntries.filter((entry) => alreadyHaveIngredients.includes(entry.key))),
+    };
+  }, [groceryEntries, ingredientNameEdits, ingredientAdjustments, alreadyHaveIngredients]);
   const groceryGroups = useMemo(() => {
     const groups: Record<string, { icon: string; title: string; items: typeof groceryEntries }> = {
       Produce: { icon: "🥬", title: "Produce", items: [] },
@@ -349,10 +439,9 @@ export default function Home() {
       Bakery: { icon: "🥖", title: "Bakery", items: [] },
       Pantry: { icon: "🥫", title: "Pantry", items: [] },
     };
-    groceryEntries.filter((entry) => !alreadyHaveIngredients.includes(entry.key)).forEach((entry) => groups[grocerySection(ingredientNameEdits[entry.key] || entry.name, entry.aisle)].items.push(entry));
+    shoppingEntries.forEach((entry) => groups[grocerySection(entry.name, entry.aisle)].items.push(entry));
     return Object.values(groups).filter((group) => group.items.length).map((group) => ({ ...group, count: group.items.length }));
-  }, [groceryEntries, ingredientNameEdits, alreadyHaveIngredients]);
-  const alreadyHaveEntries = useMemo(() => groceryEntries.filter((entry) => alreadyHaveIngredients.includes(entry.key)), [groceryEntries, alreadyHaveIngredients]);
+  }, [shoppingEntries]);
   const planSignature = useMemo(() => JSON.stringify({
     people,
     schoolLunchSides,
@@ -1331,7 +1420,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: `Grocer-Eaze groceries starting ${planStartDate}`,
-          items: groceryEntries.filter((entry) => !alreadyHaveIngredients.includes(entry.key)).map((entry) => {
+          items: shoppingEntries.map((entry) => {
             const quantity = groceryItemQuantity(entry);
             const measurement = parseIngredientMeasurement(quantity);
             return { name: groceryItemName(entry), displayText: `${quantity} ${groceryItemName(entry)}`, measurements: measurement ? [measurement] : [] };
@@ -1725,11 +1814,11 @@ export default function Home() {
       {plannedMeals.length && ingredientsConfirmed ? <div className="grocery-review-layout">
         <section className="grocery-panel grocery-panel-full">
           <div className="shopping-list-purpose" role="note"><strong>What this screen is for</strong><p>Check that the final list looks right. Ingredient names, amounts, and “Already have” choices come from Step 1; use “Edit ingredients” if anything needs to change.</p></div>
-          <div className="grocery-head"><strong>{selectedStore}</strong><span>{groceryEntries.length - alreadyHaveEntries.length} items to buy · {alreadyHaveEntries.length} already on hand</span></div>
-          <div className="shopping-checklist-heading"><span className="mini-label">FINAL SHOPPING LIST</span><h3>{groceryEntries.length - alreadyHaveEntries.length} items to buy</h3><p>These are the items Grocer-Eaze will include when you send, save, or open the shopping list.</p></div>
+          <div className="grocery-head"><strong>{selectedStore}</strong><span>{shoppingEntries.length} items to buy · {alreadyHaveEntries.length} already on hand</span></div>
+          <div className="shopping-checklist-heading"><span className="mini-label">FINAL SHOPPING LIST</span><h3>{shoppingEntries.length} items to buy</h3><p>These are the items Grocer-Eaze will include when you send, save, or open the shopping list.</p></div>
           {groceryGroups.length ? groceryGroups.map((group) => <details open key={group.title}><summary><span>{group.icon} {group.title}</span><small>{group.count} {group.count === 1 ? "item" : "items"}</small></summary><ul className="shopping-list-preview">{group.items.map((entry) => <li key={entry.key}><span>{groceryItemName(entry)}</span><strong>{groceryItemQuantity(entry)}</strong></li>)}</ul></details>) : <p className="empty-state">Everything is marked as already on hand. You can still approve the plan to email recipes or save the meal calendar.</p>}
           {alreadyHaveEntries.length > 0 && <details className="already-have-summary"><summary><span>✓ Already have</span><small>{alreadyHaveEntries.length} excluded from shopping</small></summary><div>{alreadyHaveEntries.map((entry) => <p key={entry.key}><span><strong>{groceryItemName(entry)}</strong><small>{groceryItemQuantity(entry)}</small></span></p>)}</div></details>}
-          <div className="grocery-approval-card"><div><span className="mini-label">NEXT · STEP 3</span><h3>Ready to use this list?</h3><p>Nothing will be sent yet. After approval, you’ll choose grocery sharing, email, calendar, Instacart when available, or all of them.</p></div><button className="primary" onClick={approveGroceryList}>Approve list & choose how to send or save →</button></div>
+          <div className="grocery-approval-card"><div><span className="mini-label">NEXT · STEP 3</span><h3>Ready to use this list?</h3><p>Nothing will be sent yet. After approval, you’ll choose grocery sharing, email, calendar, Instacart when available, or all of them.</p></div><div className="grocery-approval-actions"><button className="outline" onClick={() => navigateTo("list")}>← Edit ingredients</button><button className="primary" onClick={approveGroceryList}>Approve list & choose how to send or save →</button></div></div>
           {exportStatus && <p className="export-status" aria-live="polite">{exportStatus}</p>}
         </section>
       </div> : <section className="empty-journey"><h3>Confirm your ingredients first.</h3><p>Review combined amounts and mark what you already have before Grocer-Eaze builds the shopping list.</p><div><button className="primary compact" onClick={() => navigateTo("list")}>Confirm ingredients</button></div></section>}
@@ -1738,9 +1827,9 @@ export default function Home() {
     {view === "delivery" && <div className="dashboard narrow delivery-dashboard" id="page-content" tabIndex={-1}>
       <div className="page-heading"><div><p className="eyebrow">GROCERIES · STEP 3 OF 3</p><h2>Choose what happens next.</h2><p>Select one or more actions. Grocer-Eaze won’t run anything until you press the final button.</p></div><button className="outline" onClick={() => navigateTo("shopping")}>← Review shopping list</button></div>
       {plannedMeals.length && groceryListApproved ? <>
-        <div className="delivery-toolbar"><div><strong>{selectedDeliveryActionCount} selected</strong><small>{plannedMeals.length} meals · {groceryEntries.length - alreadyHaveEntries.length} shopping items</small></div><button type="button" className="outline compact" onClick={() => setDeliveryActions((current) => ({ grocery: !allDeliveryActionsSelected, email: !allDeliveryActionsSelected, calendar: !allDeliveryActionsSelected, instacart: instacartEnabled ? !allDeliveryActionsSelected : current.instacart }))}>{allDeliveryActionsSelected ? "Clear all" : "Select all"}</button></div>
+        <div className="delivery-toolbar"><div><strong>{selectedDeliveryActionCount} selected</strong><small>{plannedMeals.length} meals · {shoppingEntries.length} shopping items</small></div><button type="button" className="outline compact" onClick={() => setDeliveryActions((current) => ({ grocery: !allDeliveryActionsSelected, email: !allDeliveryActionsSelected, calendar: !allDeliveryActionsSelected, instacart: instacartEnabled ? !allDeliveryActionsSelected : current.instacart }))}>{allDeliveryActionsSelected ? "Clear all" : "Select all"}</button></div>
         <section className="delivery-action-grid" aria-label="Send and save options">
-          <article className={deliveryActions.grocery ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.grocery} onChange={() => setDeliveryActions((current) => ({ ...current, grocery: !current.grocery }))} /><span><strong>Send grocery list</strong><small>{groceryEntries.length - alreadyHaveEntries.length} items; “already have” ingredients stay excluded</small></span></label>{deliveryActions.grocery && <fieldset><legend>Send as</legend><label><input type="radio" name="grocery-destination" checked={groceryDestination === "reminders"} onChange={() => setGroceryDestination("reminders")} /> Reminder or task list</label><label><input type="radio" name="grocery-destination" checked={groceryDestination === "notes"} onChange={() => setGroceryDestination("notes")} /> Note</label><small>Your device’s share menu opens so you can choose Apple Reminders, Notes, Google Tasks, Keep, or another installed app.</small></fieldset>}</article>
+          <article className={deliveryActions.grocery ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.grocery} onChange={() => setDeliveryActions((current) => ({ ...current, grocery: !current.grocery }))} /><span><strong>Send grocery list</strong><small>{shoppingEntries.length} items; “already have” ingredients stay excluded</small></span></label>{deliveryActions.grocery && <fieldset><legend>Send as</legend><label><input type="radio" name="grocery-destination" checked={groceryDestination === "reminders"} onChange={() => setGroceryDestination("reminders")} /> Reminder or task list</label><label><input type="radio" name="grocery-destination" checked={groceryDestination === "notes"} onChange={() => setGroceryDestination("notes")} /> Note</label><small>Your device’s share menu opens so you can choose Apple Reminders, Notes, Google Tasks, Keep, or another installed app.</small></fieldset>}</article>
           <article className={deliveryActions.email ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.email} onChange={() => { const next = !deliveryActions.email; setDeliveryActions((current) => ({ ...current, email: next })); if (next && !emailRecipients.trim()) setEmailDialogOpen(true); }} /><span><strong>Email recipes</strong><small>Recipe names link to their original pages</small></span></label>{deliveryActions.email && <div className="delivery-action-settings"><span>{parsedEmailRecipients().length ? `${parsedEmailRecipients().length} recipient${parsedEmailRecipients().length === 1 ? "" : "s"}` : "Recipients needed"}</span><button type="button" className="outline compact" onClick={() => setEmailDialogOpen(true)}>Add or edit recipients</button></div>}</article>
           <article className={deliveryActions.calendar ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.calendar} onChange={() => setDeliveryActions((current) => ({ ...current, calendar: !current.calendar }))} /><span><strong>Save meal plan to calendar</strong><small>Each recipe, link, and meal type appears on its scheduled date</small></span></label>{deliveryActions.calendar && <fieldset><legend>Calendar</legend><label><input type="radio" name="calendar-provider" checked={calendarProvider === "google"} onChange={() => setCalendarProvider("google")} /> Google Calendar</label><label><input type="radio" name="calendar-provider" checked={calendarProvider === "apple"} onChange={() => setCalendarProvider("apple")} /> Apple Calendar</label><label className="delivery-select">Recipe order<select value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle within each meal type</option></select></label><small>A standard calendar file downloads, ready to open or import into your chosen calendar.</small></fieldset>}</article>
           {instacartEnabled && <article className={deliveryActions.instacart ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.instacart} onChange={() => setDeliveryActions((current) => ({ ...current, instacart: !current.instacart }))} /><span><strong>Open in Instacart</strong><small>Match your shopping list, choose a store, and review before checkout</small></span></label></article>}
