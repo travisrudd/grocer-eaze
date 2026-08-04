@@ -5,6 +5,7 @@ type AppEnv = {
   EMAIL_FROM?: string;
   AUTH_SECRET?: string;
   INITIAL_ADMIN_EMAIL?: string;
+  INITIAL_ADMIN_EMAILS?: string;
   STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_MONTHLY_PRICE_ID?: string;

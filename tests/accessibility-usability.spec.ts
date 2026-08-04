@@ -43,11 +43,11 @@ test("paid navigation directs signed-out visitors to a clear next step", async (
   await openPlan(page);
 
   await page.getByRole("button", { name: "Grocery list" }).click();
-  await expect(page.getByRole("heading", { name: "Create your account" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Sign in or create an account" })).toBeVisible();
   await expect(page.getByText("Sign in before using meal planning tools.")).toBeVisible();
 
   await page.getByRole("button", { name: "Family" }).click();
-  await expect(page.getByRole("heading", { name: "Create your account" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Sign in or create an account" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Continue with email" })).toBeDisabled();
 });
 

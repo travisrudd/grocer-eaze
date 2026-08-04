@@ -10,6 +10,7 @@ type BillingEnv = {
   EMAIL_FROM?: string;
   AUTH_SECRET?: string;
   INITIAL_ADMIN_EMAIL?: string;
+  INITIAL_ADMIN_EMAILS?: string;
 };
 
 function json(value: unknown, status = 200) {

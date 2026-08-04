@@ -4,6 +4,7 @@ type AuthEnv = {
   EMAIL_FROM?: string;
   AUTH_SECRET?: string;
   INITIAL_ADMIN_EMAIL?: string;
+  INITIAL_ADMIN_EMAILS?: string;
 };
 
 export type SessionUser = {
@@ -21,6 +22,14 @@ export type SessionUser = {
 };
 
 const cookieName = "grocer_eaze_session";
+
+function initialAdminEmails(env: AuthEnv) {
+  return new Set(
+    [env.INITIAL_ADMIN_EMAIL, ...(env.INITIAL_ADMIN_EMAILS || "").split(",")]
+      .map((email) => String(email || "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
 
 export function hasProductAccess(user: Omit<SessionUser, "hasAccess"> | SessionUser | null) {
   if (!user || user.accessStatus === "suspended") return false;
@@ -110,7 +119,11 @@ async function sendCode(email: string, code: string, env: AuthEnv) {
     headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json", "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)" },
     body: JSON.stringify({ from: env.EMAIL_FROM, to: [email], subject: `${code} is your Grocer-Eaze sign-in code`, html: `<h1>Your sign-in code is ${code}</h1><p>It expires in 10 minutes. If you did not request this, you can ignore this email.</p>` }),
   });
-  if (!sent.ok) throw new Error("Could not send verification email.");
+  if (!sent.ok) {
+    const detail = (await sent.text().catch(() => "")).slice(0, 500);
+    console.error("Resend verification email failed", { status: sent.status, detail });
+    throw new Error(`Could not send verification email (${sent.status}).`);
+  }
 }
 
 export async function handleAuthRequest(request: Request, env: AuthEnv): Promise<Response | null> {
@@ -159,9 +172,9 @@ export async function handleAuthRequest(request: Request, env: AuthEnv): Promise
     const now = new Date();
     const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
     const id = existing ? String(existing.id) : crypto.randomUUID();
-    const adminEmail = (env.INITIAL_ADMIN_EMAIL || "").toLowerCase();
-    await env.DB.prepare("INSERT INTO users(id,email,name,phone,role,access_status,trial_ends_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET name=excluded.name, phone=excluded.phone, role=CASE WHEN excluded.email = ? THEN 'admin' ELSE users.role END, updated_at=excluded.updated_at")
-      .bind(id, email, record.name, record.phone, email === adminEmail ? "admin" : "user", "pending", null, now.toISOString(), now.toISOString(), adminEmail).run();
+    const isInitialAdmin = initialAdminEmails(env).has(email);
+    await env.DB.prepare("INSERT INTO users(id,email,name,phone,role,access_status,trial_ends_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET name=excluded.name, phone=excluded.phone, role=CASE WHEN ? = 1 THEN 'admin' ELSE users.role END, updated_at=excluded.updated_at")
+      .bind(id, email, record.name, record.phone, isInitialAdmin ? "admin" : "user", "pending", null, now.toISOString(), now.toISOString(), isInitialAdmin ? 1 : 0).run();
     const sessionCookie = await createSession(id, env);
     await env.DB.prepare("DELETE FROM auth_codes WHERE email = ?").bind(email).run();
     return response({ verified: true, returning: Boolean(existing) }, 200, { "Set-Cookie": sessionCookie });
