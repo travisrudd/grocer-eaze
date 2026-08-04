@@ -117,6 +117,9 @@ test("nearby stores can be added, reprioritized, removed, and retained through t
   });
 
   await openPlan(page);
+  const storePriorities = page.locator(".store-preferences");
+  await expect(storePriorities.getByRole("button", { name: /One store only/ })).toBeVisible();
+  await expect(page.locator(".option-grid").getByRole("button", { name: /One store only/ })).toHaveCount(0);
   await page.getByRole("button", { name: "Find nearby stores" }).click();
   await page.getByRole("button", { name: /Lakeview Market/ }).click();
   await expect(page.locator(".preferred-store-list").getByText("Lakeview Market", { exact: true })).toBeVisible();
@@ -128,6 +131,7 @@ test("nearby stores can be added, reprioritized, removed, and retained through t
 });
 
 test("school lunches stay separate and grocery totals remain editable", async ({ page }) => {
+  let ingredientReportBody: Record<string, unknown> | null = null;
   const recipes = Array.from({ length: 12 }, (_, index) => ({
     id: index + 1,
     title: `Lunch planning recipe ${index + 1}`,
@@ -144,6 +148,7 @@ test("school lunches stay separate and grocery totals remain editable", async ({
       { name: "fresh vegetables", aisle: "Produce", original: "2 cups fresh vegetables" },
       { name: "yellow onions", aisle: "Produce", original: "1/2 cup yellow onions" },
       { name: "yellow onion, diced", aisle: "Produce", original: "2 tablespoons diced yellow onion" },
+      { name: "garnish chopped parsley", aisle: "Produce", original: "garnish chopped parsley" },
     ],
   }));
   await page.route("**/api/recipes/search?*", async (route) => {
@@ -159,9 +164,24 @@ test("school lunches stay separate and grocery totals remain editable", async ({
   await page.route("**/api/capabilities", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ instacartShopping: false }) });
   });
+  await page.route("**/api/ingredient-feedback", async (route) => {
+    ingredientReportBody = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sent: true }) });
+  });
 
   await openPlan(page);
-  await expect(page.getByText("5 extra weekday lunches · separate from lunch")).toBeVisible();
+  const daysToPlan = page.getByLabel("Days to plan");
+  await expect(daysToPlan).toHaveValue("7");
+  await daysToPlan.fill("3");
+  await expect(daysToPlan).toHaveValue("3");
+  await daysToPlan.fill("7");
+  const schoolLunchToggle = page.getByRole("button", { name: /School lunches/ });
+  await expect(schoolLunchToggle).toBeDisabled();
+  await page.getByRole("button", { name: "Increase kids" }).click();
+  await expect(page.getByText("2.5 serving equivalents: each child counts as half a serving.")).toBeVisible();
+  await expect(schoolLunchToggle).toBeEnabled();
+  await schoolLunchToggle.click();
+  await expect(page.getByText("5 extra weekday lunches · separate from regular lunches")).toBeVisible();
   await expect(page.getByRole("button", { name: /Individual chip bags/ })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Try to reuse ingredients" }).click();
   const browseRecipes = page.getByRole("button", { name: /Browse recipes for my plan/ });
@@ -176,10 +196,20 @@ test("school lunches stay separate and grocery totals remain editable", async ({
 
   await page.getByRole("button", { name: "Grocery list" }).click();
   await expect(page.getByRole("heading", { name: "Confirm what your household needs." })).toBeVisible();
-  await expect(page.getByLabel("Total amount needed for Fresh vegetables")).toHaveValue("4 cups");
+  await expect(page.getByLabel("Total amount needed for Fresh vegetables")).toHaveValue("1½ cups");
   await expect(page.getByLabel(/Total amount needed for Yellow onions/)).toHaveCount(1);
-  await expect(page.getByLabel(/Total amount needed for Yellow onions/)).toHaveValue("1¼ cups");
-  await expect(page.getByLabel("Total amount needed for Individual chip bags")).toHaveValue("4");
+  await expect(page.getByLabel(/Total amount needed for Yellow onions/)).toHaveValue("0.47 cups");
+  await expect(page.getByLabel("Total amount needed for Individual chip bags")).toHaveValue("1");
+  const missingAmountRow = page.locator(".ingredient-edit-row").filter({ hasText: "Garnish chopped parsley" });
+  await expect(missingAmountRow.getByLabel("Total amount needed for Garnish chopped parsley")).toHaveValue("");
+  await expect(missingAmountRow.getByLabel("Total amount needed for Garnish chopped parsley")).toHaveAttribute("placeholder", "Amount not provided");
+  await missingAmountRow.getByRole("button", { name: "Report incorrect value" }).click();
+  await expect(page.getByRole("heading", { name: "Help us correct Garnish chopped parsley" })).toBeVisible();
+  await page.getByLabel(/Correct amount or value/).fill("1 bunch");
+  await page.getByRole("button", { name: "Send report" }).click();
+  await expect.poll(() => ingredientReportBody?.ingredient).toBe("Garnish chopped parsley");
+  await missingAmountRow.getByRole("button", { name: "Use as needed" }).click();
+  await expect(missingAmountRow.getByLabel("Total amount needed for Garnish chopped parsley")).toHaveValue("As needed");
   await page.locator(".already-have-control input").first().check();
   await expect(page.getByRole("button", { name: "Open in Instacart" })).toHaveCount(0);
   await page.evaluate(() => { window.location.hash = "#delivery"; });
@@ -191,13 +221,13 @@ test("school lunches stay separate and grocery totals remain editable", async ({
   await expect(page.getByText("This is your final shopping list—not optional add-ons.", { exact: false })).toBeVisible();
   await expect(page.locator(".shopping-list-preview input")).toHaveCount(0);
   await expect(page.locator(".shopping-list-preview li").filter({ hasText: "Yellow onions" })).toHaveCount(1);
-  await expect(page.locator(".shopping-list-preview li").filter({ hasText: "Yellow onions" }).getByText("1¼ cups")).toBeVisible();
+  await expect(page.locator(".shopping-list-preview li").filter({ hasText: "Yellow onions" }).getByText("0.47 cups")).toBeVisible();
   await expect(page.getByText("excluded from shopping", { exact: false })).toBeVisible();
   const approvalCard = page.locator(".grocery-approval-card");
   await expect(approvalCard.getByRole("button", { name: "← Edit ingredients" })).toBeVisible();
   await approvalCard.getByRole("button", { name: "← Edit ingredients" }).click();
   await expect(page.getByRole("heading", { name: "Confirm what your household needs." })).toBeVisible();
-  await expect(page.getByLabel(/Total amount needed for Yellow onions/)).toHaveValue("1¼ cups");
+  await expect(page.getByLabel(/Total amount needed for Yellow onions/)).toHaveValue("0.47 cups");
   await page.getByRole("button", { name: "Confirm ingredients & build shopping list →" }).click();
   await page.evaluate(() => { window.location.hash = "#delivery"; });
   await expect(page.getByRole("heading", { name: "Review the list you’ll take shopping." })).toBeVisible();

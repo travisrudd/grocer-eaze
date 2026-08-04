@@ -166,6 +166,12 @@ test("keeps school lunches separate and turns merged ingredients into editable t
   ]);
 
   assert.match(page, /const lunchTarget = totalLunchDays/);
+  assert.match(page, /const \[planDays, setPlanDays\] = useState\(7\)/);
+  assert.match(page, /const \[adults, setAdults\] = useState\(2\)/);
+  assert.match(page, /const \[kids, setKids\] = useState\(0\)/);
+  assert.match(page, /const servingEquivalents = adults \+ kids \* \.5/);
+  assert.match(page, /weekdaysInPlan/);
+  assert.match(page, /Choose between 1 and 31 consecutive days/);
   assert.match(page, /Try to reuse ingredients/);
   assert.match(page, /Individual chip bags/);
   assert.match(page, /Clear selections/);
@@ -178,9 +184,22 @@ test("keeps school lunches separate and turns merged ingredients into editable t
   assert.match(page, /Approve list & choose how to send or save/);
   assert.match(page, /canonicalIngredientKey/);
   assert.match(page, /mergeIngredientQuantities/);
+  assert.match(page, /Amount not provided/);
+  assert.match(page, /Use as needed/);
+  assert.match(page, /Report incorrect value/);
+  assert.match(page, /\/api\/ingredient-feedback/);
   assert.match(page, /grocery-approval-actions/);
   assert.match(page, /confirmedIngredientsSignature/);
   assert.match(api, /WHERE id = \? AND owner_id = \?/);
+  assert.match(api, /url\.pathname === "\/api\/ingredient-feedback"/);
+  assert.match(api, /hasProductAccess\(sessionUser\)/);
+});
+
+test("tracks recipe provider expansion as a release-safe backlog item", async () => {
+  const backlog = await source("docs/product-backlog.md");
+  assert.match(backlog, /FatSecret Platform API/);
+  assert.match(backlog, /complete ingredient quantities/);
+  assert.match(backlog, /graceful fallback/);
 });
 
 test("prepares a secure Instacart shopping-list handoff", async () => {

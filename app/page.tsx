@@ -24,6 +24,7 @@ type FavoritesPayload = { favorites?: Array<{ title: string }> };
 type FamilyPayload = { members?: Member[] };
 type RatingsPayload = { ratings?: Array<{ recipe_id: string; quality: number; ease: number }> };
 type CapabilitiesPayload = { instacartShopping?: boolean };
+type IngredientReport = { key: string; name: string; amount: string; originals: string[]; sources: Array<{ title: string; sourceName: string; sourceUrl: string }> };
 
 const proteinOptions = ["Beef", "Pork", "Fish", "Shrimp"];
 const defaultStores: StorePreference[] = [
@@ -33,6 +34,7 @@ const defaultStores: StorePreference[] = [
 ];
 const defaultRecipeFilters = { query: "", kind: "All meals", maxTime: "Any time", source: "All sources", protein: "All proteins", favoritesOnly: false };
 const recipeBatchSize = 12;
+const missingIngredientAmount = "Amount not provided";
 const schoolLunchSideOptions = ["Individual chip bags", "Fresh fruit", "Yogurt cups", "Crunchy vegetables", "Snack bars"];
 const onboardingSteps = [
   { eyebrow: "STEP 1 OF 4", title: "Start with your household.", body: "Choose your dates, meals, budget, and dietary needs. Family preferences are included automatically." },
@@ -78,6 +80,11 @@ function parseIngredientMeasurement(original: string) {
   const unitMatch = match[2].replace(/^\([^)]*\)\s*/, "").match(/^([a-zA-Z]+)\b/);
   const unit = unitMatch ? unitAliases[unitMatch[1].toLowerCase()] || "each" : "each";
   return { quantity, unit };
+}
+
+function isAcceptedIngredientAmount(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "as needed" || Boolean(parseIngredientMeasurement(value));
 }
 
 function formatIngredientAmount(value: number) {
@@ -128,18 +135,16 @@ const convertibleMeasurements: Record<string, { dimension: "volume" | "weight"; 
   pound: { dimension: "weight", factor: 453.592 }, kilogram: { dimension: "weight", factor: 1000 },
 };
 
-function mergeIngredientQuantities(values: string[], occurrences: number) {
+function mergeIngredientQuantities(values: string[]) {
   const dimensions = new Map<string, { total: number; largestUnit: string; largestFactor: number }>();
   const exactUnits = new Map<string, number>();
-  const notes: string[] = [];
+  let includesAsNeeded = false;
   values.flatMap((value) => value.split(/\s+\+\s+/)).forEach((value) => {
     const trimmed = value.trim();
-    if (!trimmed) return;
+    if (!trimmed || trimmed === missingIngredientAmount) return;
+    if (trimmed.toLowerCase() === "as needed") { includesAsNeeded = true; return; }
     const measurement = parseIngredientMeasurement(trimmed);
-    if (!measurement) {
-      if (!notes.some((note) => note.toLowerCase() === trimmed.toLowerCase())) notes.push(trimmed);
-      return;
-    }
+    if (!measurement) return;
     const convertible = convertibleMeasurements[measurement.unit];
     if (!convertible) {
       exactUnits.set(measurement.unit, (exactUnits.get(measurement.unit) || 0) + measurement.quantity);
@@ -156,9 +161,9 @@ function mergeIngredientQuantities(values: string[], occurrences: number) {
   const quantities = [
     ...[...dimensions.values()].map((measurement) => formatMeasurement(measurement.total / measurement.largestFactor, measurement.largestUnit)),
     ...[...exactUnits.entries()].map(([unit, quantity]) => formatMeasurement(quantity, unit)),
-    ...notes,
+    ...(includesAsNeeded ? ["As needed"] : []),
   ];
-  return quantities.join(" + ") || `Needed for ${occurrences} recipe${occurrences === 1 ? "" : "s"}`;
+  return quantities.join(" + ") || missingIngredientAmount;
 }
 
 function grocerySection(name: string, aisle = "") {
@@ -224,8 +229,18 @@ function mealDateFor(kind: string, index: number, startDate?: string) {
   };
 }
 
-function Toggle({ label, checked, onChange, note }: { label: string; checked: boolean; onChange: () => void; note?: string }) {
-  return <button className="toggle-row" onClick={onChange} type="button" aria-pressed={checked}><span><strong>{label}</strong>{note && <small>{note}</small>}</span><span className={`toggle ${checked ? "on" : ""}`}><i /></span></button>;
+function weekdaysInPlan(startDate: string, days: number) {
+  const date = new Date(`${startDate}T12:00:00`);
+  let weekdays = 0;
+  for (let offset = 0; offset < days; offset += 1) {
+    if (date.getDay() !== 0 && date.getDay() !== 6) weekdays += 1;
+    date.setDate(date.getDate() + 1);
+  }
+  return weekdays;
+}
+
+function Toggle({ label, checked, onChange, note, disabled = false }: { label: string; checked: boolean; onChange: () => void; note?: string; disabled?: boolean }) {
+  return <button className="toggle-row" onClick={onChange} type="button" aria-pressed={checked} disabled={disabled}><span><strong>{label}</strong>{note && <small>{note}</small>}</span><span className={`toggle ${checked ? "on" : ""}`}><i /></span></button>;
 }
 
 function Stars({ value, onChange, label }: { value: number; onChange: (value: number) => void; label: string }) {
@@ -234,17 +249,18 @@ function Stars({ value, onChange, label }: { value: number; onChange: (value: nu
 
 export default function Home() {
   const [view, setView] = useState<View>("plan");
-  const [range, setRange] = useState("Week");
+  const [planDays, setPlanDays] = useState(7);
   const [planStartDate, setPlanStartDate] = useState(todayInputDate);
   const [mealType, setMealType] = useState("Lunch + dinner");
-  const [people, setPeople] = useState(4);
+  const [adults, setAdults] = useState(2);
+  const [kids, setKids] = useState(0);
   const [budget, setBudget] = useState(150);
   const [leftovers, setLeftovers] = useState(true);
   const [reuseIngredients, setReuseIngredients] = useState(false);
   const [glutenFree, setGlutenFree] = useState(true);
   const [lowDairy, setLowDairy] = useState(true);
   const [mediterranean, setMediterranean] = useState(true);
-  const [kidLunches, setKidLunches] = useState(true);
+  const [kidLunches, setKidLunches] = useState(false);
   const [schoolLunchSides, setSchoolLunchSides] = useState(["Individual chip bags", "Fresh fruit"]);
   const [oneStore, setOneStore] = useState(false);
   const [household, setHousehold] = useState("My household");
@@ -318,17 +334,26 @@ export default function Home() {
   const [accessibilityFeedback, setAccessibilityFeedback] = useState({ name: "", email: "", details: "", website: "" });
   const [accessibilityStatus, setAccessibilityStatus] = useState("");
   const [accessibilityBusy, setAccessibilityBusy] = useState(false);
+  const [ingredientReport, setIngredientReport] = useState<IngredientReport | null>(null);
+  const [ingredientReportCategory, setIngredientReportCategory] = useState("Incorrect amount");
+  const [ingredientReportCorrection, setIngredientReportCorrection] = useState("");
+  const [ingredientReportDetails, setIngredientReportDetails] = useState("");
+  const [ingredientReportStatus, setIngredientReportStatus] = useState("");
+  const [ingredientReportBusy, setIngredientReportBusy] = useState(false);
 
-  const dinnerTarget = range === "Day" ? 1 : range === "Week" ? 7 : 30;
-  const schoolLunchTarget = kidLunches ? (range === "Day" ? 1 : range === "Week" ? 5 : 22) : 0;
-  const totalLunchDays = mealType === "Lunch + dinner" ? (range === "Day" ? 1 : range === "Week" ? 7 : 30) : 0;
+  const people = adults + kids;
+  const servingEquivalents = adults + kids * .5;
+  const dinnerTarget = planDays;
+  const schoolLunchTarget = kidLunches && kids > 0 ? weekdaysInPlan(planStartDate, planDays) : 0;
+  const totalLunchDays = mealType === "Lunch + dinner" ? planDays : 0;
   const lunchTarget = totalLunchDays;
   const mealTargets = useMemo(() => ({ Lunch: lunchTarget, Dinner: dinnerTarget, "School lunch": schoolLunchTarget }), [lunchTarget, dinnerTarget, schoolLunchTarget]);
   const activeMealKinds = useMemo(() => (Object.entries(mealTargets) as Array<[string, number]>).filter(([, target]) => target > 0).map(([kind]) => kind), [mealTargets]);
   const totalTarget = dinnerTarget + lunchTarget + schoolLunchTarget;
   const filledCount = activeMealKinds.reduce((sum, kind) => sum + Math.min(plannedMeals.filter((meal) => meal.kind === kind).length, mealTargets[kind as keyof typeof mealTargets]), 0);
   const planIsFull = totalTarget > 0 && activeMealKinds.every((kind) => plannedMeals.filter((meal) => meal.kind === kind).length >= mealTargets[kind as keyof typeof mealTargets]);
-  const targetServingBudget = budget / Math.max(1, totalTarget * people);
+  const targetServingUnits = (dinnerTarget + lunchTarget) * servingEquivalents + schoolLunchTarget * kids * .5;
+  const targetServingBudget = budget / Math.max(1, targetServingUnits);
   const familyProteins = useMemo(() => [...new Set(members.flatMap((member) => member.preferences?.proteins || []))], [members]);
   const familyGlutenFree = members.some((member) => member.preferences?.glutenFree);
   const familyLowDairy = members.some((member) => member.preferences?.lowDairy);
@@ -352,15 +377,15 @@ export default function Home() {
     return rules.map((rule) => ({ member: member.name, rule }));
   }), [members]);
   const planningEstimate = useMemo(() => ({
-    low: Math.max(12, Math.round(totalTarget * people * 2.65 * .84)),
-    high: Math.max(18, Math.round(totalTarget * people * 4.15 * .9)),
-  }), [totalTarget, people]);
+    low: Math.max(12, Math.round(targetServingUnits * 2.65 * .84)),
+    high: Math.max(18, Math.round(targetServingUnits * 4.15 * .9)),
+  }), [targetServingUnits]);
   const schoolLunchSideEstimate = useMemo(() => {
     const perPerson: Record<string, number> = { "Individual chip bags": .55, "Fresh fruit": .7, "Yogurt cups": .8, "Crunchy vegetables": .5, "Snack bars": .65 };
     const schoolLunchCount = plannedMeals.filter((meal) => meal.kind === "School lunch").length;
-    return schoolLunchCount * people * schoolLunchSides.reduce((sum, side) => sum + (perPerson[side] || 0), 0);
-  }, [plannedMeals, people, schoolLunchSides]);
-  const recipeSubtotal = useMemo(() => Math.round(plannedMeals.reduce((sum, meal) => sum + parseServingCost(meal) * people, 0) + schoolLunchSideEstimate), [plannedMeals, people, schoolLunchSideEstimate]);
+    return schoolLunchCount * kids * schoolLunchSides.reduce((sum, side) => sum + (perPerson[side] || 0), 0);
+  }, [plannedMeals, kids, schoolLunchSides]);
+  const recipeSubtotal = useMemo(() => Math.round(plannedMeals.reduce((sum, meal) => sum + parseServingCost(meal) * (meal.kind === "School lunch" ? kids * .5 : servingEquivalents), 0) + schoolLunchSideEstimate), [plannedMeals, kids, servingEquivalents, schoolLunchSideEstimate]);
   const storeEstimates = useMemo(() => preferredStores.map((store, index) => {
     const normalizedName = store.name.toLowerCase();
     const priceFactor = normalizedName.includes("whole foods") ? 1.08
@@ -372,29 +397,33 @@ export default function Home() {
   const selectedEstimate = storeEstimates.find((store) => store.name === selectedStore)?.price || recipeSubtotal;
   const visibleStoreEstimates = oneStore ? storeEstimates.filter((store) => store.name === selectedStore) : storeEstimates;
   const groceryIngredients = useMemo(() => plannedMeals.flatMap((meal) => {
-    const scale = people / Math.max(1, meal.recipeServings || 4);
-    const recipeIngredients = (meal.ingredients || []).map((ingredient) => ({ ingredient, scale }));
+    const mealServings = meal.kind === "School lunch" ? kids * .5 : servingEquivalents;
+    const scale = mealServings / Math.max(1, meal.recipeServings || 4);
+    const source = { title: meal.title, sourceName: meal.sourceName || "Unknown source", sourceUrl: meal.sourceUrl || "" };
+    const recipeIngredients = (meal.ingredients || []).map((ingredient) => ({ ingredient, scale, source }));
     if (meal.kind !== "School lunch") return recipeIngredients;
     const sides = schoolLunchSides.map((side) => ({
       ingredient: {
         name: side.toLowerCase(),
         aisle: /fruit|vegetable/i.test(side) ? "Produce" : /yogurt/i.test(side) ? "Refrigerated" : "Pantry",
-        original: `${people} ${side.toLowerCase()}`,
+        original: `${kids} ${side.toLowerCase()}`,
       },
       scale: 1,
+      source,
     }));
     return [...recipeIngredients, ...sides];
-  }), [plannedMeals, people, schoolLunchSides]);
+  }), [plannedMeals, kids, servingEquivalents, schoolLunchSides]);
   const groceryEntries = useMemo(() => {
-    const merged = new Map<string, { name: string; aisle: string; occurrences: number; originals: string[]; totals: Record<string, number> }>();
-    groceryIngredients.forEach(({ ingredient, scale }) => {
+    const merged = new Map<string, { name: string; aisle: string; occurrences: number; originals: string[]; totals: Record<string, number>; sources: Array<{ title: string; sourceName: string; sourceUrl: string }> }>();
+    groceryIngredients.forEach(({ ingredient, scale, source }) => {
       const name = (ingredient.name || ingredient.original || "").trim();
       if (!name) return;
       const key = canonicalIngredientKey(name);
       if (!key) return;
-      const current = merged.get(key) || { name: name[0].toUpperCase() + name.slice(1), aisle: ingredient.aisle || "", occurrences: 0, originals: [], totals: {} };
+      const current = merged.get(key) || { name: name[0].toUpperCase() + name.slice(1), aisle: ingredient.aisle || "", occurrences: 0, originals: [], totals: {}, sources: [] };
       current.occurrences += 1;
       if (ingredient.original && !current.originals.includes(ingredient.original)) current.originals.push(ingredient.original);
+      if (!current.sources.some((item) => item.title === source.title && item.sourceUrl === source.sourceUrl)) current.sources.push(source);
       const measurement = parseIngredientMeasurement(ingredient.original || "");
       if (measurement) current.totals[measurement.unit] = (current.totals[measurement.unit] || 0) + measurement.quantity * scale;
       merged.set(key, current);
@@ -403,8 +432,8 @@ export default function Home() {
       key,
       ...value,
       suggestedQuantity: Object.entries(value.totals).length
-        ? mergeIngredientQuantities(Object.entries(value.totals).map(([unit, quantity]) => formatMeasurement(quantity, unit)), value.occurrences)
-        : value.originals.join(" + ") || `Needed for ${value.occurrences} recipe${value.occurrences === 1 ? "" : "s"}`,
+        ? mergeIngredientQuantities(Object.entries(value.totals).map(([unit, quantity]) => formatMeasurement(quantity, unit)))
+        : missingIngredientAmount,
     })).sort((a, b) => a.name.localeCompare(b.name));
   }, [groceryIngredients]);
   const { shoppingEntries, alreadyHaveEntries } = useMemo(() => {
@@ -423,7 +452,7 @@ export default function Home() {
       });
       return [...merged.values()].map(({ quantities, ...entry }) => ({
         ...entry,
-        suggestedQuantity: mergeIngredientQuantities(quantities, entry.occurrences),
+        suggestedQuantity: mergeIngredientQuantities(quantities),
       })).sort((a, b) => a.name.localeCompare(b.name));
     };
     return {
@@ -431,6 +460,10 @@ export default function Home() {
       alreadyHaveEntries: consolidate(groceryEntries.filter((entry) => alreadyHaveIngredients.includes(entry.key))),
     };
   }, [groceryEntries, ingredientNameEdits, ingredientAdjustments, alreadyHaveIngredients]);
+  const unresolvedAmountEntries = useMemo(() => groceryEntries.filter((entry) => {
+    if (alreadyHaveIngredients.includes(entry.key)) return false;
+    return !isAcceptedIngredientAmount(ingredientAdjustments[entry.key] ?? entry.suggestedQuantity);
+  }), [groceryEntries, ingredientAdjustments, alreadyHaveIngredients]);
   const groceryGroups = useMemo(() => {
     const groups: Record<string, { icon: string; title: string; items: typeof groceryEntries }> = {
       Produce: { icon: "🥬", title: "Produce", items: [] },
@@ -443,13 +476,17 @@ export default function Home() {
     return Object.values(groups).filter((group) => group.items.length).map((group) => ({ ...group, count: group.items.length }));
   }, [shoppingEntries]);
   const planSignature = useMemo(() => JSON.stringify({
-    people,
+    planDays,
+    adults,
+    kids,
+    mealType,
+    kidLunches,
     schoolLunchSides,
     mealIds: plannedMeals.map((meal) => meal.id),
     ingredientAdjustments,
     ingredientNameEdits,
     alreadyHaveIngredients: [...alreadyHaveIngredients].sort(),
-  }), [people, schoolLunchSides, plannedMeals, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients]);
+  }), [planDays, adults, kids, mealType, kidLunches, schoolLunchSides, plannedMeals, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients]);
   const ingredientsConfirmed = Boolean(planSignature && confirmedIngredientsSignature === planSignature);
   const groceryListApproved = Boolean(planSignature && reviewedPlanSignature === planSignature);
   const recipeSources = useMemo(() => [...new Set(recipeIdeas.map((meal) => meal.sourceName).filter(Boolean) as string[])].sort(), [recipeIdeas]);
@@ -479,18 +516,22 @@ export default function Home() {
   const selectedDeliveryActionCount = availableDeliveryActionKeys.filter((key) => deliveryActions[key]).length;
   const allDeliveryActionsSelected = availableDeliveryActionKeys.every((key) => deliveryActions[key]);
   const profilePreferences = useMemo(() => ({
-    range, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
+    planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
     kidLunches, schoolLunchSides, oneStore, selectedStore, maxTime, skill, exclusions,
     preferredStores, storeRadius, locationCoordinates,
-  }), [range, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, maxTime, skill, exclusions, preferredStores, storeRadius, locationCoordinates]);
+  }), [planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, maxTime, skill, exclusions, preferredStores, storeRadius, locationCoordinates]);
 
   function applyPersonalData(profileData: ProfilePayload, favoriteData: FavoritesPayload, familyData: FamilyPayload, ratingData: RatingsPayload) {
     if (profileData.profile) {
-      setHousehold(profileData.profile.household_name); setPeople(profileData.profile.people);
+      setHousehold(profileData.profile.household_name); setAdults(profileData.profile.people); setKids(0);
       setLocation(profileData.profile.location); setLocationQuery(profileData.profile.location);
       try {
         const preferences = JSON.parse(profileData.profile.preferences_json || "{}");
-        if (preferences.range) setRange(preferences.range);
+        const savedPlanDays = Number(preferences.planDays) || (preferences.range === "Day" ? 1 : preferences.range === "Month" ? 30 : preferences.range === "Week" ? 7 : 0);
+        const savedAdults = Number.isFinite(Number(preferences.adults)) ? Math.max(0, Math.min(20, Math.round(Number(preferences.adults)))) : profileData.profile.people;
+        const savedKids = Number.isFinite(Number(preferences.kids)) ? Math.max(0, Math.min(20, Math.round(Number(preferences.kids)))) : 0;
+        if (savedPlanDays) setPlanDays(Math.max(1, Math.min(31, Math.round(savedPlanDays))));
+        setAdults(savedAdults); setKids(savedKids);
         if (preferences.planStartDate) setPlanStartDate(preferences.planStartDate);
         if (preferences.mealType) setMealType(preferences.mealType);
         if (preferences.budget) setBudget(preferences.budget);
@@ -499,7 +540,7 @@ export default function Home() {
         if (typeof preferences.glutenFree === "boolean") setGlutenFree(preferences.glutenFree);
         if (typeof preferences.lowDairy === "boolean") setLowDairy(preferences.lowDairy);
         if (typeof preferences.mediterranean === "boolean") setMediterranean(preferences.mediterranean);
-        if (typeof preferences.kidLunches === "boolean") setKidLunches(preferences.kidLunches);
+        if (typeof preferences.kidLunches === "boolean") setKidLunches(preferences.kidLunches && savedKids > 0);
         if (Array.isArray(preferences.schoolLunchSides)) setSchoolLunchSides(preferences.schoolLunchSides.filter((side: unknown) => schoolLunchSideOptions.includes(String(side))).map(String));
         if (typeof preferences.oneStore === "boolean") setOneStore(preferences.oneStore);
         if (preferences.selectedStore) setSelectedStore(preferences.selectedStore);
@@ -535,19 +576,22 @@ export default function Home() {
     if (!cachedPlan) return;
     try {
       const saved = typeof cachedPlan === "string" ? JSON.parse(cachedPlan) : cachedPlan;
-      if (Array.isArray(saved.plannedMeals)) setPlannedMeals(saved.plannedMeals.map((meal: Meal) => ({ ...meal, image: recipeThumbnail(meal) })));
-      if (Array.isArray(saved.recipeIdeas)) setRecipeIdeas(saved.recipeIdeas.map((meal: Meal) => ({ ...meal, image: recipeThumbnail(meal) })));
-      if (saved.range) setRange(saved.range);
+      const savedPlanDays = Number(saved.planDays) || (saved.range === "Day" ? 1 : saved.range === "Month" ? 30 : saved.range === "Week" ? 7 : 0);
+      const savedAdults = Number.isFinite(Number(saved.adults)) ? Math.max(0, Math.min(20, Math.round(Number(saved.adults)))) : Math.max(1, Math.min(20, Math.round(Number(saved.people) || 2)));
+      const savedKids = Number.isFinite(Number(saved.kids)) ? Math.max(0, Math.min(20, Math.round(Number(saved.kids)))) : 0;
+      if (Array.isArray(saved.plannedMeals)) setPlannedMeals(saved.plannedMeals.filter((meal: Meal) => savedKids > 0 || meal.kind !== "School lunch").map((meal: Meal) => ({ ...meal, image: recipeThumbnail(meal) })));
+      if (Array.isArray(saved.recipeIdeas)) setRecipeIdeas(saved.recipeIdeas.filter((meal: Meal) => savedKids > 0 || meal.kind !== "School lunch").map((meal: Meal) => ({ ...meal, image: recipeThumbnail(meal) })));
+      if (savedPlanDays) setPlanDays(Math.max(1, Math.min(31, Math.round(savedPlanDays))));
       if (saved.planStartDate) setPlanStartDate(saved.planStartDate);
       if (saved.mealType) setMealType(saved.mealType);
-      if (saved.people) setPeople(saved.people);
+      setAdults(savedAdults); setKids(savedKids);
       if (saved.budget) setBudget(saved.budget);
       if (typeof saved.leftovers === "boolean") setLeftovers(saved.leftovers);
       if (typeof saved.reuseIngredients === "boolean") setReuseIngredients(saved.reuseIngredients);
       if (typeof saved.glutenFree === "boolean") setGlutenFree(saved.glutenFree);
       if (typeof saved.lowDairy === "boolean") setLowDairy(saved.lowDairy);
       if (typeof saved.mediterranean === "boolean") setMediterranean(saved.mediterranean);
-      if (typeof saved.kidLunches === "boolean") setKidLunches(saved.kidLunches);
+      if (typeof saved.kidLunches === "boolean") setKidLunches(saved.kidLunches && savedKids > 0);
       if (Array.isArray(saved.schoolLunchSides)) setSchoolLunchSides(saved.schoolLunchSides.filter((side: unknown) => schoolLunchSideOptions.includes(String(side))).map(String));
       if (typeof saved.oneStore === "boolean") setOneStore(saved.oneStore);
       if (saved.selectedStore) setSelectedStore(saved.selectedStore);
@@ -658,7 +702,7 @@ export default function Home() {
     const plan = {
       plannedMeals,
       recipeIdeas: recipeIdeas.slice(0, 90),
-      range, planStartDate, mealType, people, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
+      planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
       kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder,
       ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, confirmedIngredientsSignature, reviewedPlanSignature,
       deliveryActions, groceryDestination, calendarProvider, emailRecipients,
@@ -676,7 +720,7 @@ export default function Home() {
       }
     }, 750);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, range, planStartDate, mealType, people, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, confirmedIngredientsSignature, reviewedPlanSignature, deliveryActions, groceryDestination, calendarProvider, emailRecipients]);
+  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, confirmedIngredientsSignature, reviewedPlanSignature, deliveryActions, groceryDestination, calendarProvider, emailRecipients]);
 
   useEffect(() => {
     if (!planHydrated || !user) return;
@@ -762,7 +806,8 @@ export default function Home() {
     dialog.focus();
     const handleDialogKeys = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        if (emailDialogOpen) setEmailDialogOpen(false);
+        if (ingredientReport) setIngredientReport(null);
+        else if (emailDialogOpen) setEmailDialogOpen(false);
         else if (ratingMeal) setRatingMeal(null);
         else finishOnboarding();
         return;
@@ -792,7 +837,7 @@ export default function Home() {
       });
       if (previouslyFocused?.isConnected) previouslyFocused.focus();
     };
-  }, [onboardingStep, ratingMeal, emailDialogOpen]);
+  }, [onboardingStep, ratingMeal, emailDialogOpen, ingredientReport]);
 
   async function startAuth() {
     setAuthBusy(true); setAccountStatus("");
@@ -933,6 +978,7 @@ export default function Home() {
 
   async function generatePlan(queryOverride?: string) {
     if (!requireMembership()) return;
+    if (people < 1) { setPlannerNotice("Add at least one adult or child before building a plan."); return; }
     setPlanning(true); setPlannerNotice("");
     const minutes = maxTime.match(/\d+/)?.[0] || "45";
     const proteinPrompt = familyProteins.length ? familyProteins.join(" or ") : "healthy";
@@ -943,7 +989,7 @@ export default function Home() {
     const lunchQuery = `${mediterranean ? "Mediterranean " : ""}${skillPrompt} ${batchPrompt} ${proteinPrompt} lunch ${avoidPrompt}`;
     const schoolQuery = `simple kid friendly lunchbox wrap sandwich bento ${avoidPrompt}`;
     const providerExclusions = [...familyAvoids, ...(lowDairy ? ["cream cheese", "heavy cream"] : [])];
-    const resultCount = range === "Month" ? "48" : "30";
+    const resultCount = planDays >= 21 ? "48" : "30";
     const searchParams = (q: string, time: string) => new URLSearchParams({
       q, maxTime: time, glutenFree: String(effectiveGlutenFree), lowDairy: String(effectiveLowDairy), mediterranean: String(mediterranean),
       excludeIngredients: providerExclusions.join(","), number: resultCount,
@@ -1185,13 +1231,80 @@ export default function Home() {
     if (!value) return;
     const previousDate = planStartDate;
     const previousMeals = plannedMeals;
+    const nextSchoolLunchTarget = kidLunches && kids > 0 ? weekdaysInPlan(value, planDays) : 0;
+    const seen: Record<string, number> = {};
+    const targets: Record<string, number> = { Dinner: planDays, Lunch: mealType === "Lunch + dinner" ? planDays : 0, "School lunch": nextSchoolLunchTarget };
+    const nextMeals = plannedMeals.filter((meal) => {
+      seen[meal.kind] = (seen[meal.kind] || 0) + 1;
+      return seen[meal.kind] <= (targets[meal.kind] || 0);
+    });
     setPlanStartDate(value);
     if (plannedMeals.length) {
-      setPlannedMeals(resequenceMeals(plannedMeals, value));
+      setPlannedMeals(resequenceMeals(nextMeals, value));
       showUndo("Plan dates were updated.", () => {
         setPlanStartDate(previousDate);
         setPlannedMeals(previousMeals);
       });
+    }
+  }
+
+  function updateMealSelectionType(value: string) {
+    if (value === mealType) return;
+    const previousType = mealType;
+    const previousMeals = plannedMeals;
+    setMealType(value);
+    setConfirmedIngredientsSignature("");
+    setReviewedPlanSignature("");
+    if (value === "Dinner only" && plannedMeals.some((meal) => meal.kind === "Lunch")) {
+      setPlannedMeals((current) => current.filter((meal) => meal.kind !== "Lunch"));
+      showUndo("Regular lunches were removed because the plan now includes dinner only.", () => { setMealType(previousType); setPlannedMeals(previousMeals); });
+    }
+  }
+
+  function updatePlanDays(value: number) {
+    const nextDays = Math.max(1, Math.min(31, Math.round(value) || 1));
+    if (nextDays === planDays) return;
+    const previousDays = planDays;
+    const previousMeals = plannedMeals;
+    const targets: Record<string, number> = {
+      Dinner: nextDays,
+      Lunch: mealType === "Lunch + dinner" ? nextDays : 0,
+      "School lunch": kidLunches && kids > 0 ? weekdaysInPlan(planStartDate, nextDays) : 0,
+    };
+    const seen: Record<string, number> = {};
+    const nextMeals = plannedMeals.filter((meal) => {
+      seen[meal.kind] = (seen[meal.kind] || 0) + 1;
+      return seen[meal.kind] <= (targets[meal.kind] || 0);
+    });
+    setPlanDays(nextDays);
+    setPlannedMeals(resequenceMeals(nextMeals));
+    setConfirmedIngredientsSignature("");
+    setReviewedPlanSignature("");
+    if (previousMeals.length) showUndo(`Plan updated to ${nextDays} day${nextDays === 1 ? "" : "s"}.`, () => { setPlanDays(previousDays); setPlannedMeals(previousMeals); });
+  }
+
+  function updateAdultCount(value: number) {
+    const nextAdults = Math.max(0, Math.min(20 - kids, Math.round(value)));
+    if (nextAdults === 0 && kids === 0) return;
+    setAdults(nextAdults);
+    setConfirmedIngredientsSignature("");
+    setReviewedPlanSignature("");
+  }
+
+  function updateKidCount(value: number) {
+    const nextKids = Math.max(0, Math.min(20 - adults, Math.round(value)));
+    if (nextKids === kids) return;
+    const previousKids = kids;
+    const previousKidLunches = kidLunches;
+    const previousMeals = plannedMeals;
+    setKids(nextKids);
+    setConfirmedIngredientsSignature("");
+    setReviewedPlanSignature("");
+    if (nextKids === 0) {
+      setKidLunches(false);
+      setPlannedMeals((current) => current.filter((meal) => meal.kind !== "School lunch"));
+      setRecipeFilters((current) => ({ ...current, kind: current.kind === "School lunch" ? "All meals" : current.kind }));
+      if (previousMeals.some((meal) => meal.kind === "School lunch")) showUndo("School lunches were removed because the child count is now zero.", () => { setKids(previousKids); setKidLunches(previousKidLunches); setPlannedMeals(previousMeals); });
     }
   }
 
@@ -1232,12 +1345,15 @@ export default function Home() {
   }
 
   function toggleSchoolLunches() {
+    if (kids < 1) return;
     if (kidLunches) {
       setPlannedMeals((current) => current.filter((meal) => meal.kind !== "School lunch"));
       setRecipeFilters((current) => ({ ...current, kind: current.kind === "School lunch" ? "All meals" : current.kind }));
       setVisibleRecipeCount(recipeBatchSize);
     }
     setKidLunches(!kidLunches);
+    setConfirmedIngredientsSignature("");
+    setReviewedPlanSignature("");
   }
 
   function toggleSchoolLunchSide(side: string) {
@@ -1382,8 +1498,8 @@ export default function Home() {
   function groceryDateLabel() {
     const start = new Date(`${planStartDate}T12:00:00`);
     const end = new Date(start);
-    end.setDate(start.getDate() + (range === "Day" ? 0 : range === "Week" ? 6 : 29));
-    return range === "Day"
+    end.setDate(start.getDate() + planDays - 1);
+    return planDays === 1
       ? start.toLocaleDateString("en-US", { month: "short", day: "numeric" })
       : `${start.toLocaleDateString("en-US", { month: "short", day: "numeric" })} - ${end.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
   }
@@ -1480,10 +1596,56 @@ export default function Home() {
 
   function confirmIngredients() {
     if (!groceryEntries.length) { setExportStatus("Add at least one recipe ingredient before building the shopping list."); return; }
+    if (unresolvedAmountEntries.length) { setExportStatus(`Review ${unresolvedAmountEntries.length} missing or invalid amount${unresolvedAmountEntries.length === 1 ? "" : "s"}. Enter a quantity or choose “Use as needed” before continuing.`); return; }
     setConfirmedIngredientsSignature(planSignature);
     setReviewedPlanSignature("");
     setExportStatus("");
     navigateTo("shopping");
+  }
+
+  function openIngredientReport(entry: (typeof groceryEntries)[number]) {
+    setIngredientReport({
+      key: entry.key,
+      name: ingredientNameEdits[entry.key]?.trim() || entry.name,
+      amount: ingredientAdjustments[entry.key]?.trim() || entry.suggestedQuantity,
+      originals: entry.originals.slice(0, 5),
+      sources: entry.sources.slice(0, 5),
+    });
+    setIngredientReportCategory("Incorrect amount");
+    setIngredientReportCorrection("");
+    setIngredientReportDetails("");
+    setIngredientReportStatus("");
+  }
+
+  async function submitIngredientReport(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!ingredientReport) return;
+    setIngredientReportBusy(true);
+    setIngredientReportStatus("");
+    try {
+      const response = await fetch("/api/ingredient-feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          category: ingredientReportCategory,
+          ingredient: ingredientReport.name,
+          observedAmount: ingredientReport.amount,
+          correction: ingredientReportCorrection,
+          details: ingredientReportDetails,
+          originals: ingredientReport.originals,
+          sources: ingredientReport.sources,
+          plan: { planStartDate, planDays, adults, kids },
+        }),
+      });
+      const data = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) { setIngredientReportStatus(data.error || "We couldn’t send this report. Please try again."); return; }
+      setIngredientReport(null);
+      setExportStatus(`Thanks—your report about ${ingredientReport.name} was sent to the Grocer-Eaze team.`);
+    } catch {
+      setIngredientReportStatus("We couldn’t send this report. Please try again.");
+    } finally {
+      setIngredientReportBusy(false);
+    }
   }
 
   function approveGroceryList() {
@@ -1651,16 +1813,19 @@ export default function Home() {
       <section className="hero"><p className="eyebrow">MEAL PLANNING, MADE HUMAN</p><h1><span>Better Food,</span><br /><em>Less Waste.</em></h1><p className="lede">A recipe catalog shaped around every person at your table, so you buy what you need and enjoy what you make.</p><div className="trust-row"><span><b>✓</b> Family preferences included</span><span><b>✓</b> Shop with a smarter list</span><span><b>✓</b> Use more, waste less</span></div></section>
       <section className="planner">
         <div className="planner-top"><div><span>1</span><strong>Build your plan</strong></div><p>About 60 seconds</p></div>
-        <div className="field"><label id="planning-range-label">How far ahead?</label><div className="segmented" role="group" aria-labelledby="planning-range-label">{["Day", "Week", "Month"].map((item) => <button key={item} aria-pressed={range === item} onClick={() => setRange(item)} className={range === item ? "selected" : ""}>{item}</button>)}</div></div>
+        <div className="field"><label htmlFor="planning-days">Days to plan</label><input id="planning-days" className="text-input day-count-input" type="number" inputMode="numeric" min="1" max="31" value={planDays} onChange={(event) => updatePlanDays(Number(event.target.value))} /><small className="field-help">Choose between 1 and 31 consecutive days.</small></div>
         <div className="field"><label htmlFor="plan-start-date">When should this plan start?</label><input id="plan-start-date" className="text-input" type="date" min={todayInputDate()} value={planStartDate} suppressHydrationWarning onChange={(event) => updatePlanStartDate(event.target.value)} /><small className="field-help">Your schedule, reminders, and calendar exports will use this date.</small></div>
-        <div className="two-col"><div className="field"><label htmlFor="meal-type">Meals to plan</label><select id="meal-type" value={mealType} onChange={(e) => setMealType(e.target.value)}><option>Lunch + dinner</option><option>Dinner only</option></select></div><div className="field"><label id="people-label">People</label><div className="stepper" role="group" aria-labelledby="people-label"><button type="button" disabled={people <= 1} aria-label="Decrease number of people" onClick={() => setPeople(Math.max(1, people - 1))}>−</button><strong aria-live="polite">{people}</strong><button type="button" disabled={people >= 20} aria-label="Increase number of people" onClick={() => setPeople(Math.min(20, people + 1))}>+</button></div></div></div>
+        <div className="field"><label htmlFor="meal-type">Meals to plan</label><select id="meal-type" value={mealType} onChange={(e) => updateMealSelectionType(e.target.value)}><option>Lunch + dinner</option><option>Dinner only</option></select></div>
+        <div className="two-col household-counters"><div className="field"><label id="adults-label">Adults</label><div className="stepper" role="group" aria-labelledby="adults-label"><button type="button" disabled={adults <= 0 || (adults === 1 && kids === 0)} aria-label="Decrease adults" onClick={() => updateAdultCount(adults - 1)}>−</button><strong aria-live="polite">{adults}</strong><button type="button" disabled={people >= 20} aria-label="Increase adults" onClick={() => updateAdultCount(adults + 1)}>+</button></div></div><div className="field"><label id="kids-label">Kids</label><div className="stepper" role="group" aria-labelledby="kids-label"><button type="button" disabled={kids <= 0} aria-label="Decrease kids" onClick={() => updateKidCount(kids - 1)}>−</button><strong aria-live="polite">{kids}</strong><button type="button" disabled={people >= 20} aria-label="Increase kids" onClick={() => updateKidCount(kids + 1)}>+</button></div></div></div>
+        <p className="serving-equivalent-note">Recipe quantities use {servingEquivalents} serving equivalent{servingEquivalents === 1 ? "" : "s"}: each child counts as half a serving.</p>
+        <div className="school-lunch-toggle"><Toggle label="School lunches" checked={kidLunches} disabled={kids === 0} onChange={toggleSchoolLunches} note={kids === 0 ? "Add at least one child to plan school lunches" : `${schoolLunchTarget || weekdaysInPlan(planStartDate, planDays)} extra weekday lunch${schoolLunchTarget === 1 ? "" : "es"} · separate from regular lunches`} /></div>
+        {kidLunches && <div className="school-lunch-builder"><div><strong>Make school lunches easy</strong><span>Each school lunch is a simple, packable main plus the sides you choose. These are additional lunches and never reduce your regular lunch count.</span></div><div role="group" aria-label="School lunch sides">{schoolLunchSideOptions.map((side) => <button type="button" key={side} className={schoolLunchSides.includes(side) ? "selected" : ""} aria-pressed={schoolLunchSides.includes(side)} onClick={() => toggleSchoolLunchSide(side)}>{schoolLunchSides.includes(side) ? "✓ " : "+ "}{side}</button>)}</div></div>}
         <div className="field"><label htmlFor="household-name">Household profile</label><input id="household-name" className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /><small className="field-help">{members.length ? `${members.length} family member${members.length === 1 ? "" : "s"} included in preferences.` : "Add individual preferences on the Family page."}</small></div>
         {familyRuleDetails.length ? <details className="family-rule-panel"><summary><span>Family search rules</span><small>{familyRuleDetails.length} active</small></summary><div>{familyRuleDetails.map((item) => <p key={`${item.member}-${item.rule}`}><strong>{item.member}</strong><span>{item.rule}</span></p>)}</div></details> : <button className="family-empty-link" onClick={() => navigateTo("family")}>+ Add family preferences to personalize the search</button>}
         <div className="two-col"><div className="field"><label htmlFor="max-cook-time">Maximum cook time</label><select id="max-cook-time" value={maxTime} onChange={(e) => setMaxTime(e.target.value)}><option>20 minutes</option><option>30 minutes</option><option>45 minutes</option><option>60 minutes</option></select></div><div className="field"><label htmlFor="cooking-comfort">Cooking comfort</label><select id="cooking-comfort" value={skill} onChange={(e) => setSkill(e.target.value)}><option>Keep it simple</option><option>Comfortable</option><option>Adventurous</option></select></div></div>
         <div className="field"><div className="label-line"><label htmlFor="grocery-budget">Grocery budget for this plan</label><strong>{budget >= 500 ? "$500+" : `$${budget}`}</strong></div><input id="grocery-budget" aria-label="Grocery budget for this plan" type="range" min="50" max="500" step="10" value={budget} onChange={(e) => setBudget(Number(e.target.value))} /><div className="range-labels"><span>$50</span><span>$500+</span></div></div>
         <div className="preference-heading"><strong>Plan preferences</strong><span>Choose the options that should shape your recipes and shopping plan.</span></div>
-        <div className="option-grid"><Toggle label="Plan for leftovers" checked={leftovers} onChange={() => setLeftovers(!leftovers)} note="Cook once, eat twice" /><Toggle label="Try to reuse ingredients" checked={reuseIngredients} onChange={() => setReuseIngredients(!reuseIngredients)} note="Favor recipes with useful overlap" /><Toggle label="School lunches" checked={kidLunches} onChange={toggleSchoolLunches} note={`${schoolLunchTarget || (range === "Month" ? 22 : range === "Week" ? 5 : 1)} extra weekday lunch${range === "Day" ? "" : "es"} · separate from lunch`} /><Toggle label="Gluten-free" checked={glutenFree} onChange={() => setGlutenFree(!glutenFree)} note={familyGlutenFree ? "Also required by a family member" : undefined} /><Toggle label="Low dairy" checked={lowDairy} onChange={() => setLowDairy(!lowDairy)} note={familyLowDairy ? "Also preferred by a family member" : undefined} /><Toggle label="Mediterranean" checked={mediterranean} onChange={() => setMediterranean(!mediterranean)} /><Toggle label="One store only" checked={oneStore} onChange={() => setOneStore(!oneStore)} /></div>
-        {kidLunches && <div className="school-lunch-builder"><div><strong>Make school lunches easy</strong><span>Each school lunch is a simple, packable main plus the sides you choose. These are additional lunches and never reduce your regular lunch count.</span></div><div role="group" aria-label="School lunch sides">{schoolLunchSideOptions.map((side) => <button type="button" key={side} className={schoolLunchSides.includes(side) ? "selected" : ""} aria-pressed={schoolLunchSides.includes(side)} onClick={() => toggleSchoolLunchSide(side)}>{schoolLunchSides.includes(side) ? "✓ " : "+ "}{side}</button>)}</div></div>}
+        <div className="option-grid"><Toggle label="Plan for leftovers" checked={leftovers} onChange={() => setLeftovers(!leftovers)} note="Cook once, eat twice" /><Toggle label="Try to reuse ingredients" checked={reuseIngredients} onChange={() => setReuseIngredients(!reuseIngredients)} note="Favor recipes with useful overlap" /><Toggle label="Gluten-free" checked={glutenFree} onChange={() => setGlutenFree(!glutenFree)} note={familyGlutenFree ? "Also required by a family member" : undefined} /><Toggle label="Low dairy" checked={lowDairy} onChange={() => setLowDairy(!lowDairy)} note={familyLowDairy ? "Also preferred by a family member" : undefined} /><Toggle label="Mediterranean" checked={mediterranean} onChange={() => setMediterranean(!mediterranean)} /></div>
         <div className="field"><label htmlFor="ingredient-exclusions">Allergies or ingredients to avoid</label><input id="ingredient-exclusions" className="text-input" placeholder="e.g. shellfish, peanuts, mushrooms" value={exclusions} onChange={(e) => setExclusions(e.target.value)} /></div>
         <div className="location-picker">
           <label htmlFor="shopping-location">Shopping location</label><div className="location-input"><span className="location-mark" aria-hidden="true"><i>⌖</i></span><input id="shopping-location" value={locationQuery} onChange={(e) => { const nextLocation = e.target.value; setLocationQuery(nextLocation); setLocationResults([]); setLocationStatus(nextLocation.trim().length >= 2 ? "Finding location matches…" : nextLocation ? "Type at least 2 characters to search." : "Enter a neighborhood, city, or ZIP, or use your location."); }} placeholder="Neighborhood, city, or ZIP" aria-label="Shopping location" role="combobox" aria-autocomplete="list" aria-controls="location-options" aria-expanded={locationResults.length > 0} /><div className="location-actions">{locationQuery && <button className="location-clear" type="button" onClick={clearLocation} aria-label="Clear shopping location">Clear</button>}<button className="location-use" type="button" onClick={locateMe}><span aria-hidden="true">◎</span>Use my location</button></div></div>
@@ -1671,6 +1836,7 @@ export default function Home() {
           <summary><span>Store priorities</span><small>{preferredStores.length} saved · within {storeRadius} miles</small></summary>
           <div className="store-preferences-body">
             <p>Your first store is your highest priority. These choices are saved to your account and used for grocery comparisons.</p>
+            <Toggle label="One store only" checked={oneStore} onChange={() => setOneStore(!oneStore)} note="Build the shopping plan around one selected store" />
             <div className="store-search-controls"><label htmlFor="store-radius">Search radius<select id="store-radius" value={storeRadius} onChange={(event) => { setStoreRadius(Number(event.target.value)); setNearbyStores([]); }}><option value="1">1 mile</option><option value="3">3 miles</option><option value="5">5 miles</option><option value="10">10 miles</option><option value="15">15 miles</option><option value="25">25 miles</option></select></label><button className="outline compact" type="button" disabled={storeSearchBusy || !location.trim()} onClick={findNearbyStores}>{storeSearchBusy ? "Finding stores…" : "Find nearby stores"}</button></div>
             <ol className="preferred-store-list">{preferredStores.map((store, index) => <li key={store.id}><span className="store-priority">{index + 1}</span><div><strong>{store.name}</strong><small>{store.distanceMiles !== undefined ? `${store.distanceMiles} mi · ` : ""}{store.address || "Address unavailable"}</small></div><div className="store-order-actions"><button type="button" disabled={index === 0} onClick={() => movePreferredStore(index, -1)} aria-label={`Move ${store.name} higher`}>↑</button><button type="button" disabled={index === preferredStores.length - 1} onClick={() => movePreferredStore(index, 1)} aria-label={`Move ${store.name} lower`}>↓</button><button type="button" disabled={preferredStores.length === 1} onClick={() => removePreferredStore(store)} aria-label={`Remove ${store.name}`}>Remove</button></div></li>)}</ol>
             {oneStore && <div className="field"><label htmlFor="preferred-store">Only use this store</label><select id="preferred-store" value={selectedStore} onChange={(event) => setSelectedStore(event.target.value)}>{preferredStores.map((store) => <option key={store.id} value={store.name}>{store.name}</option>)}</select></div>}
@@ -1684,7 +1850,7 @@ export default function Home() {
     </div>}
 
     {view === "meals" && <div className="dashboard catalog-dashboard" id="page-content" tabIndex={-1}>
-      <div className="page-heading catalog-heading"><div><p className="eyebrow">{people} PEOPLE · {household.toUpperCase()}</p><h2>{similarTo ? `More like ${similarTo}.` : "Build your plan from the catalog."}</h2><p>Browse, filter, and add each recipe to the meal where it belongs.</p></div><div className="page-heading-actions">{similarTo && catalogBeforeSimilar && <button className="outline" onClick={returnToFullCatalog}>← Full catalog</button>}<button className="outline" onClick={() => navigateTo("plan")}>Adjust full plan</button></div></div>
+      <div className="page-heading catalog-heading"><div><p className="eyebrow">{adults} ADULT{adults === 1 ? "" : "S"}{kids ? ` · ${kids} ${kids === 1 ? "CHILD" : "KIDS"}` : ""} · {household.toUpperCase()}</p><h2>{similarTo ? `More like ${similarTo}.` : "Build your plan from the catalog."}</h2><p>Browse, filter, and add each recipe to the meal where it belongs.</p></div><div className="page-heading-actions">{similarTo && catalogBeforeSimilar && <button className="outline" onClick={returnToFullCatalog}>← Full catalog</button>}<button className="outline" onClick={() => navigateTo("plan")}>Adjust full plan</button></div></div>
 
       <section className="plan-progress" aria-label={`${filledCount} of ${totalTarget} meal slots filled`}>
         <div className="progress-copy"><span>{filledCount} / {totalTarget}</span><div><strong>{planIsFull ? "Your schedule is full" : `${totalTarget - filledCount} meal slots left`}</strong><small>Starts {new Date(`${planStartDate}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })} · {selectedStore} estimate {selectedEstimate ? `$${selectedEstimate}` : "$0"} · {selectedEstimate <= budget ? `$${budget - selectedEstimate} under budget` : `$${selectedEstimate - budget} over budget`}</small></div>{planIsFull ? <button className="progress-cta" onClick={() => navigateTo("list")}>Build grocery list →</button> : recipeIdeas.length > 0 && <button className="progress-cta" onClick={quickFillRemaining}>Quick-fill open slots</button>}</div>
@@ -1784,26 +1950,31 @@ export default function Home() {
     </div>}
 
     {view === "list" && <div className="dashboard" id="page-content" tabIndex={-1}>
-      <div className="page-heading"><div><p className="eyebrow">GROCERIES · STEP 1 OF 3</p><h2>Confirm what your household needs.</h2><p>Review {groceryEntries.length} combined ingredients for {people} people. Edit the totals and mark anything you already have before Grocer-Eaze builds your shopping list.</p></div><button className="outline" onClick={() => navigateTo("meals")}>← Back to recipes</button></div>
+      <div className="page-heading"><div><p className="eyebrow">GROCERIES · STEP 1 OF 3</p><h2>Confirm what your household needs.</h2><p>Review {groceryEntries.length} combined ingredients for {adults} adult{adults === 1 ? "" : "s"}{kids ? ` and ${kids} ${kids === 1 ? "child" : "kids"}` : ""}. Edit the totals and mark anything you already have before Grocer-Eaze builds your shopping list.</p></div><button className="outline" onClick={() => navigateTo("meals")}>← Back to recipes</button></div>
       {plannedMeals.length ? <div className="grocery-review-layout">
         <section className="grocery-panel grocery-panel-full">
           <div className="store-compare"><span className="mini-label">{oneStore ? "YOUR SELECTED STORE" : "YOUR PRIORITIZED STORES"}</span><div>{visibleStoreEstimates.map((store, index) => <button key={store.id} className={selectedStore === store.name ? "selected-store" : ""} onClick={() => setSelectedStore(store.name)}><strong>{index + 1}. {store.name}</strong><span>${store.price}</span><small>{store.distanceMiles !== undefined ? `${store.distanceMiles} mi · ` : ""}{store.availability}% estimated availability</small></button>)}</div></div>
-          <div className="grocery-head"><strong>{selectedStore}</strong><span>{plannedMeals.length} meals × {people} people · recipe-derived estimate</span></div>
-          <p className="estimate-method"><strong>How this is calculated:</strong> We add each selected recipe’s listed cost per serving for {people} people, then adjust for typical pricing at {selectedStore}. It is an estimate—not an exact checkout total—and does not subtract ingredients marked “already have.”</p>
+          <div className="grocery-head"><strong>{selectedStore}</strong><span>{plannedMeals.length} meals · {servingEquivalents} serving equivalent{servingEquivalents === 1 ? "" : "s"} · recipe-derived estimate</span></div>
+          <p className="estimate-method"><strong>How this is calculated:</strong> We scale each selected recipe to {adults} adult{adults === 1 ? "" : "s"}{kids ? ` and ${kids} ${kids === 1 ? "child" : "kids"}` : ""}, with each child counted as half a serving, then adjust for typical pricing at {selectedStore}. It is an estimate—not an exact checkout total—and does not subtract ingredients marked “already have.”</p>
           <section className="ingredient-review ingredient-review-screen" aria-labelledby="ingredient-review-heading">
             <div className="ingredient-review-body">
               <div className="ingredient-review-title"><div><span className="mini-label">INGREDIENT REVIEW</span><h3 id="ingredient-review-heading">Edit amounts and check your kitchen</h3></div><small>{alreadyHaveEntries.length} marked already have</small></div>
-              <p>Totals are scaled for {people} people and merged where recipe ingredient names match. Edit package amounts as needed, then mark anything already in your kitchen so it stays off every shopping export.</p>
+              <p>Totals are scaled to {servingEquivalents} serving equivalent{servingEquivalents === 1 ? "" : "s"} and merged where recipe ingredient names match. Edit package amounts as needed, then mark anything already in your kitchen so it stays off every shopping export.</p>
               <div className="ingredient-review-columns" aria-hidden="true"><span>Ingredient</span><span>Total needed</span><span>Shopping status</span></div>
-              <div className="ingredient-review-list">{groceryEntries.map((entry) => <div className={`ingredient-edit-row ${alreadyHaveIngredients.includes(entry.key) ? "already-have" : ""}`} key={entry.key}>
+              {unresolvedAmountEntries.length > 0 && <p className="ingredient-review-alert" role="alert"><strong>{unresolvedAmountEntries.length} amount{unresolvedAmountEntries.length === 1 ? " needs" : "s need"} review.</strong> Recipe descriptions are never used as quantities. Enter an amount or explicitly choose “Use as needed” before continuing.</p>}
+              <div className="ingredient-review-list">{groceryEntries.map((entry) => {
+                const amountValue = ingredientAdjustments[entry.key] ?? entry.suggestedQuantity;
+                const amountNeedsReview = !alreadyHaveIngredients.includes(entry.key) && !isAcceptedIngredientAmount(amountValue);
+                return <div className={`ingredient-edit-row ${alreadyHaveIngredients.includes(entry.key) ? "already-have" : ""} ${amountNeedsReview ? "needs-review" : ""}`} key={entry.key}>
                 <label><span>Ingredient name</span><input className="text-input" value={ingredientNameEdits[entry.key] ?? entry.name} onChange={(event) => { setIngredientNameEdits((current) => ({ ...current, [entry.key]: event.target.value })); setConfirmedIngredientsSignature(""); setReviewedPlanSignature(""); }} aria-label={`Ingredient name for ${entry.name}`} /></label>
-                <label><span>Total needed</span><input className="text-input" value={ingredientAdjustments[entry.key] ?? entry.suggestedQuantity} onChange={(event) => { setIngredientAdjustments((current) => ({ ...current, [entry.key]: event.target.value })); setConfirmedIngredientsSignature(""); setReviewedPlanSignature(""); }} aria-label={`Total amount needed for ${entry.name}`} /></label>
+                <label className="ingredient-amount-control"><span>Total needed</span><input className="text-input" value={amountValue === missingIngredientAmount ? "" : amountValue} placeholder={missingIngredientAmount} aria-invalid={amountNeedsReview} onChange={(event) => { setIngredientAdjustments((current) => ({ ...current, [entry.key]: event.target.value })); setConfirmedIngredientsSignature(""); setReviewedPlanSignature(""); }} aria-label={`Total amount needed for ${entry.name}`} />{amountNeedsReview && <small>Amount unavailable—enter a quantity.</small>}<button type="button" className="text-button compact" onClick={() => { setIngredientAdjustments((current) => ({ ...current, [entry.key]: "As needed" })); setConfirmedIngredientsSignature(""); setReviewedPlanSignature(""); }}>Use as needed</button></label>
                 <label className="already-have-control"><input type="checkbox" checked={alreadyHaveIngredients.includes(entry.key)} onChange={() => toggleAlreadyHave(entry.key)} /><span>Already have</span><small>{alreadyHaveIngredients.includes(entry.key) ? "Excluded from shopping" : "Keep on shopping list"}</small></label>
                 <small>Combined from {entry.occurrences} recipe use{entry.occurrences === 1 ? "" : "s"}{entry.originals[0] ? ` · source example: ${entry.originals[0]}` : ""}</small>
-              </div>)}</div>
+                <button type="button" className="report-ingredient-button" onClick={() => openIngredientReport(entry)}>Report incorrect value</button>
+              </div>})}</div>
             </div>
           </section>
-          <div className="grocery-approval-card"><div><span className="mini-label">NEXT · STEP 2</span><h3>Build your final shopping list</h3><p>We’ll remove everything marked “Already have” and organize the remaining items by grocery aisle for one last review.</p></div><button className="primary" onClick={confirmIngredients}>Confirm ingredients & build shopping list →</button></div>
+          <div className="grocery-approval-card"><div><span className="mini-label">NEXT · STEP 2</span><h3>Build your final shopping list</h3><p>We’ll remove everything marked “Already have” and organize the remaining items by grocery aisle for one last review.</p></div><button className="primary" disabled={unresolvedAmountEntries.length > 0} onClick={confirmIngredients}>{unresolvedAmountEntries.length ? `Review ${unresolvedAmountEntries.length} amount${unresolvedAmountEntries.length === 1 ? "" : "s"}` : "Confirm ingredients & build shopping list →"}</button></div>
           {exportStatus && <p className="export-status" aria-live="polite">{exportStatus}</p>}
         </section>
       </div> : <section className="empty-journey"><span className="empty-journey-icon icon-centered" aria-hidden="true">🛒</span><h3>Your grocery list starts with a meal.</h3><p>Browse the recipe catalog, add meals to your schedule, and Grocer-Eaze will combine the ingredients here.</p><div><button className="primary compact" onClick={() => navigateTo(recipeIdeas.length ? "meals" : "plan")}>{recipeIdeas.length ? "Choose recipes" : "Build my plan"}</button></div></section>}
@@ -1920,6 +2091,8 @@ export default function Home() {
     {ratingMeal && <div className="modal-backdrop" onClick={() => setRatingMeal(null)}><section className="rating-modal" role="dialog" aria-modal="true" aria-labelledby="rating-title" tabIndex={-1} onClick={(e) => e.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close recipe rating" onClick={() => setRatingMeal(null)}>×</button><span className="mini-label">RATE THIS RECIPE</span><h3 id="rating-title">{ratingMeal.title}</h3><label>Meal quality</label><Stars label="Meal quality" value={ratings[ratingMeal.id]?.quality || 0} onChange={(quality) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality, ease: current[ratingMeal.id]?.ease || 0 } }))} /><label>Ease of preparation</label><Stars label="Ease of preparation" value={ratings[ratingMeal.id]?.ease || 0} onChange={(ease) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality: current[ratingMeal.id]?.quality || 0, ease } }))} /><button className="primary" disabled={!ratings[ratingMeal.id]?.quality || !ratings[ratingMeal.id]?.ease} onClick={() => saveRating(ratingMeal, ratings[ratingMeal.id])}>Save rating</button></section></div>}
 
     {emailDialogOpen && <div className="modal-backdrop" onClick={() => setEmailDialogOpen(false)}><section className="email-recipient-modal" role="dialog" aria-modal="true" aria-labelledby="email-recipient-title" tabIndex={-1} onClick={(event) => event.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close email recipients" onClick={() => setEmailDialogOpen(false)}>×</button><span className="mini-label">EMAIL RECIPES</span><h3 id="email-recipient-title">Who should receive the plan?</h3><p>Add up to 10 addresses. Separate them with commas or put each address on a new line.</p><label htmlFor="recipe-email-recipients">Email recipients</label><textarea id="recipe-email-recipients" autoComplete="email" value={emailRecipients} onChange={(event) => setEmailRecipients(event.target.value)} placeholder="you@example.com, family@example.com" /><div className="modal-actions"><button className="outline" type="button" onClick={() => setEmailDialogOpen(false)}>Cancel</button><button className="primary compact" type="button" onClick={confirmEmailRecipients}>Save recipients</button></div></section></div>}
+
+    {ingredientReport && <div className="modal-backdrop" onClick={() => setIngredientReport(null)}><section className="ingredient-report-modal" role="dialog" aria-modal="true" aria-labelledby="ingredient-report-title" tabIndex={-1} onClick={(event) => event.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close ingredient report" onClick={() => setIngredientReport(null)}>×</button><span className="mini-label">REPORT A LIST ISSUE</span><h3 id="ingredient-report-title">Help us correct {ingredientReport.name}</h3><p>We’ll include the recipe source and returned value automatically. Your report goes securely to the Grocer-Eaze team.</p><form onSubmit={submitIngredientReport}><label htmlFor="ingredient-report-category">What looks wrong?</label><select id="ingredient-report-category" value={ingredientReportCategory} onChange={(event) => setIngredientReportCategory(event.target.value)}><option>Incorrect amount</option><option>Incorrect ingredient</option><option>Duplicate ingredient</option><option>Other</option></select><label htmlFor="ingredient-report-correction">Correct amount or value <small>(optional)</small></label><input id="ingredient-report-correction" className="text-input" value={ingredientReportCorrection} onChange={(event) => setIngredientReportCorrection(event.target.value)} maxLength={200} placeholder="e.g. 2 cups" /><label htmlFor="ingredient-report-details">Anything else? <small>(optional)</small></label><textarea id="ingredient-report-details" value={ingredientReportDetails} onChange={(event) => setIngredientReportDetails(event.target.value)} maxLength={1000} placeholder="Tell us what you expected to see." />{ingredientReportStatus && <p className="form-notice error" role="alert">{ingredientReportStatus}</p>}<div className="modal-actions"><button className="outline" type="button" onClick={() => setIngredientReport(null)}>Cancel</button><button className="primary compact" type="submit" disabled={ingredientReportBusy}>{ingredientReportBusy ? "Sending report…" : "Send report"}</button></div></form></section></div>}
 
     {onboardingStep !== null && <div className="onboarding-backdrop"><section className="onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" tabIndex={-1}>
       <button className="modal-close icon-centered" aria-label="Skip introduction" onClick={finishOnboarding}>×</button>

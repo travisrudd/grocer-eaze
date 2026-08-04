@@ -617,6 +617,46 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
     return json({ sent: true });
   }
 
+  if (url.pathname === "/api/ingredient-feedback" && request.method === "POST") {
+    if (!sessionUser) return json({ error: "Sign in before reporting a grocery-list issue." }, 401);
+    if (!hasProductAccess(sessionUser)) return json({ error: "An active membership or trial is required." }, 402);
+    const body = await request.json() as {
+      category?: string; ingredient?: string; observedAmount?: string; correction?: string; details?: string;
+      originals?: unknown; sources?: unknown; plan?: unknown;
+    };
+    const allowedCategories = new Set(["Incorrect amount", "Incorrect ingredient", "Duplicate ingredient", "Other"]);
+    const category = allowedCategories.has(String(body.category)) ? String(body.category) : "Other";
+    const ingredient = String(body.ingredient || "").trim().slice(0, 200);
+    const observedAmount = String(body.observedAmount || "").trim().slice(0, 200);
+    const correction = String(body.correction || "").trim().slice(0, 200);
+    const details = String(body.details || "").trim().slice(0, 1000);
+    if (!ingredient) return json({ error: "The ingredient name is required." }, 400);
+    const originals = Array.isArray(body.originals) ? body.originals.map((value) => String(value).trim().slice(0, 300)).filter(Boolean).slice(0, 5) : [];
+    const sources = Array.isArray(body.sources) ? body.sources.flatMap((value) => {
+      if (!value || typeof value !== "object") return [];
+      const item = value as Record<string, unknown>;
+      return [{ title: String(item.title || "Unknown recipe").trim().slice(0, 200), sourceName: String(item.sourceName || "Unknown source").trim().slice(0, 120), sourceUrl: safeHttpUrl(item.sourceUrl) }];
+    }).slice(0, 5) : [];
+    const plan = body.plan && typeof body.plan === "object" && !Array.isArray(body.plan) ? body.plan as Record<string, unknown> : {};
+    if (!env.RESEND_API_KEY || !env.EMAIL_FROM) return json({ error: "Issue reporting is temporarily unavailable." }, 503);
+    const sourceList = sources.length ? `<ul>${sources.map((source) => `<li>${escapeHtml(source.title)} — ${escapeHtml(source.sourceName)}${source.sourceUrl ? ` — <a href="${escapeHtml(source.sourceUrl)}">Open recipe</a>` : ""}</li>`).join("")}</ul>` : "<p>No recipe source was recorded.</p>";
+    const originalList = originals.length ? `<ul>${originals.map((original) => `<li>${escapeHtml(original)}</li>`).join("")}</ul>` : "<p>No raw ingredient value was recorded.</p>";
+    const recipient = [env.INITIAL_ADMIN_EMAIL, ...(env.INITIAL_ADMIN_EMAILS || "").split(",")].map((email) => String(email || "").trim()).find(Boolean) || "travis.rudd@gmail.com";
+    const sent = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json", "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)" },
+      body: JSON.stringify({
+        from: env.EMAIL_FROM,
+        to: [recipient],
+        reply_to: sessionUser.email,
+        subject: `Grocer-Eaze ingredient report: ${category}`,
+        html: `<h1>Ingredient-list report</h1><p><strong>Reporter:</strong> ${escapeHtml(sessionUser.name)} (${escapeHtml(sessionUser.email)})</p><p><strong>Category:</strong> ${escapeHtml(category)}</p><p><strong>Ingredient:</strong> ${escapeHtml(ingredient)}</p><p><strong>Observed amount:</strong> ${escapeHtml(observedAmount || "Not provided")}</p><p><strong>Suggested correction:</strong> ${escapeHtml(correction || "Not provided")}</p><p><strong>Details:</strong> ${escapeHtml(details || "Not provided").replace(/\n/g, "<br>")}</p><p><strong>Plan:</strong> ${escapeHtml(String(plan.planDays || "?"))} days; ${escapeHtml(String(plan.adults || 0))} adults; ${escapeHtml(String(plan.kids || 0))} kids; starts ${escapeHtml(String(plan.planStartDate || "unknown"))}</p><h2>Recipe sources</h2>${sourceList}<h2>Raw ingredient values</h2>${originalList}`,
+      }),
+    });
+    if (!sent.ok) return json({ error: "We couldn’t send this report. Please try again." }, 502);
+    return json({ sent: true });
+  }
+
   const paidPaths = new Set(["/api/recipes/search", "/api/recipes/import", "/api/recipe-image", "/api/calendar", "/api/favorites", "/api/ratings", "/api/email", "/api/instacart/shopping-list"]);
   if (paidPaths.has(url.pathname) && !sessionUser) return json({ error: "Sign in and choose a membership to continue.", code: "PAYMENT_REQUIRED" }, 401);
   if (paidPaths.has(url.pathname) && !hasProductAccess(sessionUser)) return json({ error: "An active membership or trial is required.", code: "PAYMENT_REQUIRED" }, 402);
