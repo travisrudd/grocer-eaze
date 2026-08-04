@@ -9,6 +9,12 @@ export const profiles = sqliteTable("profiles", {
   updatedAt: text("updated_at").notNull(),
 });
 
+export const activePlans = sqliteTable("active_plans", {
+  ownerId: text("owner_id").primaryKey(),
+  planJson: text("plan_json").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 export const favorites = sqliteTable("favorites", {
   id: text("id").primaryKey(),
   ownerId: text("owner_id").notNull(),

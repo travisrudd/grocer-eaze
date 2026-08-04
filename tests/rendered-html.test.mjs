@@ -116,8 +116,11 @@ test("shares grocery lists cross-platform and safely links emailed recipes", asy
   ]);
 
   assert.match(page, /navigator\.share/);
-  assert.match(page, /Notes, Reminders, Keep/);
+  assert.match(page, /Apple Reminders, Notes, Google Tasks, Keep/);
+  assert.match(page, /Choose what happens next/);
+  assert.match(page, /Select all/);
   assert.match(page, /meals: plannedMeals\.map/);
+  assert.match(api, /recipients/);
   assert.match(api, /linkedTitle = recipeUrl \? `<a href=/);
   assert.match(api, /escapeHtml\(recipeUrl\)/);
 });
@@ -165,7 +168,8 @@ test("keeps school lunches separate and turns merged ingredients into editable t
   assert.match(page, /Clear selections/);
   assert.match(page, /suggestedQuantity/);
   assert.match(page, /Total amount needed for/);
-  assert.match(page, /not additional or optional items/);
+  assert.match(page, /Already have/);
+  assert.match(page, /Approve grocery list & continue/);
   assert.match(api, /WHERE id = \? AND owner_id = \?/);
 });
 
@@ -176,7 +180,7 @@ test("prepares a secure Instacart shopping-list handoff", async () => {
     source("worker/index.ts"),
   ]);
 
-  assert.match(page, /Shop on Instacart/);
+  assert.match(page, /Open in Instacart/);
   assert.match(page, /\/api\/instacart\/shopping-list/);
   assert.match(api, /INSTACART_API_KEY/);
   assert.match(worker, /INSTACART_API_KEY/);
@@ -186,13 +190,35 @@ test("prepares a secure Instacart shopping-list handoff", async () => {
   assert.match(page, /instacartEnabled &&/);
 });
 
-test("keeps device-cached plans scoped to the signed-in account", async () => {
-  const page = await source("app/page.tsx");
+test("syncs active plans to owner-scoped account storage with a device fallback", async () => {
+  const [page, api, schema] = await Promise.all([
+    source("app/page.tsx"),
+    source("worker/api.ts"),
+    source("db/schema.ts"),
+  ]);
 
   assert.match(page, /grocer-eaze-active-plan:\$\{authData\.user\.id\}/);
   assert.match(page, /grocer-eaze-active-plan:\$\{planStorageOwnerId\}/);
+  assert.match(page, /fetch\("\/api\/active-plan"/);
+  assert.match(api, /WHERE owner_id = \?/);
+  assert.match(api, /INSERT INTO active_plans/);
+  assert.match(schema, /activePlans/);
   assert.match(page, /removeItem\("grocer-eaze-active-plan"\)/);
   assert.match(page, /window\.location\.replace\("\/#account"\)/);
+});
+
+test("retains prioritized nearby stores at the account level", async () => {
+  const [page, api] = await Promise.all([
+    source("app/page.tsx"),
+    source("worker/api.ts"),
+  ]);
+
+  assert.match(page, /Store priorities/);
+  assert.match(page, /preferredStores, storeRadius, locationCoordinates/);
+  assert.match(page, /movePreferredStore/);
+  assert.match(page, /\/api\/stores\/search/);
+  assert.match(api, /overpass-api\.de\/api\/interpreter/);
+  assert.match(api, /distanceInMiles/);
 });
 
 test("recovers approved administrators after the hosting migration", async () => {

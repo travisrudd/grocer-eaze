@@ -43,6 +43,13 @@
       "when": 1785512609852,
       "tag": "0005_sweet_pixie",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1785867417137,
+      "tag": "0006_blue_nebula",
+      "breakpoints": true
     }
   ]
 }

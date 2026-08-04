@@ -280,6 +280,7 @@ async function recipeImageResponse(url: URL, env: AppEnv) {
 async function ensureSchema(db: D1Database) {
   await db.batch([
     db.prepare("CREATE TABLE IF NOT EXISTS profiles (owner_id TEXT PRIMARY KEY, household_name TEXT NOT NULL, people INTEGER NOT NULL DEFAULT 4, location TEXT NOT NULL DEFAULT 'Uptown, Chicago, IL', preferences_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS active_plans (owner_id TEXT PRIMARY KEY, plan_json TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS favorites (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, recipe_id TEXT NOT NULL, recipe_json TEXT NOT NULL, created_at TEXT NOT NULL)"),
     db.prepare("CREATE INDEX IF NOT EXISTS favorites_owner_idx ON favorites(owner_id)"),
     db.prepare("CREATE TABLE IF NOT EXISTS family_members (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL, preferences_json TEXT NOT NULL DEFAULT '{}', allergies TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
@@ -475,6 +476,77 @@ async function locationLookup(url: URL, reverse = false) {
   return json({ results });
 }
 
+function distanceInMiles(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const toRadians = (value: number) => value * Math.PI / 180;
+  const earthRadiusMiles = 3958.8;
+  const latitudeDistance = toRadians(lat2 - lat1);
+  const longitudeDistance = toRadians(lon2 - lon1);
+  const a = Math.sin(latitudeDistance / 2) ** 2
+    + Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(longitudeDistance / 2) ** 2;
+  return earthRadiusMiles * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+async function nearbyStoreLookup(url: URL) {
+  const latitudeParam = url.searchParams.get("lat");
+  const longitudeParam = url.searchParams.get("lon");
+  let latitude = latitudeParam === null || latitudeParam === "" ? Number.NaN : Number(latitudeParam);
+  let longitude = longitudeParam === null || longitudeParam === "" ? Number.NaN : Number(longitudeParam);
+  const radiusMiles = Math.max(1, Math.min(25, Number(url.searchParams.get("radius") || 5)));
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
+    const query = String(url.searchParams.get("q") || "").trim().slice(0, 200);
+    if (!query) return json({ error: "Add a shopping location before finding stores." }, 400);
+    try {
+      const geocode = await fetch(`https://nominatim.openstreetmap.org/search?${new URLSearchParams({ q: query, format: "jsonv2", limit: "1", countrycodes: "us" })}`, {
+        headers: { "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)", "Accept-Language": "en-US,en" },
+      });
+      if (!geocode.ok) return json({ error: "Nearby store search is temporarily unavailable." }, 502);
+      const locations = await geocode.json() as Array<{ lat?: string; lon?: string }>;
+      latitude = Number(locations[0]?.lat);
+      longitude = Number(locations[0]?.lon);
+    } catch {
+      return json({ error: "Nearby store search is temporarily unavailable." }, 502);
+    }
+  }
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return json({ error: "Choose a more specific shopping location." }, 400);
+  const radiusMeters = Math.round(radiusMiles * 1609.344);
+  const query = `[out:json][timeout:15];(node["shop"~"supermarket|grocery"](around:${radiusMeters},${latitude},${longitude});way["shop"~"supermarket|grocery"](around:${radiusMeters},${latitude},${longitude});relation["shop"~"supermarket|grocery"](around:${radiusMeters},${latitude},${longitude}););out center tags 60;`;
+  try {
+    const response = await fetch("https://overpass-api.de/api/interpreter", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)" },
+      body: new URLSearchParams({ data: query }),
+    });
+    if (!response.ok) return json({ error: "Nearby store search is temporarily unavailable." }, 502);
+    const payload = await response.json() as { elements?: Array<{ id?: number; type?: string; lat?: number; lon?: number; center?: { lat?: number; lon?: number }; tags?: Record<string, string> }> };
+    const seen = new Set<string>();
+    const stores = (payload.elements || []).flatMap((element) => {
+      const tags = element.tags || {};
+      const name = String(tags.name || tags.brand || "").trim();
+      const lat = Number(element.lat ?? element.center?.lat);
+      const lon = Number(element.lon ?? element.center?.lon);
+      if (!name || !Number.isFinite(lat) || !Number.isFinite(lon)) return [];
+      const address = [
+        [tags["addr:housenumber"], tags["addr:street"]].filter(Boolean).join(" "),
+        tags["addr:city"],
+      ].filter(Boolean).join(", ");
+      const dedupeKey = `${name}|${address || `${lat.toFixed(4)}:${lon.toFixed(4)}`}`.toLowerCase();
+      if (seen.has(dedupeKey)) return [];
+      seen.add(dedupeKey);
+      return [{
+        id: `osm-${element.type || "place"}-${element.id || crypto.randomUUID()}`,
+        name: name.slice(0, 120),
+        address: address.slice(0, 200),
+        distanceMiles: Math.round(distanceInMiles(latitude, longitude, lat, lon) * 10) / 10,
+        lat: String(lat),
+        lon: String(lon),
+      }];
+    }).sort((a, b) => a.distanceMiles - b.distanceMiles).slice(0, 24);
+    return json({ stores, center: { lat: String(latitude), lon: String(longitude) } });
+  } catch {
+    return json({ error: "Nearby store search is temporarily unavailable." }, 502);
+  }
+}
+
 function calendarStamp(date: Date) {
   return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}${String(date.getMinutes()).padStart(2, "0")}00`;
 }
@@ -597,15 +669,46 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
   const ownerId = sessionUser.id;
   await ensureSchema(env.DB);
 
+  if (url.pathname === "/api/active-plan") {
+    if (request.method === "GET") {
+      const row = await env.DB.prepare("SELECT plan_json, updated_at FROM active_plans WHERE owner_id = ?").bind(ownerId).first();
+      if (!row) return json({ plan: null });
+      try { return json({ plan: JSON.parse(String(row.plan_json)), updatedAt: row.updated_at }); }
+      catch { return json({ plan: null }); }
+    }
+    if (request.method === "PUT") {
+      const body = await request.json() as { plan?: unknown };
+      if (!body.plan || typeof body.plan !== "object" || Array.isArray(body.plan)) return json({ error: "A valid meal plan is required." }, 400);
+      const planJson = JSON.stringify(body.plan);
+      if (planJson.length > 1_500_000) return json({ error: "This meal plan is too large to save." }, 413);
+      const updatedAt = new Date().toISOString();
+      await env.DB.prepare("INSERT INTO active_plans(owner_id, plan_json, updated_at) VALUES(?,?,?) ON CONFLICT(owner_id) DO UPDATE SET plan_json=excluded.plan_json, updated_at=excluded.updated_at")
+        .bind(ownerId, planJson, updatedAt).run();
+      return json({ saved: true, updatedAt });
+    }
+    if (request.method === "DELETE") {
+      await env.DB.prepare("DELETE FROM active_plans WHERE owner_id = ?").bind(ownerId).run();
+      return json({ deleted: true });
+    }
+  }
+
+  if (url.pathname === "/api/stores/search" && request.method === "GET") return nearbyStoreLookup(url);
+
   if (url.pathname === "/api/profile") {
     if (request.method === "GET") {
       const row = await env.DB.prepare("SELECT * FROM profiles WHERE owner_id = ?").bind(ownerId).first();
       return json({ profile: row || null });
     }
     if (request.method === "PUT") {
-      const body = await request.json() as { householdName: string; people: number; location: string; preferences: unknown };
+      const body = await request.json() as { householdName?: string; people?: number; location?: string; preferences?: unknown };
+      const householdName = String(body.householdName || "My household").trim().slice(0, 120) || "My household";
+      const people = Math.max(1, Math.min(20, Math.round(Number(body.people) || 1)));
+      const location = String(body.location || "").trim().slice(0, 300);
+      const preferences = body.preferences && typeof body.preferences === "object" && !Array.isArray(body.preferences) ? body.preferences : {};
+      const preferencesJson = JSON.stringify(preferences);
+      if (preferencesJson.length > 50_000) return json({ error: "Profile preferences are too large to save." }, 413);
       await env.DB.prepare("INSERT INTO profiles(owner_id, household_name, people, location, preferences_json, updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(owner_id) DO UPDATE SET household_name=excluded.household_name, people=excluded.people, location=excluded.location, preferences_json=excluded.preferences_json, updated_at=excluded.updated_at")
-        .bind(ownerId, body.householdName, body.people, body.location, JSON.stringify(body.preferences), new Date().toISOString()).run();
+        .bind(ownerId, householdName, people, location, preferencesJson, new Date().toISOString()).run();
       return json({ saved: true });
     }
   }
@@ -684,9 +787,9 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
 
   if (url.pathname === "/api/email" && request.method === "POST") {
     if (!env.RESEND_API_KEY || !env.EMAIL_FROM) return json({ error: "Email delivery is not configured yet." }, 503);
-    const body = await request.json() as { to?: string; subject?: string; meals?: Array<{ day?: string; title?: string; detail?: string; time?: string; sourceUrl?: string }> };
-    const to = String(body.to || "").trim();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return json({ error: "Enter a valid email address." }, 400);
+    const body = await request.json() as { to?: string | string[]; subject?: string; meals?: Array<{ day?: string; title?: string; detail?: string; time?: string; sourceUrl?: string }> };
+    const recipients = [...new Set((Array.isArray(body.to) ? body.to : String(body.to || "").split(/[;,\n]/)).map((address) => String(address).trim().toLowerCase()).filter(Boolean))].slice(0, 10);
+    if (!recipients.length || recipients.some((address) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address))) return json({ error: "Enter up to 10 valid email addresses." }, 400);
     const meals = Array.isArray(body.meals) ? body.meals.slice(0, 100) : [];
     if (!meals.length) return json({ error: "Add at least one recipe before emailing your plan." }, 400);
     const html = `<h1>Your meal plan</h1>${meals.map((meal) => {
@@ -702,7 +805,7 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
         "Content-Type": "application/json",
         "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)",
       },
-      body: JSON.stringify({ from: env.EMAIL_FROM, to: [to], subject: String(body.subject || "My Grocer-Eaze recipes"), html }),
+      body: JSON.stringify({ from: env.EMAIL_FROM, to: recipients, subject: String(body.subject || "My Grocer-Eaze recipes"), html }),
     });
     return json(await sent.json(), sent.status);
   }
