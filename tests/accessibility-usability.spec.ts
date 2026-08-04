@@ -222,8 +222,16 @@ test("school lunches stay separate and grocery totals remain editable", async ({
   await expect(amountInput).toHaveValue("1 bunch");
   await asNeededToggle.check();
   const broccoliRow = page.locator(".ingredient-edit-row").filter({ hasText: "Broccoli florets" });
-  const alignedControls = await broccoliRow.locator(":scope > label").evaluateAll((labels) => labels.map((label) => Math.round(label.getBoundingClientRect().top)));
-  if (await page.evaluate(() => window.innerWidth > 800)) expect(Math.max(...alignedControls) - Math.min(...alignedControls)).toBeLessThanOrEqual(2);
+  const controlBoxes = await broccoliRow.evaluate((row) => [
+    ...row.querySelectorAll<HTMLInputElement>(".text-input"),
+    ...row.querySelectorAll<HTMLElement>(".ingredient-choice-control"),
+  ].map((control) => ({ top: Math.round(control.getBoundingClientRect().top), height: Math.round(control.getBoundingClientRect().height) })));
+  if (await page.evaluate(() => window.innerWidth > 800)) {
+    expect(Math.max(...controlBoxes.map((box) => box.top)) - Math.min(...controlBoxes.map((box) => box.top))).toBeLessThanOrEqual(1);
+    expect([...new Set(controlBoxes.map((box) => box.height))]).toEqual([40]);
+  }
+  const ingredientListOverflow = await page.locator(".ingredient-review-list").evaluate((list) => ({ maxHeight: getComputedStyle(list).maxHeight, overflowY: getComputedStyle(list).overflowY }));
+  expect(ingredientListOverflow).toEqual({ maxHeight: "none", overflowY: "visible" });
   await page.locator(".already-have-control input").first().check();
   await expect(page.getByRole("button", { name: "Open in Instacart" })).toHaveCount(0);
   await page.evaluate(() => { window.location.hash = "#delivery"; });
