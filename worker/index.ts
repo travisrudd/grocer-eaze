@@ -64,6 +64,8 @@ const worker = {
 
 function withSecurityHeaders(response: Response) {
   const secured = new Response(response.body, response);
+  secured.headers.set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://static.cloudflareinsights.com; form-action 'self'; upgrade-insecure-requests");
+  secured.headers.set("X-Frame-Options", "DENY");
   secured.headers.set("X-Content-Type-Options", "nosniff");
   secured.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
   secured.headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=(self)");

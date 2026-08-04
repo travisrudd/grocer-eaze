@@ -152,6 +152,9 @@ test("restores returning accounts and hardens passwordless sign-in", async () =>
   assert.match(auth, /auth_rate_limits/);
   assert.match(auth, /constantTimeEqual/);
   assert.match(api, /sec-fetch-site/);
+  assert.match(worker, /Content-Security-Policy/);
+  assert.match(worker, /frame-ancestors 'none'/);
+  assert.match(worker, /X-Frame-Options/);
   assert.match(worker, /X-Content-Type-Options/);
   assert.match(worker, /Strict-Transport-Security/);
 });
@@ -169,7 +172,11 @@ test("keeps school lunches separate and turns merged ingredients into editable t
   assert.match(page, /suggestedQuantity/);
   assert.match(page, /Total amount needed for/);
   assert.match(page, /Already have/);
-  assert.match(page, /Approve grocery list & continue/);
+  assert.match(page, /Confirm ingredients & build shopping list/);
+  assert.match(page, /Review the list you’ll take shopping/);
+  assert.match(page, /This is your final shopping list—not optional add-ons/);
+  assert.match(page, /Approve list & choose how to send or save/);
+  assert.match(page, /confirmedIngredientsSignature/);
   assert.match(api, /WHERE id = \? AND owner_id = \?/);
 });
 

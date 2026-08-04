@@ -40,7 +40,13 @@ test("supports keyboard navigation and a working skip link", async ({ page }) =>
 });
 
 test("paid navigation directs signed-out visitors to a clear next step", async ({ page }) => {
+  const signedOutAccountRequests: string[] = [];
+  page.on("request", (request) => {
+    if (["/api/profile", "/api/favorites", "/api/family", "/api/ratings", "/api/active-plan"].includes(new URL(request.url()).pathname)) signedOutAccountRequests.push(request.url());
+  });
   await openPlan(page);
+  await page.waitForTimeout(300);
+  expect(signedOutAccountRequests).toEqual([]);
 
   await page.getByRole("button", { name: "Grocery list" }).click();
   await expect(page.getByRole("heading", { name: "Sign in or create an account" })).toBeVisible();
@@ -165,17 +171,29 @@ test("school lunches stay separate and grocery totals remain editable", async ({
   await expect(page.getByText("School lunch 1/5")).toBeVisible();
 
   await page.getByRole("button", { name: "Grocery list" }).click();
-  await expect(page.getByRole("heading", { name: "Review what you’ll actually buy." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Confirm what your household needs." })).toBeVisible();
   await expect(page.getByLabel("Total amount needed for Fresh vegetables")).toHaveValue("4 cups");
   await expect(page.getByLabel("Total amount needed for Individual chip bags")).toHaveValue("4");
   await page.locator(".already-have-control input").first().check();
-  await expect(page.getByRole("button", { name: "Move to shopping list" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open in Instacart" })).toHaveCount(0);
+  await page.evaluate(() => { window.location.hash = "#delivery"; });
+  await expect(page.getByRole("heading", { name: "Confirm what your household needs." })).toBeVisible();
+  await expect(page.getByText("Confirm your ingredients before choosing how to send or save the plan.")).toBeVisible();
 
-  await page.getByRole("button", { name: "Approve grocery list & continue →" }).click();
+  await page.getByRole("button", { name: "Confirm ingredients & build shopping list →" }).click();
+  await expect(page.getByRole("heading", { name: "Review the list you’ll take shopping." })).toBeVisible();
+  await expect(page.getByText("This is your final shopping list—not optional add-ons.", { exact: false })).toBeVisible();
+  await expect(page.locator(".shopping-list-preview input")).toHaveCount(0);
+  await expect(page.getByText("excluded from shopping", { exact: false })).toBeVisible();
+  await page.evaluate(() => { window.location.hash = "#delivery"; });
+  await expect(page.getByRole("heading", { name: "Review the list you’ll take shopping." })).toBeVisible();
+  await expect(page.getByText("Approve your shopping list before choosing how to send or save it.")).toBeVisible();
+  await page.getByRole("button", { name: "Approve list & choose how to send or save →" }).click();
   await expect(page.getByRole("heading", { name: "Choose what happens next." })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select all" })).toBeVisible();
-  await page.getByRole("button", { name: "← Edit grocery list" }).click();
+  await page.getByRole("button", { name: "← Review shopping list" }).click();
+  await expect(page.getByRole("heading", { name: "Review the list you’ll take shopping." })).toBeVisible();
+  await page.getByRole("button", { name: "← Edit ingredients" }).click();
 
   await page.getByRole("button", { name: "← Back to recipes" }).click();
   await page.getByRole("button", { name: "Clear selections" }).click();
