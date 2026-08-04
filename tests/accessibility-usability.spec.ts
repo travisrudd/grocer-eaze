@@ -1,5 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
+import { readFile } from "node:fs/promises";
+import { renderRecipeReader } from "../worker/recipe-reader";
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
@@ -132,6 +134,7 @@ test("nearby stores can be added, reprioritized, removed, and retained through t
 
 test("school lunches stay separate and grocery totals remain editable", async ({ page }) => {
   let ingredientReportBody: Record<string, unknown> | null = null;
+  let readerRequestBody: { meals?: Array<{ mealId?: string }> } | null = null;
   const recipes = Array.from({ length: 12 }, (_, index) => ({
     id: index + 1,
     title: `Lunch planning recipe ${index + 1}`,
@@ -168,6 +171,14 @@ test("school lunches stay separate and grocery totals remain editable", async ({
   await page.route("**/api/ingredient-feedback", async (route) => {
     ingredientReportBody = route.request().postDataJSON() as Record<string, unknown>;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sent: true }) });
+  });
+  await page.route("**/api/recipe-readers", async (route) => {
+    readerRequestBody = route.request().postDataJSON() as { meals?: Array<{ mealId?: string }> };
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ readers: (readerRequestBody.meals || []).map((meal, index) => ({ mealId: meal.mealId, url: `https://grocer-eaze.com/recipe/reader-${index}` })) }),
+    });
   });
 
   await openPlan(page);
@@ -288,6 +299,20 @@ test("school lunches stay separate and grocery totals remain editable", async ({
   await page.getByRole("button", { name: "Run 1 action →" }).click();
   await expect(page.getByText("Grocery list copied to your clipboard.")).toBeVisible();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain("Groceries +");
+  const groceryAction = page.locator(".delivery-action-grid article").filter({ hasText: "Send grocery list" });
+  const calendarAction = page.locator(".delivery-action-grid article").filter({ hasText: "Save meal plan to calendar" });
+  await groceryAction.getByRole("checkbox").uncheck();
+  await calendarAction.getByRole("checkbox").check();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Run 1 action →" }).click();
+  const calendarDownload = await downloadPromise;
+  const calendarPath = await calendarDownload.path();
+  expect(calendarPath).not.toBeNull();
+  const calendarContents = await readFile(calendarPath!, "utf8");
+  expect(readerRequestBody?.meals).toHaveLength(2);
+  expect(calendarContents).toContain("Clean recipe: https://grocer-eaze.com/recipe/reader-0");
+  expect(calendarContents).toContain("URL:https://grocer-eaze.com/recipe/reader-0");
+  expect(calendarContents).toContain("Original source: https://example.com/recipe");
   await page.getByRole("button", { name: "← Review shopping list" }).click();
   await expect(page.getByRole("heading", { name: "Review the list you’ll take shopping." })).toBeVisible();
   await page.locator(".page-heading").getByRole("button", { name: "← Edit ingredients" }).click();
@@ -318,4 +343,40 @@ test("visible interactive targets meet the WCAG 2.2 minimum size", async ({ page
       .filter((target) => target.width < 24 || target.height < 24),
   );
   expect(undersizedTargets).toEqual([]);
+});
+
+test("the clean recipe reader is accessible, responsive, and keeps publisher attribution", async ({ page }) => {
+  await page.setContent(renderRecipeReader({
+    title: "Lemon herb salmon",
+    sourceName: "Example Recipes",
+    sourceUrl: "https://example.com/lemon-salmon",
+    readyInMinutes: 30,
+    servings: 4,
+    ingredients: ["1½ pounds salmon", "2 lemons"],
+    instructions: [{ name: "Main recipe", steps: ["Heat the oven.", "Bake the salmon until done."] }],
+    extractionStatus: "complete",
+  }, "https://grocer-eaze.com/recipe/test"));
+
+  await expect(page.getByRole("heading", { name: "Lemon herb salmon" })).toBeVisible();
+  await expect(page.getByRole("link", { name: /View the original recipe/ })).toHaveAttribute("href", "https://example.com/lemon-salmon");
+  const results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations.filter((violation) => ["serious", "critical"].includes(violation.impact || ""))).toEqual([]);
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+});
+
+test("the clean recipe reader validates email and text recipients before opening drafts", async ({ page }) => {
+  const html = renderRecipeReader({
+    title: "Tomato soup", sourceName: "Example Recipes", sourceUrl: "https://example.com/tomato-soup",
+    readyInMinutes: 25, servings: 4, ingredients: ["6 tomatoes"],
+    instructions: [{ name: "", steps: ["Simmer until tender."] }], extractionStatus: "complete",
+  }, "https://grocer-eaze.com/recipe/test");
+  await page.goto(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+
+  await page.getByRole("textbox", { name: "Email recipients" }).fill("not-an-email");
+  await page.getByRole("button", { name: "Open email draft" }).click();
+  await expect(page.getByRole("status")).toHaveText("Enter up to 10 valid email addresses.");
+  await page.getByRole("textbox", { name: "Text recipient" }).fill("123");
+  await page.getByRole("button", { name: "Open text draft" }).click();
+  await expect(page.getByRole("status")).toHaveText("Enter a valid phone number with 7 to 15 digits.");
 });

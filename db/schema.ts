@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const profiles = sqliteTable("profiles", {
   ownerId: text("owner_id").primaryKey(),
@@ -54,6 +54,18 @@ export const recipeCatalog = sqliteTable("recipe_catalog", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
+
+export const recipeReaders = sqliteTable("recipe_readers", {
+  shareToken: text("share_token").primaryKey(),
+  ownerId: text("owner_id").notNull(),
+  recipeKey: text("recipe_key").notNull(),
+  sourceUrl: text("source_url").notNull(),
+  contentJson: text("content_json").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("recipe_readers_owner_recipe_idx").on(table.ownerId, table.recipeKey),
+]);
 
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(),

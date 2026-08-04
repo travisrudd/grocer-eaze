@@ -1638,9 +1638,29 @@ export default function Home() {
       throw error instanceof Error ? error : new Error("Instacart is temporarily unavailable.");
     }
   }
-  function downloadCalendar(provider: "google" | "apple" = calendarProvider) {
+  async function downloadCalendar(provider: "google" | "apple" = calendarProvider) {
     if (!plannedMeals.length) throw new Error("Add recipes to your plan before exporting a calendar.");
     if (!groceryListApproved) throw new Error("Approve the grocery list before exporting a calendar.");
+    const readerResponse = await fetch("/api/recipe-readers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        meals: plannedMeals.map((meal) => ({
+          mealId: meal.id,
+          recipeId: meal.recipeId || meal.id,
+          title: meal.title,
+          sourceName: meal.sourceName,
+          sourceUrl: meal.sourceUrl,
+          readyInMinutes: meal.readyMinutes,
+          servings: meal.recipeServings,
+          ingredients: meal.ingredients,
+        })),
+      }),
+    });
+    const readerData = await readerResponse.json().catch(() => ({})) as { readers?: Array<{ mealId?: string; url?: string }>; error?: string };
+    if (!readerResponse.ok) throw new Error(readerData.error || "Clean recipe links could not be prepared. Please try the calendar export again.");
+    const readerLinks = new Map((readerData.readers || []).flatMap((reader) => reader.mealId && reader.url ? [[reader.mealId, reader.url] as const] : []));
+    if (readerLinks.size < plannedMeals.length) throw new Error("One or more clean recipe links could not be prepared. Check that each selected recipe has an original source and try again.");
     const slots = [...plannedMeals].sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder));
     const shuffledByKind = new Map<string, Meal[]>();
     if (calendarOrder === "random") {
@@ -1659,8 +1679,9 @@ export default function Home() {
       const start = new Date(Number(slot.sortOrder) || Date.now());
       start.setHours(slot.kind === "Dinner" ? 17 : 12, slot.kind === "Dinner" ? 30 : 0, 0, 0);
       const end = new Date(start.getTime() + 60 * 60 * 1000);
-      const recipeLine = recipe.sourceUrl ? `\nRecipe: ${recipe.sourceUrl}` : "";
-      return `BEGIN:VEVENT\r\nUID:grocer-eaze-${calendarText(recipe.recipeId || recipe.id)}-${Number(slot.sortOrder)}@grocer-eaze\r\nDTSTAMP:${calendarStamp(new Date())}\r\nDTSTART:${calendarStamp(start)}\r\nDTEND:${calendarStamp(end)}\r\nSUMMARY:${calendarText(`${slot.kind}: ${recipe.title}`)}\r\nDESCRIPTION:${calendarText(`${recipe.detail} · ${recipe.time}${recipeLine}`)}\r\n${recipe.sourceUrl ? `URL:${calendarText(recipe.sourceUrl)}\r\n` : ""}END:VEVENT`;
+      const readerUrl = readerLinks.get(recipe.id) || "";
+      const recipeLine = `\nClean recipe: ${readerUrl}${recipe.sourceUrl ? `\nOriginal source: ${recipe.sourceUrl}` : ""}`;
+      return `BEGIN:VEVENT\r\nUID:grocer-eaze-${calendarText(recipe.recipeId || recipe.id)}-${Number(slot.sortOrder)}@grocer-eaze\r\nDTSTAMP:${calendarStamp(new Date())}\r\nDTSTART:${calendarStamp(start)}\r\nDTEND:${calendarStamp(end)}\r\nSUMMARY:${calendarText(`${slot.kind}: ${recipe.title}`)}\r\nDESCRIPTION:${calendarText(`${recipe.detail} · ${recipe.time}${recipeLine}`)}\r\nURL:${calendarText(readerUrl)}\r\nEND:VEVENT`;
     }).join("\r\n");
     const file = new Blob([`BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Grocer-Eaze//Meal Plan//EN\r\n${events}\r\nEND:VCALENDAR`], { type: "text/calendar" });
     const link = document.createElement("a"); link.href = URL.createObjectURL(file); link.download = "grocer-eaze-meal-plan.ics"; link.click(); URL.revokeObjectURL(link.href);
@@ -1769,10 +1790,7 @@ export default function Home() {
     const tasks: Array<Promise<string>> = [];
     if (deliveryActions.instacart && instacartEnabled) tasks.push(shopOnInstacart());
     if (deliveryActions.grocery) tasks.push(shareGroceryList(groceryDestination));
-    if (deliveryActions.calendar) {
-      try { tasks.push(Promise.resolve(downloadCalendar(calendarProvider))); }
-      catch (error) { tasks.push(Promise.reject(error)); }
-    }
+    if (deliveryActions.calendar) tasks.push(downloadCalendar(calendarProvider));
     if (deliveryActions.email) tasks.push(emailRecipes());
     const results = await Promise.allSettled(tasks);
     const completed = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
