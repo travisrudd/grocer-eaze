@@ -318,6 +318,11 @@ summary small { color: var(--muted); font-weight: 500; }
 .ingredient-review > summary small { color: #946b2e; font-weight: 800; }
 .ingredient-review-body { padding: 0 20px 20px; }
 .ingredient-review-body > p { margin: 0 0 14px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.ingredient-review-screen { border-top: 1px solid var(--line); }
+.ingredient-review-screen .ingredient-review-body { padding-top: 20px; }
+.ingredient-review-title { display: flex; justify-content: space-between; gap: 18px; align-items: end; margin-bottom: 10px; }
+.ingredient-review-title h3 { margin: 4px 0 0; font-size: 21px; line-height: 1.08; }
+.ingredient-review-title > small { color: var(--muted); font-size: 10px; font-weight: 700; white-space: nowrap; }
 .ingredient-review-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 0 12px 6px; color: var(--muted); font-size: 9px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
 .ingredient-review-list { max-height: 430px; overflow-y: auto; display: grid; gap: 7px; margin-bottom: 15px; padding-right: 4px; }
 .ingredient-edit-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 1fr); gap: 8px 12px; align-items: end; padding: 10px 12px; border: 1px solid #e0ded3; border-radius: var(--radius-control); background: white; }
@@ -325,6 +330,12 @@ summary small { color: var(--muted); font-weight: 500; }
 .ingredient-edit-row > small { grid-column: 1 / -1; overflow: hidden; color: var(--muted); font-size: 10px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .ingredient-review-list .text-input { height: 40px; font-size: 11px; }
 .shopping-checklist-heading { padding: 22px 20px 12px; border-top: 1px solid var(--line); }.shopping-checklist-heading h3 { margin: 4px 0 5px; font-size: 21px; line-height: 1.08; }.shopping-checklist-heading p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.shopping-list-purpose { margin: 20px; padding: 15px 17px; border: 1px solid #c9d5cb; border-radius: var(--radius-control); background: #eef3eb; }
+.shopping-list-purpose strong { display: block; margin-bottom: 4px; color: var(--green-dark); font-size: 12px; }
+.shopping-list-purpose p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.shopping-list-preview { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 20px; margin: 0; padding: 0 20px 14px 48px; list-style: none; }
+.shopping-list-preview li { min-height: 34px; display: flex; justify-content: space-between; gap: 14px; align-items: center; border-bottom: 1px solid #edf0eb; font-size: 11px; }
+.shopping-list-preview strong { color: var(--muted); font-size: 10px; font-weight: 600; text-align: right; }
 .review-required { margin: -8px 0 12px!important; padding: 9px 10px; border-left: 3px solid #d6a342; background: #fff4df; color: #745b2d!important; font-size: 11px!important; }
 .export-panel button:disabled { opacity: .45; cursor: not-allowed; background: #f5f5f1; }
 .export-panel .instacart-button { border-color: #2f8d46; background: #f1f9ee; }.export-panel .instacart-button > span { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; background: #43b02a; color: #ff8200; font-size: 17px; }.export-panel .instacart-button:hover:not(:disabled) { background: #e8f5e3; }.export-panel .instacart-button b { color: #237638; }
@@ -494,6 +505,7 @@ summary small { color: var(--muted); font-weight: 500; }
   .list-layout { grid-template-columns: 1fr; }
   .store-compare > div { grid-template-columns: 1fr; }
   .checklist { grid-template-columns: 1fr; }
+  .shopping-list-preview { grid-template-columns: 1fr; }
   .action-bar { align-items: stretch; flex-direction: column; }
   .site-footer { flex-wrap: wrap; }
   .site-footer div { margin-left: 0; width: 100%; }
@@ -533,6 +545,7 @@ summary small { color: var(--muted); font-weight: 500; }
   .schedule-actions { grid-column: 3; justify-content: flex-start; }
   .schedule-actions button { min-height: 36px; min-width: 36px; }
   .ingredient-review-columns { display: none; }
+  .ingredient-review-title { align-items: flex-start; flex-direction: column; }
   .ingredient-edit-row { grid-template-columns: 1fr; }
   .ingredient-edit-row > small { white-space: normal; }
   .store-search-controls { grid-template-columns: 1fr; }

@@ -15,7 +15,7 @@ type Member = { id: string; name: string; role: string; allergies: string; prefe
 type Rating = { quality: number; ease: number };
 type LocationResult = { label: string; lat?: string; lon?: string };
 type StorePreference = { id: string; name: string; address: string; distanceMiles?: number; lat?: string; lon?: string };
-type View = "plan" | "meals" | "list" | "delivery" | "account" | "family" | "plans" | "admin" | "accessibility";
+type View = "plan" | "meals" | "list" | "shopping" | "delivery" | "account" | "family" | "plans" | "admin" | "accessibility";
 type UndoAction = { message: string; restore: () => void };
 type AccountUser = { id: string; name: string; email: string; phone: string; role: "user" | "admin"; accessStatus: string; complimentaryUntil: string | null; billingExempt: boolean; subscriptionStatus: string | null; subscriptionEndsAt: string | null; hasAccess: boolean };
 type AdminUser = { id: string; name: string; email: string; phone: string; role: string; access_status: string; trial_ends_at?: string; complimentary_until?: string; billing_exempt: number };
@@ -38,7 +38,7 @@ const onboardingSteps = [
   { eyebrow: "STEP 1 OF 4", title: "Start with your household.", body: "Choose your dates, meals, budget, and dietary needs. Family preferences are included automatically." },
   { eyebrow: "STEP 2 OF 4", title: "Browse a catalog built for you.", body: "Filter a large recipe collection, save favorites, and add each recipe to lunch, dinner, or school lunch." },
   { eyebrow: "STEP 3 OF 4", title: "Shape your schedule.", body: "Quick-fill open slots or reorder meals by date. Your active plan follows your account across devices." },
-  { eyebrow: "STEP 4 OF 4", title: "Review once, then take it anywhere.", body: "Mark what you already have, approve your grocery list, then choose exactly how to send or save it." },
+  { eyebrow: "STEP 4 OF 4", title: "Review once, then take it anywhere.", body: "Confirm your ingredients, approve the final shopping list, then choose exactly how to send or save it." },
 ];
 
 const unitAliases: Record<string, string> = {
@@ -236,6 +236,7 @@ export default function Home() {
   const [onboardingStep, setOnboardingStep] = useState<number | null>(null);
   const [ingredientAdjustments, setIngredientAdjustments] = useState<Record<string, string>>({});
   const [ingredientNameEdits, setIngredientNameEdits] = useState<Record<string, string>>({});
+  const [confirmedIngredientsSignature, setConfirmedIngredientsSignature] = useState("");
   const [reviewedPlanSignature, setReviewedPlanSignature] = useState("");
   const [alreadyHaveIngredients, setAlreadyHaveIngredients] = useState<string[]>([]);
   const [planStorageOwnerId, setPlanStorageOwnerId] = useState("");
@@ -360,7 +361,8 @@ export default function Home() {
     ingredientNameEdits,
     alreadyHaveIngredients: [...alreadyHaveIngredients].sort(),
   }), [people, schoolLunchSides, plannedMeals, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients]);
-  const ingredientsReviewed = Boolean(planSignature && reviewedPlanSignature === planSignature);
+  const ingredientsConfirmed = Boolean(planSignature && confirmedIngredientsSignature === planSignature);
+  const groceryListApproved = Boolean(planSignature && reviewedPlanSignature === planSignature);
   const recipeSources = useMemo(() => [...new Set(recipeIdeas.map((meal) => meal.sourceName).filter(Boolean) as string[])].sort(), [recipeIdeas]);
   const selectedIngredientNames = useMemo(() => new Set(plannedMeals.flatMap((meal) => meal.ingredients || []).map((ingredient) => ingredient.name.trim().toLowerCase()).filter(Boolean)), [plannedMeals]);
   const filteredRecipeIdeas = useMemo(() => recipeIdeas.filter((meal) => {
@@ -469,6 +471,8 @@ export default function Home() {
       if (saved.ingredientAdjustments && typeof saved.ingredientAdjustments === "object") setIngredientAdjustments(saved.ingredientAdjustments);
       if (saved.ingredientNameEdits && typeof saved.ingredientNameEdits === "object") setIngredientNameEdits(saved.ingredientNameEdits);
       if (Array.isArray(saved.alreadyHaveIngredients)) setAlreadyHaveIngredients(saved.alreadyHaveIngredients.map(String).slice(0, 500));
+      if (typeof saved.confirmedIngredientsSignature === "string") setConfirmedIngredientsSignature(saved.confirmedIngredientsSignature);
+      else if (typeof saved.reviewedPlanSignature === "string") setConfirmedIngredientsSignature(saved.reviewedPlanSignature);
       if (typeof saved.reviewedPlanSignature === "string") setReviewedPlanSignature(saved.reviewedPlanSignature);
       if (saved.deliveryActions && typeof saved.deliveryActions === "object") {
         const actions = saved.deliveryActions as Record<string, unknown>;
@@ -494,58 +498,70 @@ export default function Home() {
     let id = window.localStorage.getItem("grocer-eaze-owner");
     if (!id) { id = crypto.randomUUID(); window.localStorage.setItem("grocer-eaze-owner", id); }
     const onboardingComplete = window.localStorage.getItem("grocer-eaze-onboarding-complete") === "true";
-    Promise.all([
-      fetch("/api/profile", { headers: { "x-grocer-owner": id } }).then((r) => r.json()),
-      fetch("/api/favorites", { headers: { "x-grocer-owner": id } }).then((r) => r.json()),
-      fetch("/api/family", { headers: { "x-grocer-owner": id } }).then((r) => r.json()),
-      fetch("/api/ratings", { headers: { "x-grocer-owner": id } }).then((r) => r.json()),
-      fetch("/api/auth/me").then((r) => r.json()),
-      fetch("/api/capabilities").then((r) => r.ok ? r.json() : {}).catch(() => ({})),
-      fetch("/api/active-plan").then((r) => r.ok ? r.json() : { plan: null }).catch(() => ({ plan: null })),
-    ]).then(([profileData, favoriteData, familyData, ratingData, authData, capabilities, cloudPlan]: [ProfilePayload, FavoritesPayload, FamilyPayload, RatingsPayload, { user?: AccountUser | null }, CapabilitiesPayload, { plan?: Record<string, unknown> | null }]) => {
-      setOwnerId(id);
-      applyPersonalData(profileData, favoriteData, familyData, ratingData);
-      setInstacartEnabled(Boolean(capabilities.instacartShopping));
-      const scopedPlanKey = authData.user ? `grocer-eaze-active-plan:${authData.user.id}` : "";
-      let cachedPlan = scopedPlanKey ? window.localStorage.getItem(scopedPlanKey) : null;
-      const legacyPlan = window.localStorage.getItem("grocer-eaze-active-plan");
-      if (scopedPlanKey && !cachedPlan && legacyPlan) {
-        cachedPlan = legacyPlan;
-        window.localStorage.setItem(scopedPlanKey, legacyPlan);
+    void (async () => {
+      try {
+        const [authData, capabilities] = await Promise.all([
+          fetch("/api/auth/me").then((r) => r.json()) as Promise<{ user?: AccountUser | null }>,
+          fetch("/api/capabilities").then((r) => r.ok ? r.json() : {}).catch(() => ({})) as Promise<CapabilitiesPayload>,
+        ]);
+        let profileData: ProfilePayload = {};
+        let favoriteData: FavoritesPayload = {};
+        let familyData: FamilyPayload = {};
+        let ratingData: RatingsPayload = {};
+        let cloudPlan: { plan?: Record<string, unknown> | null } = { plan: null };
+        if (authData.user) {
+          [profileData, favoriteData, familyData, ratingData, cloudPlan] = await Promise.all([
+            fetch("/api/profile").then((r) => r.ok ? r.json() : {}),
+            fetch("/api/favorites").then((r) => r.ok ? r.json() : {}),
+            fetch("/api/family").then((r) => r.ok ? r.json() : {}),
+            fetch("/api/ratings").then((r) => r.ok ? r.json() : {}),
+            fetch("/api/active-plan").then((r) => r.ok ? r.json() : { plan: null }),
+          ]);
+        }
+        setOwnerId(id);
+        applyPersonalData(profileData, favoriteData, familyData, ratingData);
+        setInstacartEnabled(Boolean(capabilities.instacartShopping));
+        const scopedPlanKey = authData.user ? `grocer-eaze-active-plan:${authData.user.id}` : "";
+        let cachedPlan = scopedPlanKey ? window.localStorage.getItem(scopedPlanKey) : null;
+        const legacyPlan = window.localStorage.getItem("grocer-eaze-active-plan");
+        if (scopedPlanKey && !cachedPlan && legacyPlan) {
+          cachedPlan = legacyPlan;
+          window.localStorage.setItem(scopedPlanKey, legacyPlan);
+        }
+        window.localStorage.removeItem("grocer-eaze-active-plan");
+        if (authData.user) {
+          setUser(authData.user); setEmail(authData.user.email); setPlanStorageOwnerId(authData.user.id);
+          setEmailRecipients(authData.user.email);
+        }
+        const requestedView = window.location.hash.replace("#", "") as View;
+        if (["meals", "list", "shopping", "delivery"].includes(requestedView) && !authData.user?.hasAccess) {
+          const destination: View = authData.user ? "plans" : "account";
+          setView(destination);
+          window.history.replaceState(null, "", `#${destination}`);
+          setAccountStatus(authData.user ? "Choose a membership to unlock meal planning and exports." : "Sign in before using meal planning tools.");
+        }
+        setAuthLoaded(true);
+        if (cloudPlan.plan) {
+          applySavedPlan(cloudPlan.plan);
+          setPlanSaveStatus("Plan restored from your account.");
+        } else {
+          applySavedPlan(cachedPlan);
+          if (cachedPlan) setPlanSaveStatus("Device plan restored and ready to sync.");
+        }
+        setPlanHydrated(true);
+        if (!onboardingComplete) setOnboardingStep(0);
+      } catch {
+        const requestedView = window.location.hash.replace("#", "") as View;
+        if (["meals", "list", "shopping", "delivery"].includes(requestedView)) {
+          setView("account");
+          window.history.replaceState(null, "", "#account");
+          setAccountStatus("Sign in before using meal planning tools.");
+        }
+        setAuthLoaded(true);
+        setPlanHydrated(true);
+        if (!onboardingComplete) setOnboardingStep(0);
       }
-      window.localStorage.removeItem("grocer-eaze-active-plan");
-      if (authData.user) {
-        setUser(authData.user); setEmail(authData.user.email); setPlanStorageOwnerId(authData.user.id);
-        setEmailRecipients(authData.user.email);
-      }
-      const requestedView = window.location.hash.replace("#", "") as View;
-      if (["meals", "list", "delivery"].includes(requestedView) && !authData.user?.hasAccess) {
-        const destination: View = authData.user ? "plans" : "account";
-        setView(destination);
-        window.history.replaceState(null, "", `#${destination}`);
-        setAccountStatus(authData.user ? "Choose a membership to unlock meal planning and exports." : "Sign in before using meal planning tools.");
-      }
-      setAuthLoaded(true);
-      if (cloudPlan.plan) {
-        applySavedPlan(cloudPlan.plan);
-        setPlanSaveStatus("Plan restored from your account.");
-      } else {
-        applySavedPlan(cachedPlan);
-        if (cachedPlan) setPlanSaveStatus("Device plan restored and ready to sync.");
-      }
-      setPlanHydrated(true);
-      if (!onboardingComplete) setOnboardingStep(0);
-    }).catch(() => {
-      const requestedView = window.location.hash.replace("#", "") as View;
-      if (["meals", "list", "delivery"].includes(requestedView)) {
-        setView("account");
-        window.history.replaceState(null, "", "#account");
-        setAccountStatus("Sign in before using meal planning tools.");
-      }
-      setAuthLoaded(true);
-      setPlanHydrated(true);
-      if (!onboardingComplete) setOnboardingStep(0);
-    });
+    })();
   }, []);
 
   useEffect(() => {
@@ -555,7 +571,7 @@ export default function Home() {
       recipeIdeas: recipeIdeas.slice(0, 90),
       range, planStartDate, mealType, people, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
       kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder,
-      ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, reviewedPlanSignature,
+      ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, confirmedIngredientsSignature, reviewedPlanSignature,
       deliveryActions, groceryDestination, calendarProvider, emailRecipients,
     };
     try { window.localStorage.setItem(`grocer-eaze-active-plan:${planStorageOwnerId}`, JSON.stringify(plan)); }
@@ -571,7 +587,7 @@ export default function Home() {
       }
     }, 750);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, range, planStartDate, mealType, people, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, reviewedPlanSignature, deliveryActions, groceryDestination, calendarProvider, emailRecipients]);
+  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, range, planStartDate, mealType, people, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, confirmedIngredientsSignature, reviewedPlanSignature, deliveryActions, groceryDestination, calendarProvider, emailRecipients]);
 
   useEffect(() => {
     if (!planHydrated || !user) return;
@@ -594,9 +610,24 @@ export default function Home() {
   }, [undoAction]);
 
   useEffect(() => {
-    const validViews: View[] = ["plan", "meals", "list", "delivery", "account", "family", "plans", "admin", "accessibility"];
+    const validViews: View[] = ["plan", "meals", "list", "shopping", "delivery", "account", "family", "plans", "admin", "accessibility"];
     const syncViewFromUrl = () => {
-      const nextView = window.location.hash.replace("#", "") as View;
+      let nextView = window.location.hash.replace("#", "") as View;
+      if (!validViews.includes(nextView)) return;
+      let message = "";
+      if (planHydrated && nextView === "shopping" && !ingredientsConfirmed) {
+        nextView = "list";
+        message = "Confirm your ingredients before reviewing the shopping list.";
+      } else if (planHydrated && nextView === "delivery" && !groceryListApproved) {
+        nextView = ingredientsConfirmed ? "shopping" : "list";
+        message = ingredientsConfirmed
+          ? "Approve your shopping list before choosing how to send or save it."
+          : "Confirm your ingredients before choosing how to send or save the plan.";
+      }
+      if (message) {
+        setExportStatus(message);
+        window.history.replaceState(null, "", `#${nextView}`);
+      }
       if (validViews.includes(nextView)) {
         setView(nextView);
         window.scrollTo({ top: 0 });
@@ -609,13 +640,14 @@ export default function Home() {
       window.removeEventListener("popstate", syncViewFromUrl);
       window.removeEventListener("hashchange", syncViewFromUrl);
     };
-  }, []);
+  }, [planHydrated, ingredientsConfirmed, groceryListApproved]);
 
   useEffect(() => {
     const titles: Record<View, string> = {
       plan: "Plan meals",
       meals: "Recipe catalog",
-      list: "Grocery list",
+      list: "Confirm ingredients",
+      shopping: "Review shopping list",
       delivery: "Send or save",
       account: "Account",
       family: "Family preferences",
@@ -851,14 +883,16 @@ export default function Home() {
       const previousAdjustments = ingredientAdjustments;
       const previousNameEdits = ingredientNameEdits;
       const previousAlreadyHave = alreadyHaveIngredients;
+      const previousIngredientsConfirmation = confirmedIngredientsSignature;
       const previousReview = reviewedPlanSignature;
       if (previousPlan.length) {
-        setUndoAction({ message: "Your previous schedule was cleared for the new catalog.", restore: () => { setPlannedMeals(previousPlan); setIngredientAdjustments(previousAdjustments); setIngredientNameEdits(previousNameEdits); setAlreadyHaveIngredients(previousAlreadyHave); setReviewedPlanSignature(previousReview); } });
+        setUndoAction({ message: "Your previous schedule was cleared for the new catalog.", restore: () => { setPlannedMeals(previousPlan); setIngredientAdjustments(previousAdjustments); setIngredientNameEdits(previousNameEdits); setAlreadyHaveIngredients(previousAlreadyHave); setConfirmedIngredientsSignature(previousIngredientsConfirmation); setReviewedPlanSignature(previousReview); } });
       }
       setPlannedMeals([]);
       setIngredientAdjustments({});
       setIngredientNameEdits({});
       setAlreadyHaveIngredients([]);
+      setConfirmedIngredientsSignature("");
       setReviewedPlanSignature("");
       setRecipeIdeas(uniqueIdeas);
       setRecipeFilters({ ...defaultRecipeFilters });
@@ -1016,13 +1050,15 @@ export default function Home() {
     const previousAdjustments = ingredientAdjustments;
     const previousNameEdits = ingredientNameEdits;
     const previousAlreadyHave = alreadyHaveIngredients;
+    const previousIngredientsConfirmation = confirmedIngredientsSignature;
     const previousReview = reviewedPlanSignature;
     setPlannedMeals([]);
     setIngredientAdjustments({});
     setIngredientNameEdits({});
     setAlreadyHaveIngredients([]);
+    setConfirmedIngredientsSignature("");
     setReviewedPlanSignature("");
-    showUndo("All selected meals were cleared.", () => { setPlannedMeals(previous); setIngredientAdjustments(previousAdjustments); setIngredientNameEdits(previousNameEdits); setAlreadyHaveIngredients(previousAlreadyHave); setReviewedPlanSignature(previousReview); });
+    showUndo("All selected meals were cleared.", () => { setPlannedMeals(previous); setIngredientAdjustments(previousAdjustments); setIngredientNameEdits(previousNameEdits); setAlreadyHaveIngredients(previousAlreadyHave); setConfirmedIngredientsSignature(previousIngredientsConfirmation); setReviewedPlanSignature(previousReview); });
   }
 
   function movePlannedMeal(id: string, direction: -1 | 1) {
@@ -1117,6 +1153,7 @@ export default function Home() {
 
   function toggleSchoolLunchSide(side: string) {
     setSchoolLunchSides((current) => current.includes(side) ? current.filter((item) => item !== side) : [...current, side]);
+    setConfirmedIngredientsSignature("");
     setReviewedPlanSignature("");
   }
 
@@ -1191,6 +1228,7 @@ export default function Home() {
 
   function toggleAlreadyHave(key: string) {
     setAlreadyHaveIngredients((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
+    setConfirmedIngredientsSignature("");
     setReviewedPlanSignature("");
   }
 
@@ -1267,7 +1305,7 @@ export default function Home() {
   }
 
   async function shareGroceryList(destination: "reminders" | "notes" = groceryDestination) {
-    if (!ingredientsReviewed) throw new Error("Approve the grocery list before sending it.");
+    if (!groceryListApproved) throw new Error("Approve the grocery list before sending it.");
     if (!groceryGroups.length) throw new Error("Every ingredient is marked as already on hand, so there is no shopping list to send.");
     const text = groceryListText(destination);
     const targetLabel = destination === "reminders" ? "Reminders or Tasks" : "Notes or Keep";
@@ -1284,7 +1322,7 @@ export default function Home() {
   }
 
   async function shopOnInstacart() {
-    if (!ingredientsReviewed) throw new Error("Approve the grocery list before shopping.");
+    if (!groceryListApproved) throw new Error("Approve the grocery list before shopping.");
     const destination = window.open("about:blank", "_blank");
     if (destination) destination.opener = null;
     try {
@@ -1312,7 +1350,7 @@ export default function Home() {
   }
   function downloadCalendar(provider: "google" | "apple" = calendarProvider) {
     if (!plannedMeals.length) throw new Error("Add recipes to your plan before exporting a calendar.");
-    if (!ingredientsReviewed) throw new Error("Approve the grocery list before exporting a calendar.");
+    if (!groceryListApproved) throw new Error("Approve the grocery list before exporting a calendar.");
     const slots = [...plannedMeals].sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder));
     const shuffledByKind = new Map<string, Meal[]>();
     if (calendarOrder === "random") {
@@ -1343,7 +1381,7 @@ export default function Home() {
   }
 
   async function emailRecipes(recipients = parsedEmailRecipients()) {
-    if (!ingredientsReviewed) throw new Error("Approve the grocery list before emailing recipes.");
+    if (!groceryListApproved) throw new Error("Approve the grocery list before emailing recipes.");
     if (!recipients.length || recipients.some((address) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) || recipients.length > 10) throw new Error("Add up to 10 valid recipient email addresses.");
     const response = await fetch("/api/email", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: recipients, subject: "My Grocer-Eaze recipes", meals: plannedMeals.map(({ day, title, detail, time, sourceUrl }) => ({ day, title, detail, time, sourceUrl })) }) });
     const data = await response.json().catch(() => ({})) as { error?: string };
@@ -1351,7 +1389,16 @@ export default function Home() {
     return `Recipes sent to ${recipients.length} ${recipients.length === 1 ? "recipient" : "recipients"}.`;
   }
 
+  function confirmIngredients() {
+    if (!groceryEntries.length) { setExportStatus("Add at least one recipe ingredient before building the shopping list."); return; }
+    setConfirmedIngredientsSignature(planSignature);
+    setReviewedPlanSignature("");
+    setExportStatus("");
+    navigateTo("shopping");
+  }
+
   function approveGroceryList() {
+    if (!ingredientsConfirmed) { setExportStatus("Confirm your ingredients before approving the shopping list."); navigateTo("list"); return; }
     if (!groceryEntries.length) { setExportStatus("Add at least one recipe ingredient before approving the list."); return; }
     setReviewedPlanSignature(planSignature);
     setExportStatus("");
@@ -1440,7 +1487,7 @@ export default function Home() {
   }
 
   function navigateTo(nextView: View) {
-    if (["meals", "list", "delivery"].includes(nextView) && authLoaded) {
+    if (["meals", "list", "shopping", "delivery"].includes(nextView) && authLoaded) {
       if (!user) { nextView = "account"; setAccountStatus("Sign in before using meal planning tools."); }
       else if (!user.hasAccess) { nextView = "plans"; setAccountStatus("Choose a membership to unlock meal planning and exports."); }
     }
@@ -1499,15 +1546,15 @@ export default function Home() {
   return <div className="app">
     <a className="skip-link" href="#page-content" onClick={focusMainContent}>Skip to main content</a>
     <header>
-      <button className="brand" aria-label="Grocer-Eaze home" onClick={() => navigateTo("plan")}><span className="brand-mark" aria-hidden="true"><span>g</span></span><span>Grocer<span>•</span>Eaze</span></button>
+      <button className="brand" title="Go to Grocer-Eaze home" onClick={() => navigateTo("plan")}><span className="brand-mark" aria-hidden="true"><span>g</span></span><span>Grocer<span>•</span>Eaze</span></button>
       <nav aria-label="Primary navigation">
         <button className={view === "plan" ? "active" : ""} aria-current={view === "plan" ? "page" : undefined} onClick={() => navigateTo("plan")}>Plan</button>
         <button disabled={!authLoaded} className={view === "meals" ? "active" : ""} aria-current={view === "meals" ? "page" : undefined} onClick={() => navigateTo("meals")}>My meals</button>
-        <button disabled={!authLoaded} className={view === "list" ? "active" : ""} aria-current={view === "list" ? "page" : undefined} onClick={() => navigateTo("list")}>Grocery list</button>
+        <button disabled={!authLoaded} className={["list", "shopping", "delivery"].includes(view) ? "active" : ""} aria-current={["list", "shopping", "delivery"].includes(view) ? "page" : undefined} onClick={() => navigateTo("list")}>Grocery list</button>
         <button disabled={!authLoaded} className={view === "family" ? "active" : ""} aria-current={view === "family" ? "page" : undefined} onClick={() => navigateTo("family")}>Family</button>
         {user?.role === "admin" && <button className={view === "admin" ? "active" : ""} aria-current={view === "admin" ? "page" : undefined} onClick={() => { navigateTo("admin"); loadAdminUsers(); }}>Admin</button>}
       </nav>
-      <button className="avatar" aria-label="Open profile" aria-current={view === "account" ? "page" : undefined} onClick={() => navigateTo("account")}>{user ? user.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() : "ME"}</button>
+      <button className="avatar" aria-label={`${user ? user.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() : "ME"} · Open profile`} aria-current={view === "account" ? "page" : undefined} onClick={() => navigateTo("account")}>{user ? user.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() : "ME"}</button>
     </header>
     <main>
 
@@ -1648,37 +1695,49 @@ export default function Home() {
     </div>}
 
     {view === "list" && <div className="dashboard" id="page-content" tabIndex={-1}>
-      <div className="page-heading"><div><p className="eyebrow">GROCERIES · {plannedMeals.length} SELECTED MEALS</p><h2>Review what you’ll actually buy.</h2><p>{groceryEntries.length} combined ingredients for {people} people near {location}. {groceryEntries.length - alreadyHaveEntries.length} remain on the shopping list.</p></div><button className="outline" onClick={() => navigateTo("meals")}>← Back to recipes</button></div>
+      <div className="page-heading"><div><p className="eyebrow">GROCERIES · STEP 1 OF 3</p><h2>Confirm what your household needs.</h2><p>Review {groceryEntries.length} combined ingredients for {people} people. Edit the totals and mark anything you already have before Grocer-Eaze builds your shopping list.</p></div><button className="outline" onClick={() => navigateTo("meals")}>← Back to recipes</button></div>
       {plannedMeals.length ? <div className="grocery-review-layout">
         <section className="grocery-panel grocery-panel-full">
           <div className="store-compare"><span className="mini-label">{oneStore ? "YOUR SELECTED STORE" : "YOUR PRIORITIZED STORES"}</span><div>{visibleStoreEstimates.map((store, index) => <button key={store.id} className={selectedStore === store.name ? "selected-store" : ""} onClick={() => setSelectedStore(store.name)}><strong>{index + 1}. {store.name}</strong><span>${store.price}</span><small>{store.distanceMiles !== undefined ? `${store.distanceMiles} mi · ` : ""}{store.availability}% estimated availability</small></button>)}</div></div>
           <div className="grocery-head"><strong>{selectedStore}</strong><span>{plannedMeals.length} meals × {people} people · recipe-derived estimate</span></div>
           <p className="estimate-method"><strong>How this is calculated:</strong> We add each selected recipe’s listed cost per serving for {people} people, then adjust for typical pricing at {selectedStore}. It is an estimate—not an exact checkout total—and does not subtract ingredients marked “already have.”</p>
-          <details className="ingredient-review" open={!ingredientsReviewed}>
-            <summary><span>1. Review ingredients, amounts, and what you already have</span><small>{ingredientsReviewed ? "Approved" : "Required"}</small></summary>
+          <section className="ingredient-review ingredient-review-screen" aria-labelledby="ingredient-review-heading">
             <div className="ingredient-review-body">
+              <div className="ingredient-review-title"><div><span className="mini-label">INGREDIENT REVIEW</span><h3 id="ingredient-review-heading">Edit amounts and check your kitchen</h3></div><small>{alreadyHaveEntries.length} marked already have</small></div>
               <p>Totals are scaled for {people} people and merged where recipe ingredient names match. Edit package amounts as needed, then mark anything already in your kitchen so it stays off every shopping export.</p>
               <div className="ingredient-review-columns" aria-hidden="true"><span>Ingredient</span><span>Total needed</span><span>Shopping status</span></div>
               <div className="ingredient-review-list">{groceryEntries.map((entry) => <div className={`ingredient-edit-row ${alreadyHaveIngredients.includes(entry.key) ? "already-have" : ""}`} key={entry.key}>
-                <label><span>Ingredient name</span><input className="text-input" value={ingredientNameEdits[entry.key] ?? entry.name} onChange={(event) => { setIngredientNameEdits((current) => ({ ...current, [entry.key]: event.target.value })); setReviewedPlanSignature(""); }} aria-label={`Ingredient name for ${entry.name}`} /></label>
-                <label><span>Total needed</span><input className="text-input" value={ingredientAdjustments[entry.key] ?? entry.suggestedQuantity} onChange={(event) => { setIngredientAdjustments((current) => ({ ...current, [entry.key]: event.target.value })); setReviewedPlanSignature(""); }} aria-label={`Total amount needed for ${entry.name}`} /></label>
+                <label><span>Ingredient name</span><input className="text-input" value={ingredientNameEdits[entry.key] ?? entry.name} onChange={(event) => { setIngredientNameEdits((current) => ({ ...current, [entry.key]: event.target.value })); setConfirmedIngredientsSignature(""); setReviewedPlanSignature(""); }} aria-label={`Ingredient name for ${entry.name}`} /></label>
+                <label><span>Total needed</span><input className="text-input" value={ingredientAdjustments[entry.key] ?? entry.suggestedQuantity} onChange={(event) => { setIngredientAdjustments((current) => ({ ...current, [entry.key]: event.target.value })); setConfirmedIngredientsSignature(""); setReviewedPlanSignature(""); }} aria-label={`Total amount needed for ${entry.name}`} /></label>
                 <label className="already-have-control"><input type="checkbox" checked={alreadyHaveIngredients.includes(entry.key)} onChange={() => toggleAlreadyHave(entry.key)} /><span>Already have</span><small>{alreadyHaveIngredients.includes(entry.key) ? "Excluded from shopping" : "Keep on shopping list"}</small></label>
                 <small>Combined from {entry.occurrences} recipe use{entry.occurrences === 1 ? "" : "s"}{entry.originals[0] ? ` · source example: ${entry.originals[0]}` : ""}</small>
               </div>)}</div>
             </div>
-          </details>
-          <div className="shopping-checklist-heading"><span className="mini-label">2. SHOPPING LIST PREVIEW</span><h3>{groceryEntries.length - alreadyHaveEntries.length} items to buy</h3><p>This preview contains only ingredients you still need, organized by grocery aisle. You’ll choose how to send or save it after approval.</p></div>
-          {groceryGroups.length ? groceryGroups.map((group) => <details open key={group.title}><summary><span>{group.icon} {group.title}</span><small>{group.count} {group.count === 1 ? "item" : "items"}</small></summary><div className="checklist">{group.items.map((entry) => <label key={entry.key}><input type="checkbox" /> <span>{groceryItemName(entry)}</span><em>{groceryItemQuantity(entry)}</em></label>)}</div></details>) : <p className="empty-state">Everything is marked as already on hand. You can still approve the plan and send recipes or save the calendar.</p>}
-          {alreadyHaveEntries.length > 0 && <details className="already-have-summary" open><summary><span>✓ Already have</span><small>{alreadyHaveEntries.length} excluded</small></summary><div>{alreadyHaveEntries.map((entry) => <p key={entry.key}><span><strong>{groceryItemName(entry)}</strong><small>{groceryItemQuantity(entry)}</small></span><button type="button" onClick={() => toggleAlreadyHave(entry.key)}>Move to shopping list</button></p>)}</div></details>}
-          <div className="grocery-approval-card"><div><span className="mini-label">NEXT STEP</span><h3>Approve, then choose how to send or save</h3><p>Nothing will be sent yet. The next screen lets you select grocery sharing, email, calendar, Instacart when available, or all of them.</p></div><button className="primary" onClick={approveGroceryList}>{ingredientsReviewed ? "Continue to send or save →" : "Approve grocery list & continue →"}</button></div>
+          </section>
+          <div className="grocery-approval-card"><div><span className="mini-label">NEXT · STEP 2</span><h3>Build your final shopping list</h3><p>We’ll remove everything marked “Already have” and organize the remaining items by grocery aisle for one last review.</p></div><button className="primary" onClick={confirmIngredients}>Confirm ingredients & build shopping list →</button></div>
           {exportStatus && <p className="export-status" aria-live="polite">{exportStatus}</p>}
         </section>
       </div> : <section className="empty-journey"><span className="empty-journey-icon icon-centered" aria-hidden="true">🛒</span><h3>Your grocery list starts with a meal.</h3><p>Browse the recipe catalog, add meals to your schedule, and Grocer-Eaze will combine the ingredients here.</p><div><button className="primary compact" onClick={() => navigateTo(recipeIdeas.length ? "meals" : "plan")}>{recipeIdeas.length ? "Choose recipes" : "Build my plan"}</button></div></section>}
     </div>}
 
+    {view === "shopping" && <div className="dashboard" id="page-content" tabIndex={-1}>
+      <div className="page-heading"><div><p className="eyebrow">GROCERIES · STEP 2 OF 3</p><h2>Review the list you’ll take shopping.</h2><p>This is your final shopping list—not optional add-ons. It includes only the ingredients you still need, organized by aisle. Review it below, then approve it to choose how you want to send or save it.</p></div><button className="outline" onClick={() => navigateTo("list")}>← Edit ingredients</button></div>
+      {plannedMeals.length && ingredientsConfirmed ? <div className="grocery-review-layout">
+        <section className="grocery-panel grocery-panel-full">
+          <div className="shopping-list-purpose" role="note"><strong>What this screen is for</strong><p>Check that the final list looks right. Ingredient names, amounts, and “Already have” choices come from Step 1; use “Edit ingredients” if anything needs to change.</p></div>
+          <div className="grocery-head"><strong>{selectedStore}</strong><span>{groceryEntries.length - alreadyHaveEntries.length} items to buy · {alreadyHaveEntries.length} already on hand</span></div>
+          <div className="shopping-checklist-heading"><span className="mini-label">FINAL SHOPPING LIST</span><h3>{groceryEntries.length - alreadyHaveEntries.length} items to buy</h3><p>These are the items Grocer-Eaze will include when you send, save, or open the shopping list.</p></div>
+          {groceryGroups.length ? groceryGroups.map((group) => <details open key={group.title}><summary><span>{group.icon} {group.title}</span><small>{group.count} {group.count === 1 ? "item" : "items"}</small></summary><ul className="shopping-list-preview">{group.items.map((entry) => <li key={entry.key}><span>{groceryItemName(entry)}</span><strong>{groceryItemQuantity(entry)}</strong></li>)}</ul></details>) : <p className="empty-state">Everything is marked as already on hand. You can still approve the plan to email recipes or save the meal calendar.</p>}
+          {alreadyHaveEntries.length > 0 && <details className="already-have-summary"><summary><span>✓ Already have</span><small>{alreadyHaveEntries.length} excluded from shopping</small></summary><div>{alreadyHaveEntries.map((entry) => <p key={entry.key}><span><strong>{groceryItemName(entry)}</strong><small>{groceryItemQuantity(entry)}</small></span></p>)}</div></details>}
+          <div className="grocery-approval-card"><div><span className="mini-label">NEXT · STEP 3</span><h3>Ready to use this list?</h3><p>Nothing will be sent yet. After approval, you’ll choose grocery sharing, email, calendar, Instacart when available, or all of them.</p></div><button className="primary" onClick={approveGroceryList}>Approve list & choose how to send or save →</button></div>
+          {exportStatus && <p className="export-status" aria-live="polite">{exportStatus}</p>}
+        </section>
+      </div> : <section className="empty-journey"><h3>Confirm your ingredients first.</h3><p>Review combined amounts and mark what you already have before Grocer-Eaze builds the shopping list.</p><div><button className="primary compact" onClick={() => navigateTo("list")}>Confirm ingredients</button></div></section>}
+    </div>}
+
     {view === "delivery" && <div className="dashboard narrow delivery-dashboard" id="page-content" tabIndex={-1}>
-      <div className="page-heading"><div><p className="eyebrow">SEND OR SAVE · FINAL STEP</p><h2>Choose what happens next.</h2><p>Select one or more actions. Grocer-Eaze won’t run anything until you press the final button.</p></div><button className="outline" onClick={() => navigateTo("list")}>← Edit grocery list</button></div>
-      {plannedMeals.length && ingredientsReviewed ? <>
+      <div className="page-heading"><div><p className="eyebrow">GROCERIES · STEP 3 OF 3</p><h2>Choose what happens next.</h2><p>Select one or more actions. Grocer-Eaze won’t run anything until you press the final button.</p></div><button className="outline" onClick={() => navigateTo("shopping")}>← Review shopping list</button></div>
+      {plannedMeals.length && groceryListApproved ? <>
         <div className="delivery-toolbar"><div><strong>{selectedDeliveryActionCount} selected</strong><small>{plannedMeals.length} meals · {groceryEntries.length - alreadyHaveEntries.length} shopping items</small></div><button type="button" className="outline compact" onClick={() => setDeliveryActions((current) => ({ grocery: !allDeliveryActionsSelected, email: !allDeliveryActionsSelected, calendar: !allDeliveryActionsSelected, instacart: instacartEnabled ? !allDeliveryActionsSelected : current.instacart }))}>{allDeliveryActionsSelected ? "Clear all" : "Select all"}</button></div>
         <section className="delivery-action-grid" aria-label="Send and save options">
           <article className={deliveryActions.grocery ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.grocery} onChange={() => setDeliveryActions((current) => ({ ...current, grocery: !current.grocery }))} /><span><strong>Send grocery list</strong><small>{groceryEntries.length - alreadyHaveEntries.length} items; “already have” ingredients stay excluded</small></span></label>{deliveryActions.grocery && <fieldset><legend>Send as</legend><label><input type="radio" name="grocery-destination" checked={groceryDestination === "reminders"} onChange={() => setGroceryDestination("reminders")} /> Reminder or task list</label><label><input type="radio" name="grocery-destination" checked={groceryDestination === "notes"} onChange={() => setGroceryDestination("notes")} /> Note</label><small>Your device’s share menu opens so you can choose Apple Reminders, Notes, Google Tasks, Keep, or another installed app.</small></fieldset>}</article>
@@ -1688,7 +1747,7 @@ export default function Home() {
         </section>
         <div className="delivery-confirm"><p><strong>Ready when you are.</strong> Your selected actions may open your device share menu, download a calendar file, or open a provider in a new tab.</p><button className="primary" disabled={deliveryBusy || selectedDeliveryActionCount === 0} onClick={executeDeliveryActions}>{deliveryBusy ? "Completing actions…" : `Run ${selectedDeliveryActionCount || "selected"} action${selectedDeliveryActionCount === 1 ? "" : "s"} →`}</button></div>
         {exportStatus && <p className="export-status delivery-status" aria-live="polite">{exportStatus}</p>}
-      </> : <section className="empty-journey"><h3>Approve your grocery list first.</h3><p>Review ingredient amounts and mark what you already have before choosing how to send or save the plan.</p><div><button className="primary compact" onClick={() => navigateTo("list")}>Review grocery list</button></div></section>}
+      </> : <section className="empty-journey"><h3>Approve your shopping list first.</h3><p>Confirm ingredients, review the final shopping list, and approve it before choosing how to send or save the plan.</p><div><button className="primary compact" onClick={() => navigateTo(ingredientsConfirmed ? "shopping" : "list")}>{ingredientsConfirmed ? "Review shopping list" : "Confirm ingredients"}</button></div></section>}
     </div>}
 
     {view === "family" && <div className="dashboard narrow" id="page-content"><div className="page-heading"><div><p className="eyebrow">HOUSEHOLD PREFERENCES</p><h2>Your family, thoughtfully fed.</h2><p>Allergies, avoided ingredients, and favorite proteins shape every catalog search.</p></div></div>{familyStatus && <p className="form-notice success" aria-live="polite">{familyStatus}</p>}<div className="family-grid"><section className="settings-card"><h3>Family members</h3>{members.length === 0 && <p className="empty-state">No family members yet. Add the first person below.</p>}{members.map((member) => <article className="member-card" key={member.id}><span className="member-avatar icon-centered">{member.name.slice(0, 1).toUpperCase()}</span><div><strong>{member.name}</strong><small>{member.role} · {member.allergies || "No listed allergies"}</small><p>{[member.preferences?.glutenFree && "Gluten-free", member.preferences?.lowDairy && "Low dairy", member.preferences?.kidFriendly && "Kid-friendly", member.preferences?.avoidOnions && "Avoid onions", ...(member.preferences?.proteins || []).map((protein) => `${protein} favorite`)].filter(Boolean).join(" · ") || "No preferences yet"}</p></div><div className="member-actions"><button onClick={() => editMember(member)}>Edit</button><button onClick={() => deleteMember(member.id)} aria-label={`Remove ${member.name}`}>Remove</button></div></article>)}</section><section className="settings-card"><h3>{editingMemberId ? "Edit family member" : "Add a family member"}</h3><div className="field"><label htmlFor="family-member-name">Name</label><input id="family-member-name" className="text-input" value={memberDraft.name} onChange={(e) => setMemberDraft({ ...memberDraft, name: e.target.value })} /></div><div className="field"><label htmlFor="family-member-role">Role</label><select id="family-member-role" value={memberDraft.role} onChange={(e) => setMemberDraft({ ...memberDraft, role: e.target.value })}><option>Adult</option><option>Teen</option><option>Child</option></select></div><div className="field"><label htmlFor="family-member-allergies">Allergies / avoid</label><input id="family-member-allergies" className="text-input" placeholder="Peanuts, shellfish…" value={memberDraft.allergies} onChange={(e) => setMemberDraft({ ...memberDraft, allergies: e.target.value })} /></div><div className="field"><label>Favorite proteins</label><div className="preference-check-grid" role="group" aria-label="Favorite proteins">{proteinOptions.map((protein) => <button type="button" key={protein} className={memberDraft.proteins.includes(protein) ? "selected" : ""} aria-pressed={memberDraft.proteins.includes(protein)} onClick={() => setMemberDraft({ ...memberDraft, proteins: memberDraft.proteins.includes(protein) ? memberDraft.proteins.filter((item) => item !== protein) : [...memberDraft.proteins, protein] })}>{protein}</button>)}</div></div><Toggle label="Avoid onions" checked={memberDraft.avoidOnions} onChange={() => setMemberDraft({ ...memberDraft, avoidOnions: !memberDraft.avoidOnions })} /><Toggle label="Gluten-free" checked={memberDraft.glutenFree} onChange={() => setMemberDraft({ ...memberDraft, glutenFree: !memberDraft.glutenFree })} /><Toggle label="Low dairy" checked={memberDraft.lowDairy} onChange={() => setMemberDraft({ ...memberDraft, lowDairy: !memberDraft.lowDairy })} /><Toggle label="Kid-friendly" checked={memberDraft.kidFriendly} onChange={() => setMemberDraft({ ...memberDraft, kidFriendly: !memberDraft.kidFriendly })} /><button className="primary" onClick={saveMember}>{editingMemberId ? "Save changes" : "Add family member"}</button>{editingMemberId && <button className="text-button" onClick={() => { setEditingMemberId(""); setMemberDraft({ name: "", role: "Adult", allergies: "", glutenFree: true, lowDairy: false, kidFriendly: false, avoidOnions: false, proteins: [] }); }}>Cancel editing</button>}</section></div></div>}
