@@ -18,7 +18,6 @@ interface Env {
   STRIPE_YEARLY_PRICE_ID?: string;
   PEXELS_API_KEY?: string;
   THEMEALDB_API_KEY?: string;
-  INSTACART_API_KEY?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {

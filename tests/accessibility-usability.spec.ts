@@ -1,6 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
-import { readFile } from "node:fs/promises";
 import { renderRecipeReader } from "../worker/recipe-reader";
 
 test.beforeEach(async ({ page }) => {
@@ -166,9 +165,6 @@ test("school lunches stay separate and grocery totals remain editable", async ({
       subscriptionStatus: "active", subscriptionEndsAt: null, hasAccess: true,
     } }) });
   });
-  await page.route("**/api/capabilities", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ instacartShopping: false }) });
-  });
   await page.route("**/api/ingredient-feedback", async (route) => {
     ingredientReportBody = route.request().postDataJSON() as Record<string, unknown>;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sent: true }) });
@@ -249,10 +245,9 @@ test("school lunches stay separate and grocery totals remain editable", async ({
   const ingredientListOverflow = await page.locator(".ingredient-review-list").evaluate((list) => ({ maxHeight: getComputedStyle(list).maxHeight, overflowY: getComputedStyle(list).overflowY }));
   expect(ingredientListOverflow).toEqual({ maxHeight: "none", overflowY: "visible" });
   await page.locator(".already-have-control input").first().check();
-  await expect(page.getByRole("button", { name: "Open in Instacart" })).toHaveCount(0);
   await page.evaluate(() => { window.location.hash = "#delivery"; });
   await expect(page.getByRole("heading", { name: "Confirm what your household needs." })).toBeVisible();
-  await expect(page.getByText("Confirm your ingredients before choosing how to send or save the plan.")).toBeVisible();
+  await expect(page.getByText("Confirm your ingredients before choosing recipients for the plan.")).toBeVisible();
 
   await page.getByRole("button", { name: "Confirm ingredients & build shopping list →" }).click();
   await expect(page.getByRole("heading", { name: "Review the list you’ll take shopping." })).toBeVisible();
@@ -270,8 +265,8 @@ test("school lunches stay separate and grocery totals remain editable", async ({
   await page.getByRole("button", { name: "Confirm ingredients & build shopping list →" }).click();
   await page.evaluate(() => { window.location.hash = "#delivery"; });
   await expect(page.getByRole("heading", { name: "Review the list you’ll take shopping." })).toBeVisible();
-  await expect(page.getByText("Approve your shopping list before choosing how to send or save it.")).toBeVisible();
-  await page.getByRole("button", { name: "Approve list & choose how to send or save →" }).click();
+  await expect(page.getByText("Approve your shopping list before choosing recipients.")).toBeVisible();
+  await page.getByRole("button", { name: "Approve list & choose recipients →" }).click();
   await expect(page.getByRole("heading", { name: "Who should receive your plan?" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   await expect(page.getByRole("button", { name: "Send all to me →" })).toBeVisible();
@@ -282,8 +277,16 @@ test("school lunches stay separate and grocery totals remain editable", async ({
 
   await page.getByRole("button", { name: "+ Add recipient" }).click();
   let recipientDialog = page.getByRole("dialog", { name: "Who else should receive the plan?" });
-  await recipientDialog.getByLabel(/Name/).fill("Alex");
-  await recipientDialog.getByLabel("Email address").fill("not-an-email");
+  const recipientName = recipientDialog.getByLabel(/Name/);
+  await recipientName.click();
+  await recipientName.type("Alex");
+  await expect(recipientName).toHaveValue("Alex");
+  await expect(recipientName).toBeFocused();
+  const recipientEmail = recipientDialog.getByLabel("Email address");
+  await recipientEmail.click();
+  await recipientEmail.type("not-an-email");
+  await expect(recipientEmail).toHaveValue("not-an-email");
+  await expect(recipientEmail).toBeFocused();
   await recipientDialog.getByRole("button", { name: "Save recipient" }).click();
   await expect(recipientDialog.getByRole("alert")).toContainText("valid email");
   await recipientDialog.getByLabel("Email address").fill("alex@example.com");
@@ -308,30 +311,17 @@ test("school lunches stay separate and grocery totals remain editable", async ({
   await expect(jordanCard.getByRole("checkbox", { name: /Calendar invite/ })).toBeDisabled();
   await expect(jordanCard.getByText("Requires an email recipient")).toBeVisible();
 
-  await page.getByRole("button", { name: "Select everything" }).click();
+  await expect(page.getByLabel("Calendar recipe order")).toBeVisible();
+  await page.getByLabel("Calendar recipe order").selectOption("random");
+  await expect(page.getByText("Optional ways to save or shop")).toHaveCount(0);
+  await expect(page.getByText("ON THIS DEVICE")).toHaveCount(0);
   await page.getByRole("button", { name: "Clear all" }).click();
-  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.getByRole("checkbox", { name: /Copy grocery list/ }).check();
-  await page.getByRole("button", { name: "Send or save 1 choice →" }).click();
-  await expect(page.getByText("Grocery list copied to your clipboard.")).toBeVisible();
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain("Groceries +");
-  await page.getByRole("checkbox", { name: /Copy grocery list/ }).uncheck();
-  await page.getByRole("checkbox", { name: /Download my calendar/ }).check();
-  const downloadPromise = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Send or save 1 choice →" }).click();
-  const calendarDownload = await downloadPromise;
-  const calendarPath = await calendarDownload.path();
-  expect(calendarPath).not.toBeNull();
-  const calendarContents = await readFile(calendarPath!, "utf8");
-  expect(readerRequestBody?.meals).toHaveLength(2);
-  expect(calendarContents).toContain("Clean recipe: https://grocer-eaze.com/recipe/reader-0");
-  expect(calendarContents).toContain("URL:https://grocer-eaze.com/recipe/reader-0");
-  expect(calendarContents).toContain("Original source: https://example.com/recipe");
-  await page.getByRole("checkbox", { name: /Download my calendar/ }).uncheck();
+  await expect(page.getByRole("button", { name: "Select everything" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send to selected recipients →" })).toBeDisabled();
   await myselfCard.getByRole("checkbox", { name: /Recipes/ }).check();
   await myselfCard.getByRole("checkbox", { name: /Grocery list/ }).check();
   await myselfCard.getByRole("checkbox", { name: /Calendar invite/ }).check();
-  await page.getByRole("button", { name: "Send or save 1 choice →" }).click();
+  await page.getByRole("button", { name: "Send to 1 recipient →" }).click();
   await expect.poll(() => deliveryEmailBodies.length).toBe(1);
   expect(deliveryEmailBodies[0].to).toBe("grocery@example.com");
   expect(deliveryEmailBodies[0].selections).toEqual({ recipes: true, grocery: true, calendar: true });

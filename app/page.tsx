@@ -23,7 +23,6 @@ type ProfilePayload = { profile?: { household_name: string; people: number; loca
 type FavoritesPayload = { favorites?: Array<{ title: string }> };
 type FamilyPayload = { members?: Member[] };
 type RatingsPayload = { ratings?: Array<{ recipe_id: string; quality: number; ease: number }> };
-type CapabilitiesPayload = { instacartShopping?: boolean };
 type IngredientReport = { key: string; name: string; amount: string; originals: string[]; sources: Array<{ title: string; sourceName: string; sourceUrl: string }> };
 type DeliverySelections = { recipes: boolean; grocery: boolean; calendar: boolean };
 type DeliveryRecipient = { id: string; name: string; channel: "email" | "text"; address: string; selections: DeliverySelections };
@@ -52,7 +51,7 @@ const onboardingSteps = [
   { eyebrow: "STEP 1 OF 4", title: "Start with your household.", body: "Choose your dates, meals, budget, and dietary needs. Family preferences are included automatically." },
   { eyebrow: "STEP 2 OF 4", title: "Browse a catalog built for you.", body: "Filter a large recipe collection, save favorites, and add each recipe to lunch, dinner, or school lunch." },
   { eyebrow: "STEP 3 OF 4", title: "Shape your schedule.", body: "Quick-fill open slots or reorder meals by date. Your active plan follows your account across devices." },
-  { eyebrow: "STEP 4 OF 4", title: "Review once, then take it anywhere.", body: "Confirm your ingredients, approve the final shopping list, then choose exactly how to send or save it." },
+  { eyebrow: "STEP 4 OF 4", title: "Review once, then share it clearly.", body: "Confirm your ingredients, approve the final shopping list, then choose exactly what each recipient should receive." },
 ];
 
 const unitAliases: Record<string, string> = {
@@ -243,14 +242,6 @@ function parseServingCost(meal: Meal) {
   return meal.pricePerServing || Number(meal.cost.match(/\$([\d.]+)/)?.[1] || 3.75);
 }
 
-function calendarStamp(date: Date) {
-  return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}${String(date.getMinutes()).padStart(2, "0")}00`;
-}
-
-function calendarText(value: string) {
-  return value.replace(/\\/g, "\\\\").replace(/\r?\n/g, "\\n").replace(/,/g, "\\,").replace(/;/g, "\\;");
-}
-
 function todayInputDate() {
   const date = new Date();
   date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
@@ -382,13 +373,10 @@ export default function Home() {
   const [asNeededIngredients, setAsNeededIngredients] = useState<string[]>([]);
   const [planStorageOwnerId, setPlanStorageOwnerId] = useState("");
   const [planSaveStatus, setPlanSaveStatus] = useState("");
-  const [instacartEnabled, setInstacartEnabled] = useState(false);
   const [selfDeliverySelections, setSelfDeliverySelections] = useState<DeliverySelections>(defaultDeliverySelections);
   const [deliveryRecipients, setDeliveryRecipients] = useState<DeliveryRecipient[]>([]);
   const [recipientDraft, setRecipientDraft] = useState<DeliveryRecipientDraft | null>(null);
   const [recipientError, setRecipientError] = useState("");
-  const [deviceActions, setDeviceActions] = useState({ copy: false, notes: false, calendar: false, instacart: false });
-  const [calendarProvider, setCalendarProvider] = useState<"google" | "apple">("google");
   const [pendingTextRecipients, setPendingTextRecipients] = useState<DeliveryRecipient[]>([]);
   const [pendingTextReaderLinks, setPendingTextReaderLinks] = useState<Record<string, string>>({});
   const [deliveryBusy, setDeliveryBusy] = useState(false);
@@ -575,11 +563,8 @@ export default function Home() {
   const allDeliveryRecipients = useMemo(() => selfDeliveryRecipient ? [selfDeliveryRecipient, ...externalDeliveryRecipients] : externalDeliveryRecipients, [selfDeliveryRecipient, externalDeliveryRecipients]);
   const effectiveDeliveryRecipients = useMemo(() => allDeliveryRecipients.map((recipient) => ({ ...recipient, selections: { ...recipient.selections, grocery: groceryGroups.length > 0 && recipient.selections.grocery } })), [allDeliveryRecipients, groceryGroups.length]);
   const selectedRecipientCount = effectiveDeliveryRecipients.filter((recipient) => hasDeliverySelection(recipient.selections)).length;
-  const selectedDeviceActionCount = [groceryGroups.length > 0 && deviceActions.copy, groceryGroups.length > 0 && deviceActions.notes, deviceActions.calendar, groceryGroups.length > 0 && instacartEnabled && deviceActions.instacart].filter(Boolean).length;
-  const selectedDeliveryActionCount = selectedRecipientCount + selectedDeviceActionCount;
-  const allDeliveryActionsSelected = allDeliveryRecipients.length > 0
-    && allDeliveryRecipients.every((recipient) => recipient.selections.recipes && (!groceryGroups.length || recipient.selections.grocery) && (recipient.channel === "text" || recipient.selections.calendar))
-    && (!groceryGroups.length || (deviceActions.copy && deviceActions.notes)) && deviceActions.calendar && (!instacartEnabled || !groceryGroups.length || deviceActions.instacart);
+  const allRecipientOptionsSelected = allDeliveryRecipients.length > 0
+    && allDeliveryRecipients.every((recipient) => recipient.selections.recipes && (!groceryGroups.length || recipient.selections.grocery) && (recipient.channel === "text" || recipient.selections.calendar));
   const profilePreferences = useMemo(() => ({
     planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
     kidLunches, schoolLunchSides, oneStore, selectedStore, maxTime, skill, exclusions,
@@ -692,15 +677,6 @@ export default function Home() {
         if (legacyText) migratedRecipients.push({ id: crypto.randomUUID(), name: "", channel: "text", address: legacyText, selections: { recipes: false, grocery: true, calendar: false } });
         setDeliveryRecipients(migratedRecipients.slice(0, 10));
       }
-      if (saved.deviceActions && typeof saved.deviceActions === "object") {
-        const actions = saved.deviceActions as Record<string, unknown>;
-        setDeviceActions({ copy: Boolean(actions.copy), notes: Boolean(actions.notes), calendar: Boolean(actions.calendar), instacart: Boolean(actions.instacart) });
-      } else if (saved.deliveryActions && typeof saved.deliveryActions === "object") {
-        const actions = saved.deliveryActions as Record<string, unknown>;
-        const destination = String(saved.groceryDestination || "");
-        setDeviceActions({ copy: Boolean(actions.grocery) && destination === "copy", notes: Boolean(actions.grocery) && destination === "notes", calendar: Boolean(actions.calendar), instacart: Boolean(actions.instacart) });
-      }
-      if (saved.calendarProvider === "apple" || saved.calendarProvider === "google") setCalendarProvider(saved.calendarProvider);
     } catch { /* Ignore a corrupted device cache. */ }
   }
 
@@ -720,10 +696,7 @@ export default function Home() {
     const onboardingComplete = window.localStorage.getItem("grocer-eaze-onboarding-complete") === "true";
     void (async () => {
       try {
-        const [authData, capabilities] = await Promise.all([
-          fetch("/api/auth/me").then((r) => r.json()) as Promise<{ user?: AccountUser | null }>,
-          fetch("/api/capabilities").then((r) => r.ok ? r.json() : {}).catch(() => ({})) as Promise<CapabilitiesPayload>,
-        ]);
+        const authData = await fetch("/api/auth/me").then((r) => r.json()) as { user?: AccountUser | null };
         let profileData: ProfilePayload = {};
         let favoriteData: FavoritesPayload = {};
         let familyData: FamilyPayload = {};
@@ -740,7 +713,6 @@ export default function Home() {
         }
         setOwnerId(id);
         applyPersonalData(profileData, favoriteData, familyData, ratingData);
-        setInstacartEnabled(Boolean(capabilities.instacartShopping));
         const scopedPlanKey = authData.user ? `grocer-eaze-active-plan:${authData.user.id}` : "";
         let cachedPlan = scopedPlanKey ? window.localStorage.getItem(scopedPlanKey) : null;
         const legacyPlan = window.localStorage.getItem("grocer-eaze-active-plan");
@@ -791,7 +763,7 @@ export default function Home() {
       planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
       kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder,
       ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, asNeededIngredients, confirmedIngredientsSignature, reviewedPlanSignature,
-      selfDeliverySelections, deviceActions, calendarProvider,
+      selfDeliverySelections,
     };
     try { window.localStorage.setItem(`grocer-eaze-active-plan:${planStorageOwnerId}`, JSON.stringify(plan)); }
     catch { /* The account copy remains authoritative if device storage is unavailable. */ }
@@ -806,7 +778,7 @@ export default function Home() {
       }
     }, 750);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, asNeededIngredients, confirmedIngredientsSignature, reviewedPlanSignature, selfDeliverySelections, deviceActions, calendarProvider]);
+  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, asNeededIngredients, confirmedIngredientsSignature, reviewedPlanSignature, selfDeliverySelections]);
 
   useEffect(() => {
     if (!planHydrated || !user) return;
@@ -840,8 +812,8 @@ export default function Home() {
       } else if (planHydrated && nextView === "delivery" && !groceryListApproved) {
         nextView = ingredientsConfirmed ? "shopping" : "list";
         message = ingredientsConfirmed
-          ? "Approve your shopping list before choosing how to send or save it."
-          : "Confirm your ingredients before choosing how to send or save the plan.";
+          ? "Approve your shopping list before choosing recipients."
+          : "Confirm your ingredients before choosing recipients for the plan.";
       }
       if (message) {
         setExportStatus(message);
@@ -867,7 +839,7 @@ export default function Home() {
       meals: "Recipe catalog",
       list: "Confirm ingredients",
       shopping: "Review shopping list",
-      delivery: "Send or save",
+      delivery: "Send plan",
       account: "Account",
       family: "Family preferences",
       plans: "Membership plans",
@@ -884,6 +856,16 @@ export default function Home() {
     return () => window.cancelAnimationFrame(frame);
   }, [view]);
 
+  const activeDialog = ingredientReport
+    ? "ingredient-report"
+    : recipientDraft
+      ? "recipient"
+      : ratingMeal
+        ? "rating"
+        : onboardingStep !== null
+          ? "onboarding"
+          : "";
+
   useEffect(() => {
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
     if (!dialog) return;
@@ -899,10 +881,10 @@ export default function Home() {
     dialog.focus();
     const handleDialogKeys = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        if (ingredientReport) setIngredientReport(null);
-        else if (recipientDraft) { setRecipientDraft(null); setRecipientError(""); }
-        else if (ratingMeal) setRatingMeal(null);
-        else finishOnboarding();
+        if (activeDialog === "ingredient-report") setIngredientReport(null);
+        else if (activeDialog === "recipient") { setRecipientDraft(null); setRecipientError(""); }
+        else if (activeDialog === "rating") setRatingMeal(null);
+        else if (activeDialog === "onboarding") finishOnboarding();
         return;
       }
       if (event.key !== "Tab") return;
@@ -930,7 +912,7 @@ export default function Home() {
       });
       if (previouslyFocused?.isConnected) previouslyFocused.focus();
     };
-  }, [onboardingStep, ratingMeal, recipientDraft, ingredientReport]);
+  }, [activeDialog]);
 
   async function startAuth() {
     setAuthBusy(true); setAccountStatus("");
@@ -1615,57 +1597,9 @@ export default function Home() {
     return `${groceryListTitle()}\n\n${groceryGroups.map((group) => `${group.title}\n${group.items.map((entry) => `☐ ${groceryItemName(entry)} — ${groceryItemQuantity(entry)}`).join("\n")}`).join("\n\n")}`;
   }
 
-  async function shareGroceryList(destination: "copy" | "notes") {
-    if (!groceryListApproved) throw new Error("Approve the grocery list before sending it.");
-    if (!groceryGroups.length) throw new Error("Every ingredient is marked as already on hand, so there is no shopping list to send.");
-    const title = groceryListTitle();
-    const text = groceryListText();
-    if (destination === "copy") {
-      await navigator.clipboard.writeText(text);
-      return "Grocery list copied to your clipboard.";
-    }
-    if (navigator.share) {
-      try {
-        await navigator.share({ title, text });
-        return "Grocery list shared for Notes or Keep.";
-      } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") return "Note sharing was cancelled; the rest of your selected actions continued.";
-      }
-    }
-    await navigator.clipboard.writeText(text);
-    return "The share menu is unavailable, so the grocery list was copied for Notes or Keep.";
-  }
-
-  async function shopOnInstacart() {
-    if (!groceryListApproved) throw new Error("Approve the grocery list before shopping.");
-    const destination = window.open("about:blank", "_blank");
-    if (destination) destination.opener = null;
-    try {
-      const response = await fetch("/api/instacart/shopping-list", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: `Grocer-Eaze groceries starting ${planStartDate}`,
-          items: shoppingEntries.map((entry) => {
-            const quantity = groceryItemQuantity(entry);
-            const measurement = parseIngredientMeasurement(quantity);
-            return { name: groceryItemName(entry), displayText: `${quantity} ${groceryItemName(entry)}`, measurements: measurement ? [measurement] : [] };
-          }),
-        }),
-      });
-      const data = await response.json() as { url?: string; error?: string };
-      if (!response.ok || !data.url) throw new Error(data.error || "Instacart could not prepare this list.");
-      if (destination) destination.location.href = data.url;
-      else window.location.href = data.url;
-      return "Instacart opened with your shopping list.";
-    } catch (error) {
-      destination?.close();
-      throw error instanceof Error ? error : new Error("Instacart is temporarily unavailable.");
-    }
-  }
   async function prepareRecipeReaderLinks() {
-    if (!plannedMeals.length) throw new Error("Add recipes to your plan before exporting a calendar.");
-    if (!groceryListApproved) throw new Error("Approve the grocery list before exporting a calendar.");
+    if (!plannedMeals.length) throw new Error("Add recipes to your plan before sharing it.");
+    if (!groceryListApproved) throw new Error("Approve the grocery list before sharing your plan.");
     const readerResponse = await fetch("/api/recipe-readers", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1715,25 +1649,6 @@ export default function Home() {
         readerUrl: readerLinks.get(recipe.id) || "",
       };
     });
-  }
-
-  function calendarFileText(meals: ReturnType<typeof calendarDeliveryMeals>) {
-    const events = meals.map((recipe, index) => {
-      const start = new Date(Number(recipe.sortOrder) || Date.now());
-      start.setHours(recipe.kind === "Dinner" ? 17 : 12, recipe.kind === "Dinner" ? 30 : 0, 0, 0);
-      const end = new Date(start.getTime() + 60 * 60 * 1000);
-      const recipeLine = `\nClean recipe: ${recipe.readerUrl}${recipe.sourceUrl ? `\nOriginal source: ${recipe.sourceUrl}` : ""}`;
-      return `BEGIN:VEVENT\r\nUID:grocer-eaze-${calendarText(String(recipe.id || index))}-${Number(recipe.sortOrder)}@grocer-eaze\r\nDTSTAMP:${calendarStamp(new Date())}\r\nDTSTART:${calendarStamp(start)}\r\nDTEND:${calendarStamp(end)}\r\nSUMMARY:${calendarText(`${recipe.kind}: ${recipe.title}`)}\r\nDESCRIPTION:${calendarText(`${recipe.detail || "Grocer-Eaze meal"}${recipeLine}`)}\r\nURL:${calendarText(recipe.readerUrl)}\r\nEND:VEVENT`;
-    }).join("\r\n");
-    return `BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Grocer-Eaze//Meal Plan//EN\r\n${events}\r\nEND:VCALENDAR`;
-  }
-
-  async function downloadCalendar(provider: "google" | "apple" = calendarProvider, preparedLinks?: Map<string, string>, preparedMeals?: ReturnType<typeof calendarDeliveryMeals>) {
-    const readerLinks = preparedLinks || await prepareRecipeReaderLinks();
-    const calendarMeals = preparedMeals || calendarDeliveryMeals(readerLinks);
-    const file = new Blob([calendarFileText(calendarMeals)], { type: "text/calendar" });
-    const link = document.createElement("a"); link.href = URL.createObjectURL(file); link.download = "grocer-eaze-meal-plan.ics"; link.click(); URL.revokeObjectURL(link.href);
-    return `${provider === "google" ? "Google" : "Apple"} Calendar file downloaded in ${calendarOrder === "random" ? "a shuffled order within each meal category" : "your selected recipe order"}.`;
   }
 
   async function emailDelivery(recipient: DeliveryRecipient, readerLinks: Map<string, string>, calendarMeals: ReturnType<typeof calendarDeliveryMeals>) {
@@ -1888,45 +1803,29 @@ export default function Home() {
       : recipient));
   }
 
-  function setAllDeliveryActions(selected: boolean) {
+  function setAllRecipientOptions(selected: boolean) {
     setSelfDeliverySelections({ recipes: selected, grocery: groceryGroups.length > 0 && selected, calendar: selected });
     setDeliveryRecipients((current) => current.map((recipient) => ({ ...recipient, selections: { recipes: selected, grocery: groceryGroups.length > 0 && selected, calendar: recipient.channel === "email" && selected } })));
-    setDeviceActions({ copy: groceryGroups.length > 0 && selected, notes: groceryGroups.length > 0 && selected, calendar: selected, instacart: groceryGroups.length > 0 && instacartEnabled && selected });
     setPendingTextRecipients([]);
     setPendingTextReaderLinks({});
     setExportStatus("");
   }
 
-  async function executeDeliveryActions(options?: { selfOnly?: boolean }) {
+  async function executeRecipientDeliveries(options?: { selfOnly?: boolean }) {
     const recipients = options?.selfOnly && selfDeliveryRecipient
       ? [{ ...selfDeliveryRecipient, selections: { ...defaultDeliverySelections, grocery: groceryGroups.length > 0 } }]
       : effectiveDeliveryRecipients.filter((recipient) => hasDeliverySelection(recipient.selections));
-    const activeDeviceActions = options?.selfOnly ? { copy: false, notes: false, calendar: false, instacart: false } : {
-      ...deviceActions,
-      copy: groceryGroups.length > 0 && deviceActions.copy,
-      notes: groceryGroups.length > 0 && deviceActions.notes,
-      instacart: groceryGroups.length > 0 && deviceActions.instacart,
-    };
-    const deviceActionCount = [activeDeviceActions.copy, activeDeviceActions.notes, activeDeviceActions.calendar, instacartEnabled && activeDeviceActions.instacart].filter(Boolean).length;
-    if (!recipients.length && !deviceActionCount) { setExportStatus("Choose at least one item for a recipient or device action."); return; }
+    if (!recipients.length) { setExportStatus("Choose at least one item for a recipient."); return; }
     setDeliveryBusy(true);
     setPendingTextRecipients([]);
     setPendingTextReaderLinks({});
     setExportStatus("Preparing your selected deliveries…");
     const completed: string[] = [];
     const failed: string[] = [];
-    const immediateTasks: Array<Promise<string>> = [];
-    if (activeDeviceActions.instacart && instacartEnabled) immediateTasks.push(shopOnInstacart());
-    if (activeDeviceActions.copy) immediateTasks.push(shareGroceryList("copy"));
-    if (activeDeviceActions.notes) immediateTasks.push(shareGroceryList("notes"));
     try {
-      const needsReaderLinks = activeDeviceActions.calendar || recipients.some((recipient) => recipient.selections.recipes || recipient.selections.calendar);
+      const needsReaderLinks = recipients.some((recipient) => recipient.selections.recipes || recipient.selections.calendar);
       const readerLinks = needsReaderLinks ? await prepareRecipeReaderLinks() : new Map<string, string>();
       const calendarMeals = needsReaderLinks ? calendarDeliveryMeals(readerLinks) : [];
-      if (activeDeviceActions.calendar) immediateTasks.push(downloadCalendar(calendarProvider, readerLinks, calendarMeals));
-      const immediateResults = await Promise.allSettled(immediateTasks);
-      completed.push(...immediateResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
-      failed.push(...immediateResults.flatMap((result) => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "One device action could not be completed."] : []));
       for (const recipient of recipients.filter((item) => item.channel === "email")) {
         try { completed.push(await emailDelivery(recipient, readerLinks, calendarMeals)); }
         catch (error) { failed.push(error instanceof Error ? error.message : `We couldn’t email ${recipient.name || recipient.address}.`); }
@@ -1940,11 +1839,9 @@ export default function Home() {
         completed.push(`Text draft 1 of ${textRecipients.length} is ready. Return here${remaining.length ? " to open the next text" : " after reviewing it"}.`);
         setExportStatus([...completed, ...failed].join(" "));
         openTextDraft(first, readerLinks);
-      } else setExportStatus([...completed, ...failed].join(" ") || "Your selected actions are complete.");
+      } else setExportStatus([...completed, ...failed].join(" ") || "Your selected deliveries are complete.");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "One selected action could not be completed.";
-      const immediateResults = await Promise.allSettled(immediateTasks);
-      completed.push(...immediateResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
+      const message = error instanceof Error ? error.message : "One selected delivery could not be completed.";
       setExportStatus([...completed, message].join(" "));
     } finally {
       setDeliveryBusy(false);
@@ -2275,15 +2172,15 @@ export default function Home() {
     </div>}
 
     {view === "shopping" && <div className="dashboard" id="page-content" tabIndex={-1}>
-      <div className="page-heading"><div><p className="eyebrow">GROCERIES · STEP 2 OF 3</p><h2>Review the list you’ll take shopping.</h2><p>This is your final shopping list—not optional add-ons. It includes only the ingredients you still need, organized by aisle. Review it below, then approve it to choose how you want to send or save it.</p></div><button className="outline" onClick={() => navigateTo("list")}>← Edit ingredients</button></div>
+      <div className="page-heading"><div><p className="eyebrow">GROCERIES · STEP 2 OF 3</p><h2>Review the list you’ll take shopping.</h2><p>This is your final shopping list—not optional add-ons. It includes only the ingredients you still need, organized by aisle. Review it below, then approve it to choose who should receive it.</p></div><button className="outline" onClick={() => navigateTo("list")}>← Edit ingredients</button></div>
       {plannedMeals.length && ingredientsConfirmed ? <div className="grocery-review-layout">
         <section className="grocery-panel grocery-panel-full">
           <div className="shopping-list-purpose" role="note"><strong>What this screen is for</strong><p>Check that the final list looks right. Ingredient names, amounts, and “Already have” choices come from Step 1; use “Edit ingredients” if anything needs to change.</p></div>
           <div className="grocery-head"><strong>{selectedStore}</strong><span>{shoppingEntries.length} items to buy · {alreadyHaveEntries.length} already on hand</span></div>
-          <div className="shopping-checklist-heading"><span className="mini-label">FINAL SHOPPING LIST</span><h3>{shoppingEntries.length} items to buy</h3><p>These are the items Grocer-Eaze will include when you send, save, or open the shopping list.</p></div>
+          <div className="shopping-checklist-heading"><span className="mini-label">FINAL SHOPPING LIST</span><h3>{shoppingEntries.length} items to buy</h3><p>These are the items Grocer-Eaze will include when you send the shopping list to your selected recipients.</p></div>
           {groceryGroups.length ? groceryGroups.map((group) => <details open key={group.title}><summary><span>{group.icon} {group.title}</span><small>{group.count} {group.count === 1 ? "item" : "items"}</small></summary><ul className="shopping-list-preview">{group.items.map((entry) => <li key={entry.key}><span>{groceryItemName(entry)}</span><strong>{groceryItemQuantity(entry)}</strong></li>)}</ul></details>) : <p className="empty-state">Everything is marked as already on hand. You can still approve the plan to email recipes or save the meal calendar.</p>}
           {alreadyHaveEntries.length > 0 && <details className="already-have-summary"><summary><span>✓ Already have</span><small>{alreadyHaveEntries.length} excluded from shopping</small></summary><div>{alreadyHaveEntries.map((entry) => <p key={entry.key}><span><strong>{groceryItemName(entry)}</strong><small>{groceryItemQuantity(entry)}</small></span></p>)}</div></details>}
-          <div className="grocery-approval-card"><div><span className="mini-label">NEXT · STEP 3</span><h3>Ready to use this list?</h3><p>Nothing will be sent yet. After approval, you’ll choose grocery sharing, email, calendar, Instacart when available, or all of them.</p></div><div className="grocery-approval-actions"><button className="outline" onClick={() => navigateTo("list")}>← Edit ingredients</button><button className="primary" onClick={approveGroceryList}>Approve list & choose how to send or save →</button></div></div>
+          <div className="grocery-approval-card"><div><span className="mini-label">NEXT · STEP 3</span><h3>Ready to use this list?</h3><p>Nothing will be sent yet. After approval, you’ll choose each recipient and whether they should receive recipes, groceries, or the meal calendar.</p></div><div className="grocery-approval-actions"><button className="outline" onClick={() => navigateTo("list")}>← Edit ingredients</button><button className="primary" onClick={approveGroceryList}>Approve list & choose recipients →</button></div></div>
           {exportStatus && <p className="export-status" aria-live="polite">{exportStatus}</p>}
         </section>
       </div> : <section className="empty-journey"><h3>Confirm your ingredients first.</h3><p>Review combined amounts and mark what you already have before Grocer-Eaze builds the shopping list.</p><div><button className="primary compact" onClick={() => navigateTo("list")}>Confirm ingredients</button></div></section>}
@@ -2294,28 +2191,19 @@ export default function Home() {
       {plannedMeals.length && groceryListApproved ? <>
         <section className="self-delivery-card" aria-labelledby="self-delivery-heading">
           <div><span className="mini-label">FASTEST OPTION</span><h3 id="self-delivery-heading">Send everything to myself</h3><p>Uses your signed-in email, sends clean recipe links and the grocery list, and attaches the dated meal calendar.</p></div>
-          <button type="button" className="primary compact" disabled={deliveryBusy || !selfDeliveryRecipient} onClick={() => executeDeliveryActions({ selfOnly: true })}>{deliveryBusy ? "Preparing…" : "Send all to me →"}</button>
+          <button type="button" className="primary compact" disabled={deliveryBusy || !selfDeliveryRecipient} onClick={() => executeRecipientDeliveries({ selfOnly: true })}>{deliveryBusy ? "Preparing…" : "Send all to me →"}</button>
         </section>
-        <div className="delivery-toolbar"><div><strong>{selectedRecipientCount} recipient{selectedRecipientCount === 1 ? "" : "s"} · {selectedDeviceActionCount} device action{selectedDeviceActionCount === 1 ? "" : "s"}</strong><small>{plannedMeals.length} meals · {shoppingEntries.length} shopping items</small></div><button type="button" className="outline compact" onClick={() => setAllDeliveryActions(!allDeliveryActionsSelected)}>{allDeliveryActionsSelected ? "Clear all" : "Select everything"}</button></div>
+        <div className="delivery-toolbar"><div><strong>{selectedRecipientCount} recipient{selectedRecipientCount === 1 ? "" : "s"} selected</strong><small>{plannedMeals.length} meals · {shoppingEntries.length} shopping items</small></div><button type="button" className="outline compact" onClick={() => setAllRecipientOptions(!allRecipientOptionsSelected)}>{allRecipientOptionsSelected ? "Clear all" : "Select everything"}</button></div>
         <section className="delivery-recipient-section" aria-labelledby="delivery-recipients-heading">
           <div className="delivery-section-heading"><div><span className="mini-label">RECIPIENTS</span><h3 id="delivery-recipients-heading">Choose what each person receives</h3><p>Email recipients can receive calendar attachments. Text recipients can receive recipe links and grocery lists as prefilled drafts for you to review. For privacy, added recipient details are kept only for this visit.</p></div><button type="button" className="outline compact" disabled={allDeliveryRecipients.length >= 10} onClick={() => openRecipientEditor()}>+ Add recipient</button></div>
           <div className="delivery-recipient-list">{selfDeliveryRecipient && deliveryRecipientCard(selfDeliveryRecipient, true)}{externalDeliveryRecipients.map((recipient) => deliveryRecipientCard(recipient))}</div>
           {!externalDeliveryRecipients.length && <p className="recipient-empty-note">Add family or friends by email or phone whenever someone else should receive part of the plan.</p>}
-        </section>
-        <section className="device-action-section" aria-labelledby="device-actions-heading">
-          <div className="delivery-section-heading"><div><span className="mini-label">ON THIS DEVICE</span><h3 id="device-actions-heading">Optional ways to save or shop</h3><p>These actions stay on your device and don’t add another recipient.</p></div></div>
-          <div className="device-action-grid">
-            <label className={`${deviceActions.copy ? "selected" : ""} ${!groceryGroups.length ? "disabled" : ""}`}><input type="checkbox" disabled={!groceryGroups.length} checked={groceryGroups.length > 0 && deviceActions.copy} onChange={(event) => setDeviceActions((current) => ({ ...current, copy: event.target.checked }))} /><span><strong>Copy grocery list</strong><small>{groceryGroups.length ? "Paste it into Reminders or any app" : "Nothing to copy; every ingredient is already on hand"}</small></span></label>
-            <label className={`${deviceActions.notes ? "selected" : ""} ${!groceryGroups.length ? "disabled" : ""}`}><input type="checkbox" disabled={!groceryGroups.length} checked={groceryGroups.length > 0 && deviceActions.notes} onChange={(event) => setDeviceActions((current) => ({ ...current, notes: event.target.checked }))} /><span><strong>Share to Notes or Keep</strong><small>{groceryGroups.length ? "Uses your device’s share menu" : "Nothing to share; every ingredient is already on hand"}</small></span></label>
-            <label className={deviceActions.calendar ? "selected" : ""}><input type="checkbox" checked={deviceActions.calendar} onChange={(event) => setDeviceActions((current) => ({ ...current, calendar: event.target.checked }))} /><span><strong>Download my calendar</strong><small>Save an import-ready calendar file</small></span></label>
-            {instacartEnabled && <label className={`${deviceActions.instacart ? "selected" : ""} ${!groceryGroups.length ? "disabled" : ""}`}><input type="checkbox" disabled={!groceryGroups.length} checked={groceryGroups.length > 0 && deviceActions.instacart} onChange={(event) => setDeviceActions((current) => ({ ...current, instacart: event.target.checked }))} /><span><strong>Open in Instacart</strong><small>{groceryGroups.length ? "Review matched items before checkout" : "Nothing to shop; every ingredient is already on hand"}</small></span></label>}
-          </div>
-          {deviceActions.calendar && <div className="calendar-device-settings"><label>Calendar<select value={calendarProvider} onChange={(event) => setCalendarProvider(event.target.value as "google" | "apple")}><option value="google">Google Calendar</option><option value="apple">Apple Calendar</option></select></label><label>Recipe order<select value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle within each meal type</option></select></label></div>}
+          <div className="recipient-calendar-settings"><label htmlFor="calendar-recipe-order"><span>Calendar recipe order</span><small>Applies to calendar invitations sent to email recipients.</small></label><select id="calendar-recipe-order" value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle within each meal type</option></select></div>
         </section>
         {pendingTextRecipients.length > 0 && <div className="pending-text-banner" role="status"><div><strong>{pendingTextRecipients.length} text draft{pendingTextRecipients.length === 1 ? "" : "s"} still to open</strong><small>Each recipient gets a separate private draft.</small></div><button type="button" className="outline compact" onClick={openNextTextRecipient}>Open next text</button></div>}
-        <div className="delivery-confirm"><p><strong>Review your choices, then send.</strong> Emails are sent separately so recipients don’t see one another. Texts open as private drafts for your review.</p><button className="primary" disabled={deliveryBusy || selectedDeliveryActionCount === 0} onClick={() => executeDeliveryActions()}>{deliveryBusy ? "Preparing deliveries…" : `Send or save ${selectedDeliveryActionCount || "selected"} choice${selectedDeliveryActionCount === 1 ? "" : "s"} →`}</button></div>
+        <div className="delivery-confirm"><p><strong>Review your choices, then send.</strong> Emails are sent separately so recipients don’t see one another. Texts open as private drafts for your review.</p><button className="primary" disabled={deliveryBusy || selectedRecipientCount === 0} onClick={() => executeRecipientDeliveries()}>{deliveryBusy ? "Preparing deliveries…" : `Send to ${selectedRecipientCount || "selected"} recipient${selectedRecipientCount === 1 ? "" : "s"} →`}</button></div>
         {exportStatus && <p className="export-status delivery-status" aria-live="polite">{exportStatus}</p>}
-      </> : <section className="empty-journey"><h3>Approve your shopping list first.</h3><p>Confirm ingredients, review the final shopping list, and approve it before choosing how to send or save the plan.</p><div><button className="primary compact" onClick={() => navigateTo(ingredientsConfirmed ? "shopping" : "list")}>{ingredientsConfirmed ? "Review shopping list" : "Confirm ingredients"}</button></div></section>}
+      </> : <section className="empty-journey"><h3>Approve your shopping list first.</h3><p>Confirm ingredients, review the final shopping list, and approve it before choosing recipients.</p><div><button className="primary compact" onClick={() => navigateTo(ingredientsConfirmed ? "shopping" : "list")}>{ingredientsConfirmed ? "Review shopping list" : "Confirm ingredients"}</button></div></section>}
     </div>}
 
     {view === "family" && <div className="dashboard narrow" id="page-content"><div className="page-heading"><div><p className="eyebrow">HOUSEHOLD PREFERENCES</p><h2>Your family, thoughtfully fed.</h2><p>Allergies, avoided ingredients, and favorite proteins shape every catalog search.</p></div></div>{familyStatus && <p className="form-notice success" aria-live="polite">{familyStatus}</p>}<div className="family-grid"><section className="settings-card"><h3>Family members</h3>{members.length === 0 && <p className="empty-state">No family members yet. Add the first person below.</p>}{members.map((member) => <article className="member-card" key={member.id}><span className="member-avatar icon-centered">{member.name.slice(0, 1).toUpperCase()}</span><div><strong>{member.name}</strong><small>{member.role} · {member.allergies || "No listed allergies"}</small><p>{[member.preferences?.glutenFree && "Gluten-free", member.preferences?.lowDairy && "Low dairy", member.preferences?.kidFriendly && "Kid-friendly", member.preferences?.avoidOnions && "Avoid onions", ...(member.preferences?.proteins || []).map((protein) => `${protein} favorite`)].filter(Boolean).join(" · ") || "No preferences yet"}</p></div><div className="member-actions"><button onClick={() => editMember(member)}>Edit</button><button onClick={() => deleteMember(member.id)} aria-label={`Remove ${member.name}`}>Remove</button></div></article>)}</section><section className="settings-card"><h3>{editingMemberId ? "Edit family member" : "Add a family member"}</h3><div className="field"><label htmlFor="family-member-name">Name</label><input id="family-member-name" className="text-input" value={memberDraft.name} onChange={(e) => setMemberDraft({ ...memberDraft, name: e.target.value })} /></div><div className="field"><label htmlFor="family-member-role">Role</label><select id="family-member-role" value={memberDraft.role} onChange={(e) => setMemberDraft({ ...memberDraft, role: e.target.value })}><option>Adult</option><option>Teen</option><option>Child</option></select></div><div className="field"><label htmlFor="family-member-allergies">Allergies / avoid</label><input id="family-member-allergies" className="text-input" placeholder="Peanuts, shellfish…" value={memberDraft.allergies} onChange={(e) => setMemberDraft({ ...memberDraft, allergies: e.target.value })} /></div><div className="field"><label>Favorite proteins</label><div className="preference-check-grid" role="group" aria-label="Favorite proteins">{proteinOptions.map((protein) => <button type="button" key={protein} className={memberDraft.proteins.includes(protein) ? "selected" : ""} aria-pressed={memberDraft.proteins.includes(protein)} onClick={() => setMemberDraft({ ...memberDraft, proteins: memberDraft.proteins.includes(protein) ? memberDraft.proteins.filter((item) => item !== protein) : [...memberDraft.proteins, protein] })}>{protein}</button>)}</div></div><Toggle label="Avoid onions" checked={memberDraft.avoidOnions} onChange={() => setMemberDraft({ ...memberDraft, avoidOnions: !memberDraft.avoidOnions })} /><Toggle label="Gluten-free" checked={memberDraft.glutenFree} onChange={() => setMemberDraft({ ...memberDraft, glutenFree: !memberDraft.glutenFree })} /><Toggle label="Low dairy" checked={memberDraft.lowDairy} onChange={() => setMemberDraft({ ...memberDraft, lowDairy: !memberDraft.lowDairy })} /><Toggle label="Kid-friendly" checked={memberDraft.kidFriendly} onChange={() => setMemberDraft({ ...memberDraft, kidFriendly: !memberDraft.kidFriendly })} /><button className="primary" onClick={saveMember}>{editingMemberId ? "Save changes" : "Add family member"}</button>{editingMemberId && <button className="text-button" onClick={() => { setEditingMemberId(""); setMemberDraft({ name: "", role: "Adult", allergies: "", glutenFree: true, lowDairy: false, kidFriendly: false, avoidOnions: false, proteins: [] }); }}>Cancel editing</button>}</section></div></div>}

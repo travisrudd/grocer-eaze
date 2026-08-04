@@ -117,17 +117,14 @@ test("locks paid features and ships the updated membership price", async () => {
   assert.match(auth, /"pending", null/);
 });
 
-test("shares grocery lists cross-platform and safely links emailed recipes", async () => {
+test("delivers grocery lists and recipes privately to validated recipients", async () => {
   const [page, api] = await Promise.all([
     source("app/page.tsx"),
     source("worker/api.ts"),
   ]);
 
-  assert.match(page, /navigator\.share/);
   assert.match(page, /type DeliveryRecipient/);
   assert.match(page, /Text message/);
-  assert.match(page, /Copy grocery list/);
-  assert.match(page, /Share to Notes or Keep/);
   assert.match(page, /openTextDraft/);
   assert.match(page, /sms:\$\{encodeURIComponent\(recipient\.address\)\}\?&body=\$\{encodeURIComponent\(message\)\}/);
   assert.match(page, /digits\.length < 7 \|\| digits\.length > 15/);
@@ -139,6 +136,9 @@ test("shares grocery lists cross-platform and safely links emailed recipes", asy
   assert.match(page, /window\.scrollTo\(0, 0\)/);
   assert.match(page, /Who should receive your plan/);
   assert.match(page, /Select everything/);
+  assert.match(page, /Calendar recipe order/);
+  assert.doesNotMatch(page, /Optional ways to save or shop/);
+  assert.doesNotMatch(page, /ON THIS DEVICE/);
   assert.match(api, /href="\$\{escapeHtml\(meal\.readerUrl\)\}"/);
   assert.match(page, /meals: plannedMeals\.map/);
   assert.match(api, /recipients/);
@@ -203,7 +203,7 @@ test("keeps school lunches separate and turns merged ingredients into editable t
   assert.match(page, /Confirm ingredients & build shopping list/);
   assert.match(page, /Review the list you’ll take shopping/);
   assert.match(page, /This is your final shopping list—not optional add-ons/);
-  assert.match(page, /Approve list & choose how to send or save/);
+  assert.match(page, /Approve list & choose recipients/);
   assert.match(page, /canonicalIngredientKey/);
   assert.match(page, /mergeIngredientQuantities/);
   assert.match(page, /Amount not provided/);
@@ -229,7 +229,7 @@ test("keeps school lunches separate and turns merged ingredients into editable t
   assert.doesNotMatch(css, /\.ingredient-review-list\s*\{[^}]*overflow-y/);
 });
 
-test("uses a recipient-first, private send and save flow", async () => {
+test("uses a recipient-first, private delivery flow", async () => {
   const [page, api, css] = await Promise.all([
     source("app/page.tsx"),
     source("worker/api.ts"),
@@ -243,8 +243,11 @@ test("uses a recipient-first, private send and save flow", async () => {
   assert.match(page, /pendingTextRecipients/);
   assert.match(page, /Requires an email recipient/);
   assert.match(page, /Each recipient gets a separate private draft/);
-  assert.match(page, /Copy grocery list/);
-  assert.match(page, /Share to Notes or Keep/);
+  assert.match(page, /recipient-calendar-settings/);
+  assert.match(page, /const activeDialog/);
+  assert.match(page, /\[activeDialog\]/);
+  assert.doesNotMatch(page, /deviceActions/);
+  assert.doesNotMatch(page, /Optional ways to save or shop/);
   assert.doesNotMatch(page, /groceryRecipientDialog/);
   assert.doesNotMatch(page, /emailDialogOpen/);
   assert.match(api, /deliveryEmailAllowed/);
@@ -256,7 +259,8 @@ test("uses a recipient-first, private send and save flow", async () => {
   assert.match(api, /One or more clean recipe links are missing/);
   assert.match(css, /delivery-recipient-card/);
   assert.match(css, /recipient-content-options/);
-  assert.match(css, /device-action-grid/);
+  assert.match(css, /recipient-calendar-settings/);
+  assert.doesNotMatch(css, /device-action-grid/);
 });
 
 test("tracks recipe provider expansion as a release-safe backlog item", async () => {
@@ -266,21 +270,21 @@ test("tracks recipe provider expansion as a release-safe backlog item", async ()
   assert.match(backlog, /graceful fallback/);
 });
 
-test("prepares a secure Instacart shopping-list handoff", async () => {
+test("removes device-only shopping handoffs from the recipient flow", async () => {
   const [page, api, worker] = await Promise.all([
     source("app/page.tsx"),
     source("worker/api.ts"),
     source("worker/index.ts"),
   ]);
 
-  assert.match(page, /Open in Instacart/);
-  assert.match(page, /\/api\/instacart\/shopping-list/);
-  assert.match(api, /INSTACART_API_KEY/);
-  assert.match(worker, /INSTACART_API_KEY/);
-  assert.match(api, /connect\.instacart\.com\/idp\/v1\/products\/products_link/);
-  assert.match(api, /hasProductAccess\(sessionUser\)/);
-  assert.match(api, /instacartShopping: Boolean\(env\.INSTACART_API_KEY\)/);
-  assert.match(page, /instacartEnabled &&/);
+  assert.doesNotMatch(page, /Open in Instacart/);
+  assert.doesNotMatch(page, /\/api\/instacart\/shopping-list/);
+  assert.doesNotMatch(page, /Copy grocery list/);
+  assert.doesNotMatch(page, /Share to Notes or Keep/);
+  assert.doesNotMatch(page, /Download my calendar/);
+  assert.doesNotMatch(api, /INSTACART_API_KEY/);
+  assert.doesNotMatch(worker, /INSTACART_API_KEY/);
+  assert.doesNotMatch(api, /connect\.instacart\.com\/idp\/v1\/products\/products_link/);
 });
 
 test("syncs active plans to owner-scoped account storage with a device fallback", async () => {
@@ -327,9 +331,9 @@ test("creates private clean-recipe readers for calendar links", async () => {
   ]);
 
   assert.match(page, /fetch\("\/api\/recipe-readers"/);
-  assert.match(page, /Clean recipe: \$\{recipe\.readerUrl\}/);
-  assert.match(page, /Original source: \$\{recipe\.sourceUrl\}/);
-  assert.match(page, /URL:\$\{calendarText\(recipe\.readerUrl\)\}/);
+  assert.match(api, /Clean recipe: \$\{recipe\.readerUrl\}/);
+  assert.match(api, /Original source: \$\{recipe\.sourceUrl\}/);
+  assert.match(api, /URL:\$\{calendarText\(recipe\.readerUrl\)\}/);
   assert.match(api, /recipe_readers/);
   assert.match(api, /crypto\.getRandomValues\(new Uint8Array\(32\)\)/);
   assert.match(api, /WHERE owner_id = \? AND recipe_key = \?/);

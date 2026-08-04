@@ -12,7 +12,6 @@ type AppEnv = {
   STRIPE_YEARLY_PRICE_ID?: string;
   PEXELS_API_KEY?: string;
   THEMEALDB_API_KEY?: string;
-  INSTACART_API_KEY?: string;
 };
 import { getSessionUser, handleAuthRequest, hasProductAccess } from "./auth";
 import { handleBillingRequest } from "./billing";
@@ -989,7 +988,7 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
   if (authResponse) return authResponse;
   const sessionUser = await getSessionUser(request, env);
   if (url.pathname === "/api/health") return json({ ok: true });
-  if (url.pathname === "/api/capabilities" && request.method === "GET") return json({ instacartShopping: Boolean(env.INSTACART_API_KEY) });
+  if (url.pathname === "/api/capabilities" && request.method === "GET") return json({});
   if (url.pathname === "/api/location/search" && request.method === "GET") return locationLookup(url);
   if (url.pathname === "/api/location/reverse" && request.method === "GET") return locationLookup(url, true);
   if (url.pathname === "/api/accessibility-feedback" && request.method === "POST") {
@@ -1060,7 +1059,7 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
     return json({ sent: true });
   }
 
-  const paidPaths = new Set(["/api/recipes/search", "/api/recipes/import", "/api/recipe-image", "/api/recipe-readers", "/api/calendar", "/api/favorites", "/api/ratings", "/api/email", "/api/instacart/shopping-list"]);
+  const paidPaths = new Set(["/api/recipes/search", "/api/recipes/import", "/api/recipe-image", "/api/recipe-readers", "/api/calendar", "/api/favorites", "/api/ratings", "/api/email"]);
   if (paidPaths.has(url.pathname) && !sessionUser) return json({ error: "Sign in and choose a membership to continue.", code: "PAYMENT_REQUIRED" }, 401);
   if (paidPaths.has(url.pathname) && !hasProductAccess(sessionUser)) return json({ error: "An active membership or trial is required.", code: "PAYMENT_REQUIRED" }, 402);
   if (url.pathname === "/api/recipes/search" && request.method === "GET") return searchRecipes(url, env);
@@ -1068,47 +1067,6 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
   if (url.pathname === "/api/recipe-image" && request.method === "GET") return recipeImageResponse(url, env);
   if (url.pathname === "/api/recipe-readers" && request.method === "POST" && sessionUser) return createRecipeReaders(request, env, sessionUser.id);
   if (url.pathname === "/api/calendar" && request.method === "POST") return calendarResponse(await request.json());
-  if (url.pathname === "/api/instacart/shopping-list" && request.method === "POST") {
-    if (!env.INSTACART_API_KEY) return json({ error: "Instacart shopping will activate after provider approval and production-key setup." }, 503);
-    const body = await request.json() as {
-      title?: string;
-      items?: Array<{ name?: string; displayText?: string; measurements?: Array<{ quantity?: number; unit?: string }> }>;
-    };
-    const allowedUnits = new Set(["each", "cup", "tablespoon", "teaspoon", "ounce", "pound", "gram", "kilogram", "milliliter", "liter", "gallon", "pint", "quart", "can", "package", "bunch", "head", "large", "medium", "small"]);
-    const items = Array.isArray(body.items) ? body.items.slice(0, 200).map((item) => {
-      const name = String(item.name || "").trim().slice(0, 160);
-      const measurements = (Array.isArray(item.measurements) ? item.measurements : []).slice(0, 4).flatMap((measurement) => {
-        const quantity = Number(measurement.quantity || 0);
-        const unit = String(measurement.unit || "each").toLowerCase();
-        return quantity > 0 && quantity <= 10_000 && allowedUnits.has(unit) ? [{ quantity, unit }] : [];
-      });
-      return {
-        name,
-        display_text: String(item.displayText || name).trim().slice(0, 220),
-        ...(measurements.length ? { line_item_measurements: measurements } : {}),
-      };
-    }).filter((item) => item.name) : [];
-    if (!items.length) return json({ error: "Your grocery list needs at least one ingredient before shopping." }, 400);
-    try {
-      const instacartResponse = await fetch("https://connect.instacart.com/idp/v1/products/products_link", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${env.INSTACART_API_KEY}`, Accept: "application/json", "Content-Type": "application/json", "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)" },
-        body: JSON.stringify({
-          title: String(body.title || "Grocer-Eaze grocery list").trim().slice(0, 200),
-          link_type: "shopping_list",
-          expires_in: 30,
-          line_items: items,
-          landing_page_configuration: { partner_linkback_url: `${url.origin}/#list` },
-        }),
-      });
-      const payload = await instacartResponse.json() as { products_link_url?: string; message?: string; error?: string };
-      if (!instacartResponse.ok || !safeHttpUrl(payload.products_link_url)) return json({ error: payload.message || payload.error || "Instacart could not match this grocery list." }, 502);
-      return json({ url: safeHttpUrl(payload.products_link_url) });
-    } catch {
-      return json({ error: "Instacart is temporarily unavailable. Your Grocer-Eaze list is unchanged." }, 502);
-    }
-  }
-
   if (!sessionUser) return json({ error: "Sign in to access household information." }, 401);
   const ownerId = sessionUser.id;
   await ensureSchema(env.DB);
