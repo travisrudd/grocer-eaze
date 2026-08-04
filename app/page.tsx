@@ -343,6 +343,10 @@ export default function Home() {
   const [calendarProvider, setCalendarProvider] = useState<"google" | "apple">("google");
   const [emailRecipients, setEmailRecipients] = useState("");
   const [emailDialogOpen, setEmailDialogOpen] = useState(false);
+  const [groceryEmailRecipients, setGroceryEmailRecipients] = useState("");
+  const [groceryTextRecipient, setGroceryTextRecipient] = useState("");
+  const [groceryRecipientDialog, setGroceryRecipientDialog] = useState<"email" | "text" | null>(null);
+  const [groceryRecipientError, setGroceryRecipientError] = useState("");
   const [deliveryBusy, setDeliveryBusy] = useState(false);
   const [familyStatus, setFamilyStatus] = useState("");
   const [recipeFilters, setRecipeFilters] = useState(defaultRecipeFilters);
@@ -631,6 +635,8 @@ export default function Home() {
       if (["text", "email", "copy", "notes"].includes(String(saved.groceryDestination))) setGroceryDestination(saved.groceryDestination as "text" | "email" | "copy" | "notes");
       if (saved.calendarProvider === "apple" || saved.calendarProvider === "google") setCalendarProvider(saved.calendarProvider);
       if (typeof saved.emailRecipients === "string") setEmailRecipients(saved.emailRecipients.slice(0, 2000));
+      if (typeof saved.groceryEmailRecipients === "string") setGroceryEmailRecipients(saved.groceryEmailRecipients.slice(0, 2000));
+      if (typeof saved.groceryTextRecipient === "string") setGroceryTextRecipient(saved.groceryTextRecipient.slice(0, 40));
     } catch { /* Ignore a corrupted device cache. */ }
   }
 
@@ -682,6 +688,8 @@ export default function Home() {
         if (authData.user) {
           setUser(authData.user); setEmail(authData.user.email); setPlanStorageOwnerId(authData.user.id);
           setEmailRecipients(authData.user.email);
+          setGroceryEmailRecipients(authData.user.email);
+          setGroceryTextRecipient(authData.user.phone || "");
         }
         const requestedView = window.location.hash.replace("#", "") as View;
         if (["meals", "list", "shopping", "delivery"].includes(requestedView) && !authData.user?.hasAccess) {
@@ -722,7 +730,7 @@ export default function Home() {
       planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
       kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder,
       ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, asNeededIngredients, confirmedIngredientsSignature, reviewedPlanSignature,
-      deliveryActions, groceryDestination, calendarProvider, emailRecipients,
+      deliveryActions, groceryDestination, calendarProvider, emailRecipients, groceryEmailRecipients, groceryTextRecipient,
     };
     try { window.localStorage.setItem(`grocer-eaze-active-plan:${planStorageOwnerId}`, JSON.stringify(plan)); }
     catch { /* The account copy remains authoritative if device storage is unavailable. */ }
@@ -737,7 +745,7 @@ export default function Home() {
       }
     }, 750);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, asNeededIngredients, confirmedIngredientsSignature, reviewedPlanSignature, deliveryActions, groceryDestination, calendarProvider, emailRecipients]);
+  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, asNeededIngredients, confirmedIngredientsSignature, reviewedPlanSignature, deliveryActions, groceryDestination, calendarProvider, emailRecipients, groceryEmailRecipients, groceryTextRecipient]);
 
   useEffect(() => {
     if (!planHydrated || !user) return;
@@ -890,6 +898,8 @@ export default function Home() {
       const me = await fetch("/api/auth/me").then((r) => r.json());
       setUser(me.user); setEmail(me.user.email); setPlanStorageOwnerId(me.user.id); setAuthForm((current) => ({ ...current, name: me.user.name, phone: me.user.phone || "" }));
       setEmailRecipients(me.user.email);
+      setGroceryEmailRecipients(me.user.email);
+      setGroceryTextRecipient(me.user.phone || "");
       const cloudPlan = await fetch("/api/active-plan").then((response) => response.ok ? response.json() : { plan: null });
       if (cloudPlan.plan) applySavedPlan(cloudPlan.plan);
       else applySavedPlan(window.localStorage.getItem(`grocer-eaze-active-plan:${me.user.id}`));
@@ -1547,17 +1557,42 @@ export default function Home() {
     return `${groceryListTitle()}\n\n${groceryGroups.map((group) => `${group.title}\n${group.items.map((entry) => `☐ ${groceryItemName(entry)} — ${groceryItemQuantity(entry)}`).join("\n")}`).join("\n\n")}`;
   }
 
+  function parsedGroceryEmailRecipients() {
+    return [...new Set(groceryEmailRecipients.split(/[;,\n]/).map((address) => address.trim().toLowerCase()).filter(Boolean))];
+  }
+
+  function validGroceryEmailRecipients() {
+    const recipients = parsedGroceryEmailRecipients();
+    return recipients.length > 0 && recipients.length <= 10 && recipients.every((address) => /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(address));
+  }
+
+  function normalizedGroceryTextRecipient() {
+    const value = groceryTextRecipient.trim();
+    const digits = value.replace(/\D/g, "");
+    if (digits.length < 7 || digits.length > 15) return "";
+    return value.startsWith("+") ? `+${digits}` : digits;
+  }
+
+  function openGroceryRecipientDialog(destination: "email" | "text") {
+    setGroceryRecipientError("");
+    setGroceryRecipientDialog(destination);
+  }
+
   async function shareGroceryList(destination: "text" | "email" | "copy" | "notes" = groceryDestination) {
     if (!groceryListApproved) throw new Error("Approve the grocery list before sending it.");
     if (!groceryGroups.length) throw new Error("Every ingredient is marked as already on hand, so there is no shopping list to send.");
     const title = groceryListTitle();
     const text = groceryListText();
     if (destination === "text") {
-      window.location.href = `sms:?&body=${encodeURIComponent(text)}`;
+      const recipient = normalizedGroceryTextRecipient();
+      if (!recipient) throw new Error("Add a valid phone number before texting the grocery list.");
+      window.location.href = `sms:${encodeURIComponent(recipient)}?&body=${encodeURIComponent(text)}`;
       return "Text message draft opened with your grocery list.";
     }
     if (destination === "email") {
-      window.location.href = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(text)}`;
+      const recipients = parsedGroceryEmailRecipients();
+      if (!validGroceryEmailRecipients()) throw new Error("Add up to 10 valid email recipients before emailing the grocery list.");
+      window.location.href = `mailto:${recipients.map((address) => encodeURIComponent(address)).join(",")}?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(text)}`;
       return "Email draft opened with your grocery list.";
     }
     if (destination === "copy") {
@@ -1709,6 +1744,18 @@ export default function Home() {
   async function executeDeliveryActions() {
     const selectedCount = Object.entries(deliveryActions).filter(([key, selected]) => selected && (key !== "instacart" || instacartEnabled)).length;
     if (!selectedCount) { setExportStatus("Select at least one action to continue."); return; }
+    if (deliveryActions.grocery && groceryDestination === "text" && !normalizedGroceryTextRecipient()) {
+      setGroceryRecipientError("Enter a valid phone number with 7 to 15 digits.");
+      setGroceryRecipientDialog("text");
+      setExportStatus("Add a valid text recipient before continuing.");
+      return;
+    }
+    if (deliveryActions.grocery && groceryDestination === "email" && !validGroceryEmailRecipients()) {
+      setGroceryRecipientError("Enter up to 10 valid email addresses, separated by commas or new lines.");
+      setGroceryRecipientDialog("email");
+      setExportStatus("Add valid grocery-list email recipients before continuing.");
+      return;
+    }
     if (deliveryActions.email) {
       const recipients = parsedEmailRecipients();
       if (!recipients.length || recipients.some((address) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) || recipients.length > 10) {
@@ -1744,6 +1791,30 @@ export default function Home() {
     setDeliveryActions((current) => ({ ...current, email: true }));
     setEmailDialogOpen(false);
     setExportStatus(`${recipients.length} email ${recipients.length === 1 ? "recipient" : "recipients"} ready.`);
+  }
+
+  function confirmGroceryRecipient() {
+    if (groceryRecipientDialog === "email") {
+      const recipients = parsedGroceryEmailRecipients();
+      if (!validGroceryEmailRecipients()) {
+        setGroceryRecipientError("Enter up to 10 valid email addresses, separated by commas or new lines.");
+        return;
+      }
+      setGroceryEmailRecipients(recipients.join(", "));
+      setGroceryRecipientDialog(null);
+      setGroceryRecipientError("");
+      setExportStatus(`${recipients.length} grocery-list email ${recipients.length === 1 ? "recipient" : "recipients"} ready.`);
+      return;
+    }
+    const recipient = normalizedGroceryTextRecipient();
+    if (!recipient) {
+      setGroceryRecipientError("Enter a valid phone number with 7 to 15 digits.");
+      return;
+    }
+    setGroceryTextRecipient(recipient);
+    setGroceryRecipientDialog(null);
+    setGroceryRecipientError("");
+    setExportStatus("Text recipient ready.");
   }
 
   async function submitAccessibilityFeedback(event: React.FormEvent<HTMLFormElement>) {
@@ -2063,7 +2134,19 @@ export default function Home() {
       {plannedMeals.length && groceryListApproved ? <>
         <div className="delivery-toolbar"><div><strong>{selectedDeliveryActionCount} selected</strong><small>{plannedMeals.length} meals · {shoppingEntries.length} shopping items</small></div><button type="button" className="outline compact" onClick={() => setDeliveryActions((current) => ({ grocery: !allDeliveryActionsSelected, email: !allDeliveryActionsSelected, calendar: !allDeliveryActionsSelected, instacart: instacartEnabled ? !allDeliveryActionsSelected : current.instacart }))}>{allDeliveryActionsSelected ? "Clear all" : "Select all"}</button></div>
         <section className="delivery-action-grid" aria-label="Send and save options">
-          <article className={deliveryActions.grocery ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.grocery} onChange={() => setDeliveryActions((current) => ({ ...current, grocery: !current.grocery }))} /><span><strong>Send grocery list</strong><small>{shoppingEntries.length} items; “already have” ingredients stay excluded</small></span></label>{deliveryActions.grocery && <fieldset><legend>Send as</legend><label><input type="radio" name="grocery-destination" checked={groceryDestination === "text"} onChange={() => setGroceryDestination("text")} /> Text list</label><label><input type="radio" name="grocery-destination" checked={groceryDestination === "email"} onChange={() => setGroceryDestination("email")} /> Email list</label><label><input type="radio" name="grocery-destination" checked={groceryDestination === "copy"} onChange={() => setGroceryDestination("copy")} /> Copy list to clipboard</label><label><input type="radio" name="grocery-destination" checked={groceryDestination === "notes"} onChange={() => setGroceryDestination("notes")} /> Note</label><small>{groceryDestination === "text" ? "Opens a prefilled message with the complete list." : groceryDestination === "email" ? "Opens a prefilled email with the complete list." : groceryDestination === "copy" ? "Copies the list so you can paste it into Reminders or any other app." : "Opens your device’s share menu so you can choose Notes, Keep, or another installed app."}</small></fieldset>}</article>
+          <article className={deliveryActions.grocery ? "selected" : ""}>
+            <label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.grocery} onChange={() => setDeliveryActions((current) => ({ ...current, grocery: !current.grocery }))} /><span><strong>Send grocery list</strong><small>{shoppingEntries.length} items; “already have” ingredients stay excluded</small></span></label>
+            {deliveryActions.grocery && <fieldset>
+              <legend>Send as</legend>
+              <label><input type="radio" name="grocery-destination" checked={groceryDestination === "text"} onChange={() => { setGroceryDestination("text"); if (!normalizedGroceryTextRecipient()) openGroceryRecipientDialog("text"); }} /> Text list</label>
+              <label><input type="radio" name="grocery-destination" checked={groceryDestination === "email"} onChange={() => { setGroceryDestination("email"); if (!validGroceryEmailRecipients()) openGroceryRecipientDialog("email"); }} /> Email list</label>
+              <label><input type="radio" name="grocery-destination" checked={groceryDestination === "copy"} onChange={() => setGroceryDestination("copy")} /> Copy list to clipboard</label>
+              <label><input type="radio" name="grocery-destination" checked={groceryDestination === "notes"} onChange={() => setGroceryDestination("notes")} /> Note</label>
+              <small>{groceryDestination === "text" ? "Opens a prefilled message addressed to your selected phone number." : groceryDestination === "email" ? "Opens a prefilled email addressed to your selected recipients." : groceryDestination === "copy" ? "Copies the list so you can paste it into Reminders or any other app." : "Opens your device’s share menu so you can choose Notes, Keep, or another installed app."}</small>
+              {groceryDestination === "text" && <div className="delivery-action-settings"><span>{normalizedGroceryTextRecipient() ? "Text recipient ready" : "Phone number needed"}</span><button type="button" className="outline compact" onClick={() => openGroceryRecipientDialog("text")}>Add or edit phone number</button></div>}
+              {groceryDestination === "email" && <div className="delivery-action-settings"><span>{validGroceryEmailRecipients() ? `${parsedGroceryEmailRecipients().length} recipient${parsedGroceryEmailRecipients().length === 1 ? "" : "s"}` : "Recipients needed"}</span><button type="button" className="outline compact" onClick={() => openGroceryRecipientDialog("email")}>Add or edit recipients</button></div>}
+            </fieldset>}
+          </article>
           <article className={deliveryActions.email ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.email} onChange={() => { const next = !deliveryActions.email; setDeliveryActions((current) => ({ ...current, email: next })); if (next && !emailRecipients.trim()) setEmailDialogOpen(true); }} /><span><strong>Email recipes</strong><small>Recipe names link to their original pages</small></span></label>{deliveryActions.email && <div className="delivery-action-settings"><span>{parsedEmailRecipients().length ? `${parsedEmailRecipients().length} recipient${parsedEmailRecipients().length === 1 ? "" : "s"}` : "Recipients needed"}</span><button type="button" className="outline compact" onClick={() => setEmailDialogOpen(true)}>Add or edit recipients</button></div>}</article>
           <article className={deliveryActions.calendar ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.calendar} onChange={() => setDeliveryActions((current) => ({ ...current, calendar: !current.calendar }))} /><span><strong>Save meal plan to calendar</strong><small>Each recipe, link, and meal type appears on its scheduled date</small></span></label>{deliveryActions.calendar && <fieldset><legend>Calendar</legend><label><input type="radio" name="calendar-provider" checked={calendarProvider === "google"} onChange={() => setCalendarProvider("google")} /> Google Calendar</label><label><input type="radio" name="calendar-provider" checked={calendarProvider === "apple"} onChange={() => setCalendarProvider("apple")} /> Apple Calendar</label><label className="delivery-select">Recipe order<select value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle within each meal type</option></select></label><small>A standard calendar file downloads, ready to open or import into your chosen calendar.</small></fieldset>}</article>
           {instacartEnabled && <article className={deliveryActions.instacart ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.instacart} onChange={() => setDeliveryActions((current) => ({ ...current, instacart: !current.instacart }))} /><span><strong>Open in Instacart</strong><small>Match your shopping list, choose a store, and review before checkout</small></span></label></article>}
@@ -2152,6 +2235,8 @@ export default function Home() {
     </main>
 
     {ratingMeal && <div className="modal-backdrop" onClick={() => setRatingMeal(null)}><section className="rating-modal" role="dialog" aria-modal="true" aria-labelledby="rating-title" tabIndex={-1} onClick={(e) => e.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close recipe rating" onClick={() => setRatingMeal(null)}>×</button><span className="mini-label">RATE THIS RECIPE</span><h3 id="rating-title">{ratingMeal.title}</h3><label>Meal quality</label><Stars label="Meal quality" value={ratings[ratingMeal.id]?.quality || 0} onChange={(quality) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality, ease: current[ratingMeal.id]?.ease || 0 } }))} /><label>Ease of preparation</label><Stars label="Ease of preparation" value={ratings[ratingMeal.id]?.ease || 0} onChange={(ease) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality: current[ratingMeal.id]?.quality || 0, ease } }))} /><button className="primary" disabled={!ratings[ratingMeal.id]?.quality || !ratings[ratingMeal.id]?.ease} onClick={() => saveRating(ratingMeal, ratings[ratingMeal.id])}>Save rating</button></section></div>}
+
+    {groceryRecipientDialog && <div className="modal-backdrop" onClick={() => { setGroceryRecipientDialog(null); setGroceryRecipientError(""); }}><section className="email-recipient-modal" role="dialog" aria-modal="true" aria-labelledby="grocery-recipient-title" tabIndex={-1} onClick={(event) => event.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close grocery list recipients" onClick={() => { setGroceryRecipientDialog(null); setGroceryRecipientError(""); }}>×</button><span className="mini-label">{groceryRecipientDialog === "email" ? "EMAIL GROCERY LIST" : "TEXT GROCERY LIST"}</span><h3 id="grocery-recipient-title">Who should receive the grocery list?</h3>{groceryRecipientDialog === "email" ? <><p>Add up to 10 addresses. Separate them with commas or put each address on a new line.</p><label htmlFor="grocery-email-recipients">Email recipients</label><textarea id="grocery-email-recipients" autoComplete="email" value={groceryEmailRecipients} onChange={(event) => { setGroceryEmailRecipients(event.target.value); setGroceryRecipientError(""); }} placeholder="you@example.com, family@example.com" /></> : <><p>Enter one phone number. Your device will open a prefilled text message for you to review before sending.</p><label htmlFor="grocery-text-recipient">Phone number</label><input id="grocery-text-recipient" className="text-input" type="tel" inputMode="tel" autoComplete="tel" value={groceryTextRecipient} onChange={(event) => { setGroceryTextRecipient(event.target.value.slice(0, 40)); setGroceryRecipientError(""); }} placeholder="(312) 555-0123" /></>}{groceryRecipientError && <p className="form-notice error" role="alert">{groceryRecipientError}</p>}<div className="modal-actions"><button className="outline" type="button" onClick={() => { setGroceryRecipientDialog(null); setGroceryRecipientError(""); }}>Cancel</button><button className="primary compact" type="button" onClick={confirmGroceryRecipient}>Save recipient{groceryRecipientDialog === "email" ? "s" : ""}</button></div></section></div>}
 
     {emailDialogOpen && <div className="modal-backdrop" onClick={() => setEmailDialogOpen(false)}><section className="email-recipient-modal" role="dialog" aria-modal="true" aria-labelledby="email-recipient-title" tabIndex={-1} onClick={(event) => event.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close email recipients" onClick={() => setEmailDialogOpen(false)}>×</button><span className="mini-label">EMAIL RECIPES</span><h3 id="email-recipient-title">Who should receive the plan?</h3><p>Add up to 10 addresses. Separate them with commas or put each address on a new line.</p><label htmlFor="recipe-email-recipients">Email recipients</label><textarea id="recipe-email-recipients" autoComplete="email" value={emailRecipients} onChange={(event) => setEmailRecipients(event.target.value)} placeholder="you@example.com, family@example.com" /><div className="modal-actions"><button className="outline" type="button" onClick={() => setEmailDialogOpen(false)}>Cancel</button><button className="primary compact" type="button" onClick={confirmEmailRecipients}>Save recipients</button></div></section></div>}
 

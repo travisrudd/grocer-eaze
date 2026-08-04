@@ -120,8 +120,14 @@ test("shares grocery lists cross-platform and safely links emailed recipes", asy
   assert.match(page, /Text list/);
   assert.match(page, /Email list/);
   assert.match(page, /Copy list to clipboard/);
-  assert.match(page, /sms:\?&body=\$\{encodeURIComponent\(text\)\}/);
-  assert.match(page, /mailto:\?subject=\$\{encodeURIComponent\(title\)\}&body=\$\{encodeURIComponent\(text\)\}/);
+  assert.match(page, /groceryEmailRecipients/);
+  assert.match(page, /groceryTextRecipient/);
+  assert.match(page, /Add or edit phone number/);
+  assert.match(page, /Add or edit recipients/);
+  assert.match(page, /sms:\$\{encodeURIComponent\(recipient\)\}\?&body=\$\{encodeURIComponent\(text\)\}/);
+  assert.match(page, /mailto:\$\{recipients\.map\(\(address\) => encodeURIComponent\(address\)\)\.join\(","\)\}\?subject=\$\{encodeURIComponent\(title\)\}&body=\$\{encodeURIComponent\(text\)\}/);
+  assert.match(page, /digits\.length < 7 \|\| digits\.length > 15/);
+  assert.match(page, /Who should receive the grocery list\?/);
   assert.match(page, /Groceries \+ \$\{groceryDateLabel\(\)\}/);
   assert.doesNotMatch(page, /Apple Reminders|Reminder or task list/);
   assert.match(page, /function scrollViewportToTop\(\)/);
