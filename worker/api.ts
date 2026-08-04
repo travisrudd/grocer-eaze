@@ -46,20 +46,136 @@ const fallbackTitles = [
   "Salmon with Warm Lentil Salad", "Tuscan Chicken and Kale", "Greek Beef Stuffed Eggplant", "Chickpea Spinach Shakshuka",
   "Turkey Meatloaf with Green Beans", "Shrimp and Broccoli Noodles", "White Bean Artichoke Bake", "Chicken Lemon Rice Soup",
 ];
-const fallbackRecipes = fallbackTitles.map((title, index) => ({
-  id: `demo-${index + 1}`,
-  title,
-  sourceName: ["EatingWell", "Food Network", "Allrecipes", "Serious Eats", "Simply Recipes"][index % 5],
-  sourceUrl: ["https://www.eatingwell.com/recipes/", "https://www.foodnetwork.com/recipes", "https://www.allrecipes.com/recipes/", "https://www.seriouseats.com/recipes-5117985", "https://www.simplyrecipes.com/recipes-5090746"][index % 5],
-  readyInMinutes: 20 + (index % 5) * 5,
-  servings: 4,
-  glutenFree: true,
-  dairyFree: index % 3 !== 0,
-  image: "",
-  pricePerServing: 280 + (index % 7) * 55,
-  diets: ["gluten free", "Mediterranean"],
-  extendedIngredients: [{ name: "fresh vegetables", aisle: "Produce", original: "Fresh vegetables" }, { name: title.toLowerCase().includes("salmon") ? "salmon fillets" : title.toLowerCase().includes("shrimp") ? "shrimp" : "lean protein or beans", aisle: "Meat & seafood", original: "Lean protein or beans" }, { name: "herbs and pantry staples", aisle: "Pantry", original: "Herbs and pantry staples" }],
-}));
+
+const genericIngredientLabel = /^(?:fresh\s+)?(?:vegetables?|produce|fruit|proteins?|lean protein or beans|beans or protein|herbs?|herbs and pantry staples|pantry staples|seasonings?|garnish|toppings?|sides?)$/i;
+
+function isConcreteIngredientName(value: unknown) {
+  const normalized = String(value || "").replace(/[–—/&+]+/g, " ").replace(/\s+/g, " ").trim();
+  return normalized.length > 1 && !genericIngredientLabel.test(normalized);
+}
+
+function concreteFallbackIngredients(title: string) {
+  const lower = title.toLowerCase();
+  const ingredients: Array<{ name: string; aisle: string; original: string }> = [];
+  const add = (name: string, original: string) => {
+    if (!ingredients.some((item) => item.name.toLowerCase() === name.toLowerCase())) {
+      ingredients.push({ name, aisle: ingredientAisle(name), original });
+    }
+  };
+
+  if (/salmon/.test(lower)) add("salmon fillets", "1 1/2 pounds salmon fillets");
+  if (/shrimp/.test(lower)) add("peeled shrimp", "1 1/2 pounds peeled shrimp");
+  if (/chicken/.test(lower)) add("boneless skinless chicken breasts", "1 1/2 pounds boneless skinless chicken breasts");
+  if (/turkey/.test(lower)) add(/box|bento|bites|roll-up|wrap|pita/.test(lower) ? "sliced turkey" : "lean ground turkey", /box|bento|bites|roll-up|wrap|pita/.test(lower) ? "12 ounces sliced turkey" : "1 1/2 pounds lean ground turkey");
+  if (/pork/.test(lower)) add(/chop/.test(lower) ? "boneless pork chops" : "pork tenderloin", /chop/.test(lower) ? "4 boneless pork chops" : "1 1/2 pounds pork tenderloin");
+  if (/beef|kofta/.test(lower)) add(/broccoli|rice bowl/.test(lower) ? "beef sirloin" : "lean ground beef", /broccoli|rice bowl/.test(lower) ? "1 1/2 pounds beef sirloin" : "1 1/2 pounds lean ground beef");
+  if (/\bcod\b/.test(lower)) add("cod fillets", "1 1/2 pounds cod fillets");
+  if (/\btuna\b|niçoise/.test(lower)) add("canned tuna", "2 5-ounce cans tuna");
+  if (/white bean/.test(lower)) add("cannellini beans", "2 15-ounce cans cannellini beans");
+  if (/black bean/.test(lower)) add("black beans", "2 15-ounce cans black beans");
+  if (/chickpea/.test(lower)) add("chickpeas", "2 15-ounce cans chickpeas");
+  if (/lentil/.test(lower)) add("dry lentils", "1 1/2 cups dry lentils");
+  if (/\begg\b|frittata|shakshuka/.test(lower)) add("large eggs", "8 large eggs");
+  if (/hummus/.test(lower)) add("plain hummus", "2 cups plain hummus");
+  if (/falafel/.test(lower)) add("gluten-free prepared falafel", "12 gluten-free prepared falafel");
+  if (/sunflower butter/.test(lower)) add("sunflower seed butter", "1 cup sunflower seed butter");
+  if (/mushroom/.test(lower)) add("cremini mushrooms", "16 ounces cremini mushrooms");
+  if (/cauliflower/.test(lower)) add("cauliflower", "1 large head cauliflower");
+
+  if (/rice/.test(lower)) add("long-grain rice", "1 1/2 cups long-grain rice");
+  if (/quinoa|grain bowl/.test(lower)) add("quinoa", "1 1/2 cups quinoa");
+  if (/polenta/.test(lower)) add("polenta", "1 1/2 cups polenta");
+  if (/risotto/.test(lower)) add("arborio rice", "1 1/2 cups arborio rice");
+  if (/\bpasta\b/.test(lower)) add("gluten-free pasta", "12 ounces gluten-free pasta");
+  if (/\borzo\b/.test(lower)) add("gluten-free orzo", "12 ounces gluten-free orzo");
+  if (/noodles/.test(lower)) add("rice noodles", "12 ounces rice noodles");
+  if (/couscous/.test(lower)) add("gluten-free corn couscous", "1 1/2 cups gluten-free corn couscous");
+  if (/pita|flatbread/.test(lower)) add("gluten-free pita bread", "8 gluten-free pita breads");
+  if (/taco|quesadilla|pinwheel|roll-up|wrap/.test(lower)) add("gluten-free tortillas", "8 gluten-free tortillas");
+  if (/cracker/.test(lower)) add("gluten-free crackers", "8 ounces gluten-free crackers");
+  if (/potato/.test(lower)) add(/sweet potato/.test(lower) ? "sweet potatoes" : "Yukon gold potatoes", /sweet potato/.test(lower) ? "3 large sweet potatoes" : "2 pounds Yukon gold potatoes");
+
+  if (/tomato|caprese|piccata|ratatouille|shakshuka/.test(lower)) add("Roma tomatoes", "6 Roma tomatoes");
+  if (/broccoli/.test(lower)) add("broccoli florets", "4 cups broccoli florets");
+  if (/zucchini/.test(lower)) add("zucchini", "4 medium zucchini");
+  if (/eggplant|moussaka/.test(lower)) add("eggplant", "2 large eggplants");
+  if (/pepper|fajita/.test(lower)) add("bell peppers", "4 bell peppers");
+  if (/spinach/.test(lower)) add("baby spinach", "6 cups baby spinach");
+  if (/kale|greens/.test(lower)) add("lacinato kale", "1 large bunch lacinato kale");
+  if (/lettuce|salad|niçoise/.test(lower)) add("romaine lettuce", "2 heads romaine lettuce");
+  if (/green bean/.test(lower)) add("green beans", "1 pound green beans");
+  if (/artichoke/.test(lower)) add("artichoke hearts", "2 14-ounce cans artichoke hearts");
+  if (/squash/.test(lower)) add("acorn squash", "2 medium acorn squash");
+  if (/cucumber|tzatziki|sushi|greek/.test(lower)) add("English cucumbers", "2 English cucumbers");
+  if (/vegetable|veggie|rainbow|tagine|fajita|ratatouille/.test(lower)) {
+    add("red bell peppers", "2 red bell peppers");
+    add("zucchini", "2 medium zucchini");
+    add("carrots", "4 medium carrots");
+  }
+
+  if (/apple/.test(lower)) add("apples", "3 medium apples");
+  if (/pear/.test(lower)) add("ripe pears", "3 ripe pears");
+  if (/pineapple/.test(lower)) add("pineapple chunks", "2 cups pineapple chunks");
+  if (/orange|citrus/.test(lower)) add("oranges", "3 medium oranges");
+  if (/berry/.test(lower)) add("strawberries", "2 cups strawberries");
+  if (/banana/.test(lower)) add("bananas", "4 medium bananas");
+  if (/avocado/.test(lower)) add("avocados", "2 ripe avocados");
+  if (/lemon|piccata/.test(lower)) add("lemons", "3 lemons");
+  if (/lime/.test(lower)) add("limes", "3 limes");
+
+  if (/pesto/.test(lower)) add("dairy-free basil pesto", "3/4 cup dairy-free basil pesto");
+  if (/honey mustard/.test(lower)) add("Dijon mustard", "3 tablespoons Dijon mustard");
+  if (/miso/.test(lower)) add("white miso paste", "3 tablespoons white miso paste");
+  if (/coconut|curry/.test(lower)) add("coconut milk", "1 14-ounce can coconut milk");
+  if (/harissa/.test(lower)) add("harissa paste", "3 tablespoons harissa paste");
+  if (/sesame/.test(lower)) add("toasted sesame oil", "2 tablespoons toasted sesame oil");
+  if (/balsamic/.test(lower)) add("balsamic vinegar", "3 tablespoons balsamic vinegar");
+  if (/rosemary/.test(lower)) add("fresh rosemary", "2 tablespoons chopped fresh rosemary");
+  if (/dill/.test(lower)) add("fresh dill", "1/4 cup chopped fresh dill");
+  if (/herb/.test(lower)) add("fresh parsley", "1/2 cup chopped fresh parsley");
+  if (/oregano|greek|souvlaki/.test(lower)) add("dried oregano", "2 teaspoons dried oregano");
+  if (/paprika/.test(lower)) add("smoked paprika", "2 teaspoons smoked paprika");
+  if (/basil|caprese/.test(lower)) add("fresh basil", "1 cup fresh basil leaves");
+  if (/caprese/.test(lower)) add("fresh mozzarella", "8 ounces fresh mozzarella");
+  if (/feta|greek|mediterranean/.test(lower)) add("feta cheese", "6 ounces feta cheese");
+  if (/tzatziki|yogurt/.test(lower)) add("plain Greek yogurt", "1 cup plain Greek yogurt");
+  if (/cheddar/.test(lower)) add("cheddar cheese", "8 ounces cheddar cheese");
+  if (/caesar/.test(lower)) add("Caesar dressing", "3/4 cup Caesar dressing");
+  if (/olive|niçoise/.test(lower)) add("pitted Kalamata olives", "1 cup pitted Kalamata olives");
+  if (/corn/.test(lower)) add("corn kernels", "2 cups corn kernels");
+
+  const readyToPack = /box|bento|roll-up|bites|cracker kit|pinwheel|skewer|boats/.test(lower);
+  if (!readyToPack) {
+    add("extra-virgin olive oil", "3 tablespoons extra-virgin olive oil");
+    add("garlic cloves", "3 garlic cloves");
+    add("kosher salt", "1 teaspoon kosher salt");
+    add("black pepper", "1/2 teaspoon black pepper");
+  }
+  if (ingredients.length < 4) {
+    add("baby carrots", "2 cups baby carrots");
+    add("English cucumbers", "2 English cucumbers");
+  }
+  return ingredients.filter((ingredient) => isConcreteIngredientName(ingredient.name));
+}
+
+const fallbackRecipes = fallbackTitles.map((title, index) => {
+  const extendedIngredients = concreteFallbackIngredients(title);
+  const ingredientText = extendedIngredients.map((ingredient) => ingredient.name).join(" ");
+  return {
+    id: `demo-${index + 1}`,
+    title,
+    sourceName: ["EatingWell", "Food Network", "Allrecipes", "Serious Eats", "Simply Recipes"][index % 5],
+    sourceUrl: ["https://www.eatingwell.com/recipes/", "https://www.foodnetwork.com/recipes", "https://www.allrecipes.com/recipes/", "https://www.seriouseats.com/recipes-5117985", "https://www.simplyrecipes.com/recipes-5090746"][index % 5],
+    readyInMinutes: 20 + (index % 5) * 5,
+    servings: 4,
+    glutenFree: true,
+    dairyFree: !/\b(?:milk|cheese|cream|butter|yogurt|yoghurt|whey|ghee|mascarpone|mozzarella|parmesan|feta)\b/i.test(ingredientText),
+    image: "",
+    pricePerServing: 280 + (index % 7) * 55,
+    diets: ["gluten free", "Mediterranean"],
+    extendedIngredients,
+  };
+});
 
 function fallbackPage(url: URL, requested: number) {
   const query = url.searchParams.get("q") || "";
@@ -101,6 +217,7 @@ function ingredientAisle(name: string) {
 }
 
 function recipeMatches(recipe: Recipe, url: URL) {
+  if (!Array.isArray(recipe.extendedIngredients) || !recipe.extendedIngredients.some((item) => isConcreteIngredientName(item.name))) return false;
   const ingredients = recipe.extendedIngredients.map((item) => item.name).join(" ");
   const excluded = String(url.searchParams.get("excludeIngredients") || "").split(",").map((item) => item.trim()).filter(Boolean);
   if (excluded.some((item) => `${recipe.title} ${ingredients}`.toLowerCase().includes(item.toLowerCase()))) return false;
@@ -132,7 +249,7 @@ function normalizeMealDb(meal: Record<string, unknown>): Recipe {
     const name = String(meal[`strIngredient${index + 1}`] || "").trim();
     const measure = String(meal[`strMeasure${index + 1}`] || "").trim();
     return name ? { name, aisle: ingredientAisle(name), original: `${measure} ${name}`.trim() } : null;
-  }).filter(Boolean) as Recipe["extendedIngredients"];
+  }).filter((ingredient): ingredient is NonNullable<typeof ingredient> => Boolean(ingredient && isConcreteIngredientName(ingredient.name)));
   const ingredientText = ingredients.map((item) => item.name).join(" ");
   const area = String(meal.strArea || "");
   const tags = String(meal.strTags || "").split(",").map((tag) => tag.trim()).filter(Boolean);
@@ -195,7 +312,14 @@ async function spoonacularRecipes(url: URL, env: AppEnv, requested: number) {
     const response = await fetch(`https://api.spoonacular.com/recipes/complexSearch?${params}`);
     if (!response.ok) return { recipes: [] as Recipe[], status: `error-${response.status}` };
     const data = await response.json() as { results?: Array<Record<string, unknown>> };
-    return { recipes: (data.results || []) as unknown as Recipe[], status: "ok" };
+    const recipes = (data.results || []).map((result) => {
+      const recipe = result as unknown as Recipe;
+      const extendedIngredients = Array.isArray(recipe.extendedIngredients)
+        ? recipe.extendedIngredients.filter((ingredient) => isConcreteIngredientName(ingredient.name))
+        : [];
+      return { ...recipe, extendedIngredients };
+    }).filter((recipe) => recipe.extendedIngredients.length > 0);
+    return { recipes, status: "ok" };
   } catch {
     return { recipes: [] as Recipe[], status: "unreachable" };
   }
@@ -308,7 +432,8 @@ async function catalogRecipes(db: D1Database, url: URL, requested: number) {
   const offset = Math.max(0, Number(url.searchParams.get("offset") || 0));
   return result.results.map((row) => {
     try { return JSON.parse(String(row.recipe_json)) as Recipe; } catch { return null; }
-  }).filter((recipe): recipe is Recipe => Boolean(recipe && recipeMatches(recipe, url))).slice(offset, offset + requested);
+  }).map((recipe) => recipe ? { ...recipe, extendedIngredients: Array.isArray(recipe.extendedIngredients) ? recipe.extendedIngredients.filter((ingredient) => isConcreteIngredientName(ingredient.name)) : [] } : null)
+    .filter((recipe): recipe is Recipe => Boolean(recipe && recipeMatches(recipe, url))).slice(offset, offset + requested);
 }
 
 async function searchRecipes(url: URL, env: AppEnv) {
@@ -429,7 +554,8 @@ async function importRecipe(request: Request, env: AppEnv) {
     const extendedIngredients = ingredientLines.map((original) => {
       const name = original.replace(/^\s*[\d¼½¾⅓⅔⅛⅜⅝⅞.,/\-–—\s]+/, "").replace(/\([^)]*\)/g, "").trim() || original;
       return { name, aisle: ingredientAisle(name), original };
-    });
+    }).filter((ingredient) => isConcreteIngredientName(ingredient.name));
+    if (!extendedIngredients.length) return json({ error: "That page does not provide specific ingredients we can safely add to a grocery list." }, 422);
     const ready = parseDuration(recipeData.totalTime) || parseDuration(recipeData.prepTime) + parseDuration(recipeData.cookTime) || 40;
     const yieldText = Array.isArray(recipeData.recipeYield) ? recipeData.recipeYield[0] : recipeData.recipeYield;
     const servings = Math.max(1, Number(String(yieldText || "4").match(/\d+/)?.[0] || 4));

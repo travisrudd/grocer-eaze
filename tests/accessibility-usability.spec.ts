@@ -145,10 +145,11 @@ test("school lunches stay separate and grocery totals remain editable", async ({
     pricePerServing: 350,
     diets: ["gluten free", "Mediterranean"],
     extendedIngredients: [
-      { name: "fresh vegetables", aisle: "Produce", original: "2 cups fresh vegetables" },
+      { name: "broccoli florets", aisle: "Produce", original: "2 cups broccoli florets" },
       { name: "yellow onions", aisle: "Produce", original: "1/2 cup yellow onions" },
       { name: "yellow onion, diced", aisle: "Produce", original: "2 tablespoons diced yellow onion" },
       { name: "garnish chopped parsley", aisle: "Produce", original: "garnish chopped parsley" },
+      { name: "herbs and pantry staples", aisle: "Pantry", original: "herbs and pantry staples" },
     ],
   }));
   await page.route("**/api/recipes/search?*", async (route) => {
@@ -196,7 +197,8 @@ test("school lunches stay separate and grocery totals remain editable", async ({
 
   await page.getByRole("button", { name: "Grocery list" }).click();
   await expect(page.getByRole("heading", { name: "Confirm what your household needs." })).toBeVisible();
-  await expect(page.getByLabel("Total amount needed for Fresh vegetables")).toHaveValue("1½ cups");
+  await expect(page.getByLabel("Total amount needed for Broccoli florets")).toHaveValue("1½ cups");
+  await expect(page.locator(".ingredient-edit-row").filter({ hasText: "Herbs and pantry staples" })).toHaveCount(0);
   await expect(page.getByLabel(/Total amount needed for Yellow onions/)).toHaveCount(1);
   await expect(page.getByLabel(/Total amount needed for Yellow onions/)).toHaveValue("0.47 cups");
   await expect(page.getByLabel("Total amount needed for Individual chip bags")).toHaveValue("1");
@@ -208,8 +210,20 @@ test("school lunches stay separate and grocery totals remain editable", async ({
   await page.getByLabel(/Correct amount or value/).fill("1 bunch");
   await page.getByRole("button", { name: "Send report" }).click();
   await expect.poll(() => ingredientReportBody?.ingredient).toBe("Garnish chopped parsley");
-  await missingAmountRow.getByRole("button", { name: "Use as needed" }).click();
-  await expect(missingAmountRow.getByLabel("Total amount needed for Garnish chopped parsley")).toHaveValue("As needed");
+  const amountInput = missingAmountRow.getByLabel("Total amount needed for Garnish chopped parsley");
+  const asNeededToggle = missingAmountRow.getByRole("checkbox", { name: /Use as needed/ });
+  await amountInput.fill("1 bunch");
+  await asNeededToggle.check();
+  await expect(amountInput).toBeDisabled();
+  await expect(amountInput).not.toHaveAttribute("required", "");
+  await expect(amountInput).toHaveValue("");
+  await asNeededToggle.uncheck();
+  await expect(amountInput).toBeEnabled();
+  await expect(amountInput).toHaveValue("1 bunch");
+  await asNeededToggle.check();
+  const broccoliRow = page.locator(".ingredient-edit-row").filter({ hasText: "Broccoli florets" });
+  const alignedControls = await broccoliRow.locator(":scope > label").evaluateAll((labels) => labels.map((label) => Math.round(label.getBoundingClientRect().top)));
+  if (await page.evaluate(() => window.innerWidth > 800)) expect(Math.max(...alignedControls) - Math.min(...alignedControls)).toBeLessThanOrEqual(2);
   await page.locator(".already-have-control input").first().check();
   await expect(page.getByRole("button", { name: "Open in Instacart" })).toHaveCount(0);
   await page.evaluate(() => { window.location.hash = "#delivery"; });

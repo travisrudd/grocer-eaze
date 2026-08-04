@@ -160,9 +160,10 @@ test("restores returning accounts and hardens passwordless sign-in", async () =>
 });
 
 test("keeps school lunches separate and turns merged ingredients into editable totals", async () => {
-  const [page, api] = await Promise.all([
+  const [page, api, css] = await Promise.all([
     source("app/page.tsx"),
     source("worker/api.ts"),
+    source("app/globals.css"),
   ]);
 
   assert.match(page, /const lunchTarget = totalLunchDays/);
@@ -186,6 +187,9 @@ test("keeps school lunches separate and turns merged ingredients into editable t
   assert.match(page, /mergeIngredientQuantities/);
   assert.match(page, /Amount not provided/);
   assert.match(page, /Use as needed/);
+  assert.match(page, /asNeededIngredients/);
+  assert.match(page, /disabled=\{useAsNeeded\}/);
+  assert.match(page, /schoolLunchSideIngredients/);
   assert.match(page, /Report incorrect value/);
   assert.match(page, /\/api\/ingredient-feedback/);
   assert.match(page, /grocery-approval-actions/);
@@ -193,6 +197,11 @@ test("keeps school lunches separate and turns merged ingredients into editable t
   assert.match(api, /WHERE id = \? AND owner_id = \?/);
   assert.match(api, /url\.pathname === "\/api\/ingredient-feedback"/);
   assert.match(api, /hasProductAccess\(sessionUser\)/);
+  assert.match(api, /concreteFallbackIngredients/);
+  assert.match(api, /isConcreteIngredientName/);
+  assert.doesNotMatch(api, /extendedIngredients:\s*\[\{ name: "fresh vegetables"/i);
+  assert.match(css, /grid-template-columns:\s*minmax\(180px, 1\.2fr\)\s+minmax\(160px, \.85fr\)\s+minmax\(140px, \.65fr\)\s+minmax\(150px, \.7fr\)/);
+  assert.match(css, /ingredient-choice-control/);
 });
 
 test("tracks recipe provider expansion as a release-safe backlog item", async () => {
@@ -229,6 +238,8 @@ test("syncs active plans to owner-scoped account storage with a device fallback"
   assert.match(page, /grocer-eaze-active-plan:\$\{authData\.user\.id\}/);
   assert.match(page, /grocer-eaze-active-plan:\$\{planStorageOwnerId\}/);
   assert.match(page, /fetch\("\/api\/active-plan"/);
+  assert.match(page, /asNeededIngredients, confirmedIngredientsSignature/);
+  assert.match(page, /saved\.asNeededIngredients/);
   assert.match(api, /WHERE owner_id = \?/);
   assert.match(api, /INSERT INTO active_plans/);
   assert.match(schema, /activePlans/);

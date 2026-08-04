@@ -36,6 +36,13 @@ const defaultRecipeFilters = { query: "", kind: "All meals", maxTime: "Any time"
 const recipeBatchSize = 12;
 const missingIngredientAmount = "Amount not provided";
 const schoolLunchSideOptions = ["Individual chip bags", "Fresh fruit", "Yogurt cups", "Crunchy vegetables", "Snack bars"];
+const schoolLunchSideIngredients: Record<string, { name: string; aisle: string }> = {
+  "Individual chip bags": { name: "individual chip bags", aisle: "Pantry" },
+  "Fresh fruit": { name: "apples", aisle: "Produce" },
+  "Yogurt cups": { name: "yogurt cups", aisle: "Refrigerated" },
+  "Crunchy vegetables": { name: "baby carrots", aisle: "Produce" },
+  "Snack bars": { name: "gluten-free snack bars", aisle: "Pantry" },
+};
 const onboardingSteps = [
   { eyebrow: "STEP 1 OF 4", title: "Start with your household.", body: "Choose your dates, meals, budget, and dietary needs. Family preferences are included automatically." },
   { eyebrow: "STEP 2 OF 4", title: "Browse a catalog built for you.", body: "Filter a large recipe collection, save favorites, and add each recipe to lunch, dinner, or school lunch." },
@@ -124,6 +131,13 @@ function canonicalIngredientKey(value: string) {
   else if (last.length > 4 && last.endsWith("ies")) words[words.length - 1] = `${last.slice(0, -3)}y`;
   else if (last.length > 3 && last.endsWith("s") && !/(?:ss|us|is|ous)$/.test(last)) words[words.length - 1] = last.slice(0, -1);
   return words.join(" ");
+}
+
+const genericIngredientLabel = /^(?:fresh\s+)?(?:vegetables?|produce|fruit|proteins?|lean protein or beans|beans or protein|herbs?|herbs and pantry staples|pantry staples|seasonings?|garnish|toppings?|sides?)$/i;
+
+function isConcreteIngredientName(value: unknown) {
+  const normalized = String(value || "").replace(/[–—/&+]+/g, " ").replace(/\s+/g, " ").trim();
+  return normalized.length > 1 && !genericIngredientLabel.test(normalized);
 }
 
 const convertibleMeasurements: Record<string, { dimension: "volume" | "weight"; factor: number }> = {
@@ -320,6 +334,7 @@ export default function Home() {
   const [confirmedIngredientsSignature, setConfirmedIngredientsSignature] = useState("");
   const [reviewedPlanSignature, setReviewedPlanSignature] = useState("");
   const [alreadyHaveIngredients, setAlreadyHaveIngredients] = useState<string[]>([]);
+  const [asNeededIngredients, setAsNeededIngredients] = useState<string[]>([]);
   const [planStorageOwnerId, setPlanStorageOwnerId] = useState("");
   const [planSaveStatus, setPlanSaveStatus] = useState("");
   const [instacartEnabled, setInstacartEnabled] = useState(false);
@@ -400,16 +415,10 @@ export default function Home() {
     const mealServings = meal.kind === "School lunch" ? kids * .5 : servingEquivalents;
     const scale = mealServings / Math.max(1, meal.recipeServings || 4);
     const source = { title: meal.title, sourceName: meal.sourceName || "Unknown source", sourceUrl: meal.sourceUrl || "" };
-    const recipeIngredients = (meal.ingredients || []).map((ingredient) => ({ ingredient, scale, source }));
+    const recipeIngredients = (meal.ingredients || []).filter((ingredient) => isConcreteIngredientName(ingredient.name)).map((ingredient) => ({ ingredient, scale, source }));
     if (meal.kind !== "School lunch") return recipeIngredients;
-    const sides = schoolLunchSides.map((side) => ({
-      ingredient: {
-        name: side.toLowerCase(),
-        aisle: /fruit|vegetable/i.test(side) ? "Produce" : /yogurt/i.test(side) ? "Refrigerated" : "Pantry",
-        original: `${kids} ${side.toLowerCase()}`,
-      },
-      scale: 1,
-      source,
+    const sides = schoolLunchSides.map((side) => schoolLunchSideIngredients[side]).filter(Boolean).map((ingredient) => ({
+      ingredient: { ...ingredient, original: `${kids} ${ingredient.name}` }, scale: 1, source,
     }));
     return [...recipeIngredients, ...sides];
   }), [plannedMeals, kids, servingEquivalents, schoolLunchSides]);
@@ -446,7 +455,7 @@ export default function Home() {
         const current = merged.get(key) || { ...entry, key: `final:${key}`, name, occurrences: 0, originals: [], quantities: [] };
         current.occurrences += entry.occurrences;
         entry.originals.forEach((original) => { if (!current.originals.includes(original)) current.originals.push(original); });
-        current.quantities.push(ingredientAdjustments[entry.key]?.trim() || entry.suggestedQuantity);
+        current.quantities.push(asNeededIngredients.includes(entry.key) ? "As needed" : ingredientAdjustments[entry.key]?.trim() || entry.suggestedQuantity);
         if (!current.aisle && entry.aisle) current.aisle = entry.aisle;
         merged.set(key, current);
       });
@@ -459,11 +468,11 @@ export default function Home() {
       shoppingEntries: consolidate(groceryEntries.filter((entry) => !alreadyHaveIngredients.includes(entry.key))),
       alreadyHaveEntries: consolidate(groceryEntries.filter((entry) => alreadyHaveIngredients.includes(entry.key))),
     };
-  }, [groceryEntries, ingredientNameEdits, ingredientAdjustments, alreadyHaveIngredients]);
+  }, [groceryEntries, ingredientNameEdits, ingredientAdjustments, alreadyHaveIngredients, asNeededIngredients]);
   const unresolvedAmountEntries = useMemo(() => groceryEntries.filter((entry) => {
-    if (alreadyHaveIngredients.includes(entry.key)) return false;
+    if (alreadyHaveIngredients.includes(entry.key) || asNeededIngredients.includes(entry.key)) return false;
     return !isAcceptedIngredientAmount(ingredientAdjustments[entry.key] ?? entry.suggestedQuantity);
-  }), [groceryEntries, ingredientAdjustments, alreadyHaveIngredients]);
+  }), [groceryEntries, ingredientAdjustments, alreadyHaveIngredients, asNeededIngredients]);
   const groceryGroups = useMemo(() => {
     const groups: Record<string, { icon: string; title: string; items: typeof groceryEntries }> = {
       Produce: { icon: "🥬", title: "Produce", items: [] },
@@ -486,7 +495,8 @@ export default function Home() {
     ingredientAdjustments,
     ingredientNameEdits,
     alreadyHaveIngredients: [...alreadyHaveIngredients].sort(),
-  }), [planDays, adults, kids, mealType, kidLunches, schoolLunchSides, plannedMeals, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients]);
+    asNeededIngredients: [...asNeededIngredients].sort(),
+  }), [planDays, adults, kids, mealType, kidLunches, schoolLunchSides, plannedMeals, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, asNeededIngredients]);
   const ingredientsConfirmed = Boolean(planSignature && confirmedIngredientsSignature === planSignature);
   const groceryListApproved = Boolean(planSignature && reviewedPlanSignature === planSignature);
   const recipeSources = useMemo(() => [...new Set(recipeIdeas.map((meal) => meal.sourceName).filter(Boolean) as string[])].sort(), [recipeIdeas]);
@@ -601,9 +611,16 @@ export default function Home() {
       if (typeof saved.exclusions === "string") setExclusions(saved.exclusions);
       if (saved.location) { setLocation(saved.location); setLocationQuery(saved.location); }
       if (saved.calendarOrder === "random") setCalendarOrder("random");
-      if (saved.ingredientAdjustments && typeof saved.ingredientAdjustments === "object") setIngredientAdjustments(saved.ingredientAdjustments);
+      const savedAdjustments = saved.ingredientAdjustments && typeof saved.ingredientAdjustments === "object"
+        ? Object.fromEntries(Object.entries(saved.ingredientAdjustments as Record<string, unknown>).filter(([, value]) => String(value).trim().toLowerCase() !== "as needed").map(([key, value]) => [key, String(value)]))
+        : {};
+      const legacyAsNeeded = saved.ingredientAdjustments && typeof saved.ingredientAdjustments === "object"
+        ? Object.entries(saved.ingredientAdjustments as Record<string, unknown>).filter(([, value]) => String(value).trim().toLowerCase() === "as needed").map(([key]) => key)
+        : [];
+      setIngredientAdjustments(savedAdjustments);
       if (saved.ingredientNameEdits && typeof saved.ingredientNameEdits === "object") setIngredientNameEdits(saved.ingredientNameEdits);
       if (Array.isArray(saved.alreadyHaveIngredients)) setAlreadyHaveIngredients(saved.alreadyHaveIngredients.map(String).slice(0, 500));
+      setAsNeededIngredients([...new Set([...(Array.isArray(saved.asNeededIngredients) ? saved.asNeededIngredients.map(String) : []), ...legacyAsNeeded])].slice(0, 500));
       if (typeof saved.confirmedIngredientsSignature === "string") setConfirmedIngredientsSignature(saved.confirmedIngredientsSignature);
       else if (typeof saved.reviewedPlanSignature === "string") setConfirmedIngredientsSignature(saved.reviewedPlanSignature);
       if (typeof saved.reviewedPlanSignature === "string") setReviewedPlanSignature(saved.reviewedPlanSignature);
@@ -704,7 +721,7 @@ export default function Home() {
       recipeIdeas: recipeIdeas.slice(0, 90),
       planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
       kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder,
-      ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, confirmedIngredientsSignature, reviewedPlanSignature,
+      ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, asNeededIngredients, confirmedIngredientsSignature, reviewedPlanSignature,
       deliveryActions, groceryDestination, calendarProvider, emailRecipients,
     };
     try { window.localStorage.setItem(`grocer-eaze-active-plan:${planStorageOwnerId}`, JSON.stringify(plan)); }
@@ -720,7 +737,7 @@ export default function Home() {
       }
     }, 750);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, confirmedIngredientsSignature, reviewedPlanSignature, deliveryActions, groceryDestination, calendarProvider, emailRecipients]);
+  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, planDays, adults, kids, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, asNeededIngredients, confirmedIngredientsSignature, reviewedPlanSignature, deliveryActions, groceryDestination, calendarProvider, emailRecipients]);
 
   useEffect(() => {
     if (!planHydrated || !user) return;
@@ -955,7 +972,7 @@ export default function Home() {
       ? recipe.extendedIngredients.map((ingredient) => {
         const item = ingredient as Record<string, unknown>;
         return { name: String(item.name || item.nameClean || item.original || ""), aisle: String(item.aisle || ""), original: String(item.original || "") };
-      }).filter((ingredient) => ingredient.name)
+      }).filter((ingredient) => isConcreteIngredientName(ingredient.name))
       : [];
     const recipeId = String(recipe.id || `recipe-${index}`);
     const rawImage = String(recipe.image || "");
@@ -1018,15 +1035,17 @@ export default function Home() {
       const previousAdjustments = ingredientAdjustments;
       const previousNameEdits = ingredientNameEdits;
       const previousAlreadyHave = alreadyHaveIngredients;
+      const previousAsNeeded = asNeededIngredients;
       const previousIngredientsConfirmation = confirmedIngredientsSignature;
       const previousReview = reviewedPlanSignature;
       if (previousPlan.length) {
-        setUndoAction({ message: "Your previous schedule was cleared for the new catalog.", restore: () => { setPlannedMeals(previousPlan); setIngredientAdjustments(previousAdjustments); setIngredientNameEdits(previousNameEdits); setAlreadyHaveIngredients(previousAlreadyHave); setConfirmedIngredientsSignature(previousIngredientsConfirmation); setReviewedPlanSignature(previousReview); } });
+        setUndoAction({ message: "Your previous schedule was cleared for the new catalog.", restore: () => { setPlannedMeals(previousPlan); setIngredientAdjustments(previousAdjustments); setIngredientNameEdits(previousNameEdits); setAlreadyHaveIngredients(previousAlreadyHave); setAsNeededIngredients(previousAsNeeded); setConfirmedIngredientsSignature(previousIngredientsConfirmation); setReviewedPlanSignature(previousReview); } });
       }
       setPlannedMeals([]);
       setIngredientAdjustments({});
       setIngredientNameEdits({});
       setAlreadyHaveIngredients([]);
+      setAsNeededIngredients([]);
       setConfirmedIngredientsSignature("");
       setReviewedPlanSignature("");
       setRecipeIdeas(uniqueIdeas);
@@ -1185,15 +1204,17 @@ export default function Home() {
     const previousAdjustments = ingredientAdjustments;
     const previousNameEdits = ingredientNameEdits;
     const previousAlreadyHave = alreadyHaveIngredients;
+    const previousAsNeeded = asNeededIngredients;
     const previousIngredientsConfirmation = confirmedIngredientsSignature;
     const previousReview = reviewedPlanSignature;
     setPlannedMeals([]);
     setIngredientAdjustments({});
     setIngredientNameEdits({});
     setAlreadyHaveIngredients([]);
+    setAsNeededIngredients([]);
     setConfirmedIngredientsSignature("");
     setReviewedPlanSignature("");
-    showUndo("All selected meals were cleared.", () => { setPlannedMeals(previous); setIngredientAdjustments(previousAdjustments); setIngredientNameEdits(previousNameEdits); setAlreadyHaveIngredients(previousAlreadyHave); setConfirmedIngredientsSignature(previousIngredientsConfirmation); setReviewedPlanSignature(previousReview); });
+    showUndo("All selected meals were cleared.", () => { setPlannedMeals(previous); setIngredientAdjustments(previousAdjustments); setIngredientNameEdits(previousNameEdits); setAlreadyHaveIngredients(previousAlreadyHave); setAsNeededIngredients(previousAsNeeded); setConfirmedIngredientsSignature(previousIngredientsConfirmation); setReviewedPlanSignature(previousReview); });
   }
 
   function movePlannedMeal(id: string, direction: -1 | 1) {
@@ -1437,6 +1458,12 @@ export default function Home() {
     setReviewedPlanSignature("");
   }
 
+  function toggleAsNeeded(key: string) {
+    setAsNeededIngredients((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
+    setConfirmedIngredientsSignature("");
+    setReviewedPlanSignature("");
+  }
+
   async function toggleFavorite(meal: Meal) {
     const saved = favorites.includes(meal.title);
     setFavorites((current) => saved ? current.filter((item) => item !== meal.title) : [...current, meal.title]);
@@ -1492,6 +1519,7 @@ export default function Home() {
   }
 
   function groceryItemQuantity(entry: { key: string; suggestedQuantity: string }) {
+    if (asNeededIngredients.includes(entry.key)) return "As needed";
     return ingredientAdjustments[entry.key]?.trim() || entry.suggestedQuantity;
   }
 
@@ -1607,7 +1635,7 @@ export default function Home() {
     setIngredientReport({
       key: entry.key,
       name: ingredientNameEdits[entry.key]?.trim() || entry.name,
-      amount: ingredientAdjustments[entry.key]?.trim() || entry.suggestedQuantity,
+      amount: asNeededIngredients.includes(entry.key) ? "As needed" : ingredientAdjustments[entry.key]?.trim() || entry.suggestedQuantity,
       originals: entry.originals.slice(0, 5),
       sources: entry.sources.slice(0, 5),
     });
@@ -1960,15 +1988,18 @@ export default function Home() {
             <div className="ingredient-review-body">
               <div className="ingredient-review-title"><div><span className="mini-label">INGREDIENT REVIEW</span><h3 id="ingredient-review-heading">Edit amounts and check your kitchen</h3></div><small>{alreadyHaveEntries.length} marked already have</small></div>
               <p>Totals are scaled to {servingEquivalents} serving equivalent{servingEquivalents === 1 ? "" : "s"} and merged where recipe ingredient names match. Edit package amounts as needed, then mark anything already in your kitchen so it stays off every shopping export.</p>
-              <div className="ingredient-review-columns" aria-hidden="true"><span>Ingredient</span><span>Total needed</span><span>Shopping status</span></div>
+              <div className="ingredient-review-columns" aria-hidden="true"><span>Ingredient</span><span>Total needed</span><span>Amount option</span><span>Shopping status</span></div>
               {unresolvedAmountEntries.length > 0 && <p className="ingredient-review-alert" role="alert"><strong>{unresolvedAmountEntries.length} amount{unresolvedAmountEntries.length === 1 ? " needs" : "s need"} review.</strong> Recipe descriptions are never used as quantities. Enter an amount or explicitly choose “Use as needed” before continuing.</p>}
               <div className="ingredient-review-list">{groceryEntries.map((entry) => {
                 const amountValue = ingredientAdjustments[entry.key] ?? entry.suggestedQuantity;
-                const amountNeedsReview = !alreadyHaveIngredients.includes(entry.key) && !isAcceptedIngredientAmount(amountValue);
-                return <div className={`ingredient-edit-row ${alreadyHaveIngredients.includes(entry.key) ? "already-have" : ""} ${amountNeedsReview ? "needs-review" : ""}`} key={entry.key}>
+                const useAsNeeded = asNeededIngredients.includes(entry.key);
+                const alreadyHave = alreadyHaveIngredients.includes(entry.key);
+                const amountNeedsReview = !alreadyHave && !useAsNeeded && !isAcceptedIngredientAmount(amountValue);
+                return <div className={`ingredient-edit-row ${alreadyHave ? "already-have" : ""} ${useAsNeeded ? "as-needed" : ""} ${amountNeedsReview ? "needs-review" : ""}`} key={entry.key}>
                 <label><span>Ingredient name</span><input className="text-input" value={ingredientNameEdits[entry.key] ?? entry.name} onChange={(event) => { setIngredientNameEdits((current) => ({ ...current, [entry.key]: event.target.value })); setConfirmedIngredientsSignature(""); setReviewedPlanSignature(""); }} aria-label={`Ingredient name for ${entry.name}`} /></label>
-                <label className="ingredient-amount-control"><span>Total needed</span><input className="text-input" value={amountValue === missingIngredientAmount ? "" : amountValue} placeholder={missingIngredientAmount} aria-invalid={amountNeedsReview} onChange={(event) => { setIngredientAdjustments((current) => ({ ...current, [entry.key]: event.target.value })); setConfirmedIngredientsSignature(""); setReviewedPlanSignature(""); }} aria-label={`Total amount needed for ${entry.name}`} />{amountNeedsReview && <small>Amount unavailable—enter a quantity.</small>}<button type="button" className="text-button compact" onClick={() => { setIngredientAdjustments((current) => ({ ...current, [entry.key]: "As needed" })); setConfirmedIngredientsSignature(""); setReviewedPlanSignature(""); }}>Use as needed</button></label>
-                <label className="already-have-control"><input type="checkbox" checked={alreadyHaveIngredients.includes(entry.key)} onChange={() => toggleAlreadyHave(entry.key)} /><span>Already have</span><small>{alreadyHaveIngredients.includes(entry.key) ? "Excluded from shopping" : "Keep on shopping list"}</small></label>
+                <label className="ingredient-amount-control"><span>Total needed</span><input className="text-input" value={useAsNeeded || amountValue === missingIngredientAmount ? "" : amountValue} placeholder={useAsNeeded ? "Not required" : missingIngredientAmount} disabled={useAsNeeded} required={!alreadyHave && !useAsNeeded} aria-invalid={amountNeedsReview} onChange={(event) => { setIngredientAdjustments((current) => ({ ...current, [entry.key]: event.target.value })); setConfirmedIngredientsSignature(""); setReviewedPlanSignature(""); }} aria-label={`Total amount needed for ${entry.name}`} />{amountNeedsReview && <small>Amount unavailable—enter a quantity.</small>}</label>
+                <label className={`ingredient-choice-control as-needed-control ${useAsNeeded ? "selected" : ""}`}><input type="checkbox" checked={useAsNeeded} onChange={() => toggleAsNeeded(entry.key)} /><span>Use as needed</span><small>{useAsNeeded ? "Amount not required" : "Use a measured amount"}</small></label>
+                <label className={`ingredient-choice-control already-have-control ${alreadyHave ? "selected" : ""}`}><input type="checkbox" checked={alreadyHave} onChange={() => toggleAlreadyHave(entry.key)} /><span>Already have</span><small>{alreadyHave ? "Excluded from shopping" : "Keep on shopping list"}</small></label>
                 <small>Combined from {entry.occurrences} recipe use{entry.occurrences === 1 ? "" : "s"}{entry.originals[0] ? ` · source example: ${entry.originals[0]}` : ""}</small>
                 <button type="button" className="report-ingredient-button" onClick={() => openIngredientReport(entry)}>Report incorrect value</button>
               </div>})}</div>
