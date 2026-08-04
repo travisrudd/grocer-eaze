@@ -124,29 +124,26 @@ test("shares grocery lists cross-platform and safely links emailed recipes", asy
   ]);
 
   assert.match(page, /navigator\.share/);
-  assert.match(page, /useState<"text" \| "email" \| "copy" \| "notes">\("text"\)/);
-  assert.match(page, /Text list/);
-  assert.match(page, /Email list/);
-  assert.match(page, /Copy list to clipboard/);
-  assert.match(page, /groceryEmailRecipients/);
-  assert.match(page, /groceryTextRecipient/);
-  assert.match(page, /Add or edit phone number/);
-  assert.match(page, /Add or edit recipients/);
-  assert.match(page, /sms:\$\{encodeURIComponent\(recipient\)\}\?&body=\$\{encodeURIComponent\(text\)\}/);
-  assert.match(page, /mailto:\$\{recipients\.map\(\(address\) => encodeURIComponent\(address\)\)\.join\(","\)\}\?subject=\$\{encodeURIComponent\(title\)\}&body=\$\{encodeURIComponent\(text\)\}/);
+  assert.match(page, /type DeliveryRecipient/);
+  assert.match(page, /Text message/);
+  assert.match(page, /Copy grocery list/);
+  assert.match(page, /Share to Notes or Keep/);
+  assert.match(page, /openTextDraft/);
+  assert.match(page, /sms:\$\{encodeURIComponent\(recipient\.address\)\}\?&body=\$\{encodeURIComponent\(message\)\}/);
   assert.match(page, /digits\.length < 7 \|\| digits\.length > 15/);
-  assert.match(page, /Who should receive the grocery list\?/);
+  assert.match(page, /Who else should receive the plan\?/);
   assert.match(page, /Groceries \+ \$\{groceryDateLabel\(\)\}/);
   assert.doesNotMatch(page, /Apple Reminders|Reminder or task list/);
   assert.match(page, /function scrollViewportToTop\(\)/);
   assert.match(page, /root\.style\.scrollBehavior = "auto"/);
   assert.match(page, /window\.scrollTo\(0, 0\)/);
-  assert.match(page, /Choose what happens next/);
-  assert.match(page, /Select all/);
+  assert.match(page, /Who should receive your plan/);
+  assert.match(page, /Select everything/);
+  assert.match(api, /href="\$\{escapeHtml\(meal\.readerUrl\)\}"/);
   assert.match(page, /meals: plannedMeals\.map/);
   assert.match(api, /recipients/);
-  assert.match(api, /linkedTitle = recipeUrl \? `<a href=/);
-  assert.match(api, /escapeHtml\(recipeUrl\)/);
+  assert.match(api, /href="\$\{escapeHtml\(meal\.sourceUrl\)\}"/);
+  assert.match(api, /for \(const recipient of recipients\)/);
 });
 
 test("resolves recipe thumbnails from source metadata with a licensed fallback", async () => {
@@ -232,6 +229,36 @@ test("keeps school lunches separate and turns merged ingredients into editable t
   assert.doesNotMatch(css, /\.ingredient-review-list\s*\{[^}]*overflow-y/);
 });
 
+test("uses a recipient-first, private send and save flow", async () => {
+  const [page, api, css] = await Promise.all([
+    source("app/page.tsx"),
+    source("worker/api.ts"),
+    source("app/globals.css"),
+  ]);
+
+  assert.match(page, /Who should receive your plan\?/);
+  assert.match(page, /Send everything to myself/);
+  assert.match(page, /Choose what each person receives/);
+  assert.match(page, /sanitizeDeliveryRecipients/);
+  assert.match(page, /pendingTextRecipients/);
+  assert.match(page, /Requires an email recipient/);
+  assert.match(page, /Each recipient gets a separate private draft/);
+  assert.match(page, /Copy grocery list/);
+  assert.match(page, /Share to Notes or Keep/);
+  assert.doesNotMatch(page, /groceryRecipientDialog/);
+  assert.doesNotMatch(page, /emailDialogOpen/);
+  assert.match(api, /deliveryEmailAllowed/);
+  assert.match(api, /delivery-email:/);
+  assert.match(api, /Idempotency-Key/);
+  assert.match(api, /to: \[recipient\]/);
+  assert.match(api, /grocer-eaze-meal-plan\.ics/);
+  assert.match(api, /attachments/);
+  assert.match(api, /One or more clean recipe links are missing/);
+  assert.match(css, /delivery-recipient-card/);
+  assert.match(css, /recipient-content-options/);
+  assert.match(css, /device-action-grid/);
+});
+
 test("tracks recipe provider expansion as a release-safe backlog item", async () => {
   const backlog = await source("docs/product-backlog.md");
   assert.match(backlog, /FatSecret Platform API/);
@@ -300,9 +327,9 @@ test("creates private clean-recipe readers for calendar links", async () => {
   ]);
 
   assert.match(page, /fetch\("\/api\/recipe-readers"/);
-  assert.match(page, /Clean recipe: \$\{readerUrl\}/);
+  assert.match(page, /Clean recipe: \$\{recipe\.readerUrl\}/);
   assert.match(page, /Original source: \$\{recipe\.sourceUrl\}/);
-  assert.match(page, /URL:\$\{calendarText\(readerUrl\)\}/);
+  assert.match(page, /URL:\$\{calendarText\(recipe\.readerUrl\)\}/);
   assert.match(api, /recipe_readers/);
   assert.match(api, /crypto\.getRandomValues\(new Uint8Array\(32\)\)/);
   assert.match(api, /WHERE owner_id = \? AND recipe_key = \?/);

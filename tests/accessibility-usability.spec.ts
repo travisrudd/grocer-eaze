@@ -135,6 +135,7 @@ test("nearby stores can be added, reprioritized, removed, and retained through t
 test("school lunches stay separate and grocery totals remain editable", async ({ page }) => {
   let ingredientReportBody: Record<string, unknown> | null = null;
   let readerRequestBody: { meals?: Array<{ mealId?: string }> } | null = null;
+  const deliveryEmailBodies: Array<Record<string, unknown>> = [];
   const recipes = Array.from({ length: 12 }, (_, index) => ({
     id: index + 1,
     title: `Lunch planning recipe ${index + 1}`,
@@ -179,6 +180,10 @@ test("school lunches stay separate and grocery totals remain editable", async ({
       contentType: "application/json",
       body: JSON.stringify({ readers: (readerRequestBody.meals || []).map((meal, index) => ({ mealId: meal.mealId, url: `https://grocer-eaze.com/recipe/reader-${index}` })) }),
     });
+  });
+  await page.route("**/api/email", async (route) => {
+    deliveryEmailBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sent: true }) });
   });
 
   await openPlan(page);
@@ -267,44 +272,53 @@ test("school lunches stay separate and grocery totals remain editable", async ({
   await expect(page.getByRole("heading", { name: "Review the list you’ll take shopping." })).toBeVisible();
   await expect(page.getByText("Approve your shopping list before choosing how to send or save it.")).toBeVisible();
   await page.getByRole("button", { name: "Approve list & choose how to send or save →" }).click();
-  await expect(page.getByRole("heading", { name: "Choose what happens next." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Who should receive your plan?" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
-  await expect(page.getByRole("button", { name: "Select all" })).toBeVisible();
-  await expect(page.getByRole("radio", { name: "Text list" })).toBeChecked();
-  await expect(page.getByRole("radio", { name: "Email list" })).not.toBeChecked();
-  await expect(page.getByRole("radio", { name: "Copy list to clipboard" })).not.toBeChecked();
-  await expect(page.getByRole("radio", { name: "Note" })).not.toBeChecked();
-  await expect(page.getByRole("radio", { name: "Reminder or task list" })).toHaveCount(0);
-  await expect(page.getByText("Phone number needed")).toBeVisible();
-  await page.getByRole("button", { name: "Run 1 action →" }).click();
-  const textRecipientDialog = page.getByRole("dialog", { name: "Who should receive the grocery list?" });
-  await expect(textRecipientDialog.getByLabel("Phone number")).toHaveAttribute("type", "tel");
-  await textRecipientDialog.getByLabel("Phone number").fill("123");
-  await textRecipientDialog.getByRole("button", { name: "Save recipient" }).click();
-  await expect(textRecipientDialog.getByRole("alert")).toContainText("7 to 15 digits");
-  await textRecipientDialog.getByLabel("Phone number").fill("(312) 555-0123");
-  await textRecipientDialog.getByRole("button", { name: "Save recipient" }).click();
-  await expect(page.getByText("Text recipient ready.")).toBeVisible();
-  await page.getByRole("button", { name: "Add or edit phone number" }).click();
-  await expect(textRecipientDialog.getByLabel("Phone number")).toHaveValue("3125550123");
-  await textRecipientDialog.getByRole("button", { name: "Cancel" }).click();
-  await page.getByRole("radio", { name: "Email list" }).check();
-  await page.locator(".delivery-action-grid article").filter({ hasText: "Send grocery list" }).getByRole("button", { name: "Add or edit recipients" }).click();
-  const groceryEmailDialog = page.getByRole("dialog", { name: "Who should receive the grocery list?" });
-  await groceryEmailDialog.getByLabel("Email recipients").fill("shopper@example.com, family@example.com");
-  await groceryEmailDialog.getByRole("button", { name: "Save recipients" }).click();
-  await expect(page.getByText("2 grocery-list email recipients ready.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send all to me →" })).toBeVisible();
+  const myselfCard = page.locator(".delivery-recipient-card").filter({ hasText: "ACCOUNT" });
+  await expect(myselfCard.getByRole("checkbox", { name: /Recipes/ })).toBeChecked();
+  await expect(myselfCard.getByRole("checkbox", { name: /Grocery list/ })).toBeChecked();
+  await expect(myselfCard.getByRole("checkbox", { name: /Calendar invite/ })).toBeChecked();
+
+  await page.getByRole("button", { name: "+ Add recipient" }).click();
+  let recipientDialog = page.getByRole("dialog", { name: "Who else should receive the plan?" });
+  await recipientDialog.getByLabel(/Name/).fill("Alex");
+  await recipientDialog.getByLabel("Email address").fill("not-an-email");
+  await recipientDialog.getByRole("button", { name: "Save recipient" }).click();
+  await expect(recipientDialog.getByRole("alert")).toContainText("valid email");
+  await recipientDialog.getByLabel("Email address").fill("alex@example.com");
+  await recipientDialog.getByRole("button", { name: "Save recipient" }).click();
+  const alexCard = page.locator(".delivery-recipient-card").filter({ hasText: "alex@example.com" });
+  await expect(alexCard.getByRole("checkbox", { name: /Recipes/ })).toBeChecked();
+  await expect(alexCard.getByRole("checkbox", { name: /Grocery list/ })).toBeChecked();
+  await expect(alexCard.getByRole("checkbox", { name: /Calendar invite/ })).not.toBeChecked();
+  await alexCard.getByRole("checkbox", { name: /Calendar invite/ }).check();
+
+  await page.getByRole("button", { name: "+ Add recipient" }).click();
+  recipientDialog = page.getByRole("dialog", { name: "Who else should receive the plan?" });
+  await recipientDialog.getByLabel(/Name/).fill("Jordan");
+  await recipientDialog.getByLabel("Send by").selectOption("text");
+  await expect(recipientDialog.getByLabel("Phone number")).toHaveAttribute("type", "tel");
+  await recipientDialog.getByLabel("Phone number").fill("123");
+  await recipientDialog.getByRole("button", { name: "Save recipient" }).click();
+  await expect(recipientDialog.getByRole("alert")).toContainText("7 to 15 digits");
+  await recipientDialog.getByLabel("Phone number").fill("(312) 555-0123");
+  await recipientDialog.getByRole("button", { name: "Save recipient" }).click();
+  const jordanCard = page.locator(".delivery-recipient-card").filter({ hasText: "3125550123" });
+  await expect(jordanCard.getByRole("checkbox", { name: /Calendar invite/ })).toBeDisabled();
+  await expect(jordanCard.getByText("Requires an email recipient")).toBeVisible();
+
+  await page.getByRole("button", { name: "Select everything" }).click();
+  await page.getByRole("button", { name: "Clear all" }).click();
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.getByRole("radio", { name: "Copy list to clipboard" }).check();
-  await page.getByRole("button", { name: "Run 1 action →" }).click();
+  await page.getByRole("checkbox", { name: /Copy grocery list/ }).check();
+  await page.getByRole("button", { name: "Send or save 1 choice →" }).click();
   await expect(page.getByText("Grocery list copied to your clipboard.")).toBeVisible();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain("Groceries +");
-  const groceryAction = page.locator(".delivery-action-grid article").filter({ hasText: "Send grocery list" });
-  const calendarAction = page.locator(".delivery-action-grid article").filter({ hasText: "Save meal plan to calendar" });
-  await groceryAction.getByRole("checkbox").uncheck();
-  await calendarAction.getByRole("checkbox").check();
+  await page.getByRole("checkbox", { name: /Copy grocery list/ }).uncheck();
+  await page.getByRole("checkbox", { name: /Download my calendar/ }).check();
   const downloadPromise = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Run 1 action →" }).click();
+  await page.getByRole("button", { name: "Send or save 1 choice →" }).click();
   const calendarDownload = await downloadPromise;
   const calendarPath = await calendarDownload.path();
   expect(calendarPath).not.toBeNull();
@@ -313,6 +327,18 @@ test("school lunches stay separate and grocery totals remain editable", async ({
   expect(calendarContents).toContain("Clean recipe: https://grocer-eaze.com/recipe/reader-0");
   expect(calendarContents).toContain("URL:https://grocer-eaze.com/recipe/reader-0");
   expect(calendarContents).toContain("Original source: https://example.com/recipe");
+  await page.getByRole("checkbox", { name: /Download my calendar/ }).uncheck();
+  await myselfCard.getByRole("checkbox", { name: /Recipes/ }).check();
+  await myselfCard.getByRole("checkbox", { name: /Grocery list/ }).check();
+  await myselfCard.getByRole("checkbox", { name: /Calendar invite/ }).check();
+  await page.getByRole("button", { name: "Send or save 1 choice →" }).click();
+  await expect.poll(() => deliveryEmailBodies.length).toBe(1);
+  expect(deliveryEmailBodies[0].to).toBe("grocery@example.com");
+  expect(deliveryEmailBodies[0].selections).toEqual({ recipes: true, grocery: true, calendar: true });
+  expect(deliveryEmailBodies[0].calendarMeals).toHaveLength(2);
+  expect(deliveryEmailBodies[0].groceryGroups).toEqual(expect.arrayContaining([expect.objectContaining({ title: "Produce" })]));
+  await alexCard.getByRole("button", { name: "Remove Alex" }).click();
+  await expect(page.getByText("alex@example.com")).toHaveCount(0);
   await page.getByRole("button", { name: "← Review shopping list" }).click();
   await expect(page.getByRole("heading", { name: "Review the list you’ll take shopping." })).toBeVisible();
   await page.locator(".page-heading").getByRole("button", { name: "← Edit ingredients" }).click();

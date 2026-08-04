@@ -945,6 +945,36 @@ function calendarResponse(body: { meals?: Array<{ id?: string; title: string; de
   });
 }
 
+function base64Utf8(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 8192) binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
+  return btoa(binary);
+}
+
+async function deliveryEmailAllowed(env: AppEnv, ownerId: string, attempts = 1) {
+  const bucket = Math.floor(Date.now() / 3_600_000);
+  const id = `delivery-email:${ownerId}:${bucket}`;
+  const expiresAt = new Date((bucket + 1) * 3_600_000).toISOString();
+  await env.DB.prepare("DELETE FROM auth_rate_limits WHERE expires_at <= ?").bind(new Date().toISOString()).run();
+  await env.DB.prepare("INSERT INTO auth_rate_limits(id,attempts,expires_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET attempts=attempts+excluded.attempts").bind(id, attempts, expiresAt).run();
+  const row = await env.DB.prepare("SELECT attempts FROM auth_rate_limits WHERE id = ?").bind(id).first();
+  return Number(row?.attempts || 0) <= 30;
+}
+
+type DeliveryCalendarMeal = { id: string; title: string; detail: string; kind: string; sortOrder: number; sourceUrl: string; readerUrl: string };
+
+function deliveryCalendarFile(meals: DeliveryCalendarMeal[]) {
+  const events = meals.map((recipe, index) => {
+    const start = new Date(recipe.sortOrder || Date.now() + index * 86_400_000);
+    start.setHours(recipe.kind === "Dinner" ? 17 : 12, recipe.kind === "Dinner" ? 30 : 0, 0, 0);
+    const end = new Date(start.getTime() + 3_600_000);
+    const recipeLine = `\nClean recipe: ${recipe.readerUrl}${recipe.sourceUrl ? `\nOriginal source: ${recipe.sourceUrl}` : ""}`;
+    return `BEGIN:VEVENT\r\nUID:grocer-eaze-${calendarText(recipe.id || String(index))}-${recipe.sortOrder}@grocer-eaze\r\nDTSTAMP:${calendarStamp(new Date())}\r\nDTSTART:${calendarStamp(start)}\r\nDTEND:${calendarStamp(end)}\r\nSUMMARY:${calendarText(`${recipe.kind}: ${recipe.title}`)}\r\nDESCRIPTION:${calendarText(`${recipe.detail || "Grocer-Eaze meal"}${recipeLine}`)}\r\nURL:${calendarText(recipe.readerUrl)}\r\nEND:VEVENT`;
+  }).join("\r\n");
+  return `BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Grocer-Eaze//Meal Plan//EN\r\n${events}\r\nEND:VCALENDAR`;
+}
+
 export async function handleApiRequest(request: Request, env: AppEnv): Promise<Response> {
   const url = new URL(request.url);
   const isMutation = !["GET", "HEAD", "OPTIONS"].includes(request.method);
@@ -1201,27 +1231,106 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
 
   if (url.pathname === "/api/email" && request.method === "POST") {
     if (!env.RESEND_API_KEY || !env.EMAIL_FROM) return json({ error: "Email delivery is not configured yet." }, 503);
-    const body = await request.json() as { to?: string | string[]; subject?: string; meals?: Array<{ day?: string; title?: string; detail?: string; time?: string; sourceUrl?: string }> };
-    const recipients = [...new Set((Array.isArray(body.to) ? body.to : String(body.to || "").split(/[;,\n]/)).map((address) => String(address).trim().toLowerCase()).filter(Boolean))].slice(0, 10);
-    if (!recipients.length || recipients.some((address) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address))) return json({ error: "Enter up to 10 valid email addresses." }, 400);
-    const meals = Array.isArray(body.meals) ? body.meals.slice(0, 100) : [];
-    if (!meals.length) return json({ error: "Add at least one recipe before emailing your plan." }, 400);
-    const html = `<h1>Your meal plan</h1>${meals.map((meal) => {
-      const title = escapeHtml(String(meal.title || "Recipe"));
-      const recipeUrl = safeHttpUrl(meal.sourceUrl);
-      const linkedTitle = recipeUrl ? `<a href="${escapeHtml(recipeUrl)}">${title}</a>` : title;
-      return `<h2>${escapeHtml(String(meal.day || "Meal"))}: ${linkedTitle}</h2><p>${escapeHtml(String(meal.detail || ""))} · ${escapeHtml(String(meal.time || ""))}</p>`;
-    }).join("")}`;
-    const sent = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.RESEND_API_KEY}`,
-        "Content-Type": "application/json",
-        "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)",
-      },
-      body: JSON.stringify({ from: env.EMAIL_FROM, to: recipients, subject: String(body.subject || "My Grocer-Eaze recipes"), html }),
-    });
-    return json(await sent.json(), sent.status);
+    if (!sessionUser) return json({ error: "Sign in before sending your plan." }, 401);
+    let bodyText = "";
+    try { bodyText = await requestTextWithinLimit(request, 400_000); }
+    catch { return json({ error: "That delivery is too large to send safely." }, 413); }
+    let body: {
+      deliveryId?: string;
+      to?: string | string[];
+      recipientName?: string;
+      selections?: { recipes?: boolean; grocery?: boolean; calendar?: boolean };
+      groceryTitle?: string;
+      groceryGroups?: Array<{ title?: string; items?: Array<{ name?: string; quantity?: string }> }>;
+      meals?: Array<{ id?: string; day?: string; date?: string; kind?: string; title?: string; detail?: string; time?: string; sourceUrl?: string; readerUrl?: string }>;
+      calendarMeals?: Array<{ id?: string; title?: string; detail?: string; kind?: string; sortOrder?: number; sourceUrl?: string; readerUrl?: string }>;
+    };
+    try { body = JSON.parse(bodyText) as typeof body; }
+    catch { return json({ error: "A valid delivery is required." }, 400); }
+    const recipients = [...new Set((Array.isArray(body.to) ? body.to : String(body.to || "").split(/[;,\n]/)).map((address) => String(address).trim().toLowerCase()).filter(Boolean))];
+    if (recipients.length !== 1 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipients[0])) return json({ error: "Enter one valid email recipient." }, 400);
+    const deliveryId = String(body.deliveryId || "").trim();
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(deliveryId)) return json({ error: "A valid delivery ID is required." }, 400);
+    if (!await deliveryEmailAllowed(env, sessionUser.id, recipients.length)) return json({ error: "You’ve reached the hourly email limit. Please wait before sending more plans." }, 429);
+    const selections = body.selections
+      ? { recipes: Boolean(body.selections.recipes), grocery: Boolean(body.selections.grocery), calendar: Boolean(body.selections.calendar) }
+      : { recipes: true, grocery: false, calendar: false };
+    if (!selections.recipes && !selections.grocery && !selections.calendar) return json({ error: "Choose recipes, groceries, or a calendar before sending." }, 400);
+    const readerUrl = (value: unknown) => {
+      const safe = safeHttpUrl(value);
+      if (!safe) return "";
+      try {
+        const parsed = new URL(safe);
+        return parsed.origin === publicAppOrigin && /^\/recipe\/[a-f0-9]{64}$/i.test(parsed.pathname) ? parsed.toString() : "";
+      } catch { return ""; }
+    };
+    const meals = Array.isArray(body.meals) ? body.meals.slice(0, 100).flatMap((meal) => {
+      const title = cleanRecipeText(meal.title, 200);
+      if (!title) return [];
+      return [{
+        id: cleanRecipeText(meal.id, 120),
+        day: cleanRecipeText(meal.day, 80) || "Meal",
+        date: cleanRecipeText(meal.date, 30),
+        kind: cleanRecipeText(meal.kind, 40) || "Meal",
+        title,
+        detail: cleanRecipeText(meal.detail, 500),
+        time: cleanRecipeText(meal.time, 80),
+        sourceUrl: safeHttpUrl(meal.sourceUrl),
+        readerUrl: readerUrl(meal.readerUrl),
+      }];
+    }) : [];
+    if ((selections.recipes || selections.calendar) && !meals.length) return json({ error: "Add at least one recipe before sending your plan." }, 400);
+    if (selections.recipes && meals.some((meal) => !meal.readerUrl)) return json({ error: "One or more clean recipe links are missing. Please try again." }, 400);
+    let groceryItemCount = 0;
+    const groceryGroups = Array.isArray(body.groceryGroups) ? body.groceryGroups.slice(0, 20).flatMap((group) => {
+      const title = cleanRecipeText(group.title, 80);
+      const items = Array.isArray(group.items) ? group.items.slice(0, Math.max(0, 300 - groceryItemCount)).flatMap((item) => {
+        const name = cleanRecipeText(item.name, 160);
+        const quantity = cleanRecipeText(item.quantity, 120);
+        return name ? [{ name, quantity: quantity || "Amount not provided" }] : [];
+      }) : [];
+      groceryItemCount += items.length;
+      return items.length ? [{ title: title || "Groceries", items }] : [];
+    }) : [];
+    if (selections.grocery && !groceryGroups.length) return json({ error: "There is no grocery list to send." }, 400);
+    const calendarMeals = Array.isArray(body.calendarMeals) ? body.calendarMeals.slice(0, 100).flatMap((meal, index): DeliveryCalendarMeal[] => {
+      const title = cleanRecipeText(meal.title, 200);
+      const cleanReaderUrl = readerUrl(meal.readerUrl);
+      const sortOrder = Number(meal.sortOrder);
+      if (!title || !cleanReaderUrl || !Number.isFinite(sortOrder) || sortOrder < 946_684_800_000 || sortOrder > 4_102_444_800_000) return [];
+      return [{
+        id: cleanRecipeText(meal.id, 120) || String(index),
+        title,
+        detail: cleanRecipeText(meal.detail, 500),
+        kind: cleanRecipeText(meal.kind, 40) || "Meal",
+        sortOrder,
+        sourceUrl: safeHttpUrl(meal.sourceUrl),
+        readerUrl: cleanReaderUrl,
+      }];
+    }) : [];
+    if (selections.calendar && calendarMeals.length !== meals.length) return json({ error: "The dated calendar could not be prepared. Please try again." }, 400);
+    const recipientName = cleanRecipeText(body.recipientName, 80);
+    const recipeHtml = selections.recipes ? `<h2 style="color:#183329">Recipes</h2>${meals.map((meal) => `<div style="margin:0 0 20px"><p style="margin:0 0 5px;color:#66756c;font-size:13px">${escapeHtml(`${meal.day} · ${meal.kind}`)}</p><h3 style="margin:0 0 6px"><a href="${escapeHtml(meal.readerUrl)}" style="color:#126b4d">${escapeHtml(meal.title)}</a></h3><p style="margin:0;color:#48584f">${escapeHtml([meal.detail, meal.time].filter(Boolean).join(" · "))}</p>${meal.sourceUrl ? `<p style="margin:5px 0 0;font-size:12px"><a href="${escapeHtml(meal.sourceUrl)}" style="color:#66756c">View original recipe</a></p>` : ""}</div>`).join("")}` : "";
+    const groceryTitle = cleanRecipeText(body.groceryTitle, 120) || "Grocery list";
+    const groceryHtml = selections.grocery ? `<h2 style="color:#183329">${escapeHtml(groceryTitle)}</h2>${groceryGroups.map((group) => `<h3 style="margin-bottom:6px">${escapeHtml(group.title)}</h3><ul>${group.items.map((item) => `<li>${escapeHtml(item.name)} — ${escapeHtml(item.quantity)}</li>`).join("")}</ul>`).join("")}` : "";
+    const calendarHtml = selections.calendar ? `<h2 style="color:#183329">Calendar</h2><p>Your dated meal plan is attached as <strong>grocer-eaze-meal-plan.ics</strong>. Open it to add the meals to Google Calendar, Apple Calendar, or another compatible calendar.</p>` : "";
+    const selectedLabels = [selections.recipes && "recipes", selections.grocery && "grocery list", selections.calendar && "calendar"].filter(Boolean) as string[];
+    const html = `<div style="font-family:Arial,sans-serif;line-height:1.55;color:#183329;max-width:680px;margin:auto"><p style="font-size:12px;font-weight:700;letter-spacing:.08em;color:#126b4d">GROCER-EAZE</p><h1 style="font-family:Georgia,serif">${recipientName ? `Hi ${escapeHtml(recipientName)}, here’s your plan.` : "Here’s your meal plan."}</h1>${recipeHtml}${groceryHtml}${calendarHtml}<hr style="border:0;border-top:1px solid #d8e4dc;margin:28px 0"><p style="font-size:12px;color:#66756c">Sent privately from Grocer-Eaze by ${escapeHtml(sessionUser.name)}.</p></div>`;
+    const text = [recipientName ? `Hi ${recipientName}, here’s your Grocer-Eaze plan.` : "Here’s your Grocer-Eaze plan.", selections.recipes ? `Recipes\n${meals.map((meal) => `${meal.day} ${meal.kind}: ${meal.title}\n${meal.readerUrl}`).join("\n")}` : "", selections.grocery ? `${groceryTitle}\n${groceryGroups.map((group) => `${group.title}\n${group.items.map((item) => `${item.name} — ${item.quantity}`).join("\n")}`).join("\n\n")}` : "", selections.calendar ? "A dated calendar file is attached." : ""].filter(Boolean).join("\n\n");
+    const subject = `Your Grocer-Eaze ${selectedLabels.join(", ").replace(/, ([^,]*)$/, " & $1")}`;
+    const attachments = selections.calendar ? [{ filename: "grocer-eaze-meal-plan.ics", content: base64Utf8(deliveryCalendarFile(calendarMeals)) }] : undefined;
+    for (const recipient of recipients) {
+      const sent = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json", "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)", "Idempotency-Key": `grocer-eaze-delivery-${deliveryId}` },
+        body: JSON.stringify({ from: env.EMAIL_FROM, to: [recipient], subject, html, text, ...(attachments ? { attachments } : {}) }),
+      });
+      if (!sent.ok) {
+        console.error(JSON.stringify({ message: "Resend plan delivery failed", status: sent.status }));
+        return json({ error: "We couldn’t send that plan right now. Please try again." }, 502);
+      }
+    }
+    return json({ sent: true, recipients: recipients.length });
   }
   return json({ error: "Not found." }, 404);
 }
