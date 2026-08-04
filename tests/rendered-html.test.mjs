@@ -153,6 +153,48 @@ test("restores returning accounts and hardens passwordless sign-in", async () =>
   assert.match(worker, /Strict-Transport-Security/);
 });
 
+test("keeps school lunches separate and turns merged ingredients into editable totals", async () => {
+  const [page, api] = await Promise.all([
+    source("app/page.tsx"),
+    source("worker/api.ts"),
+  ]);
+
+  assert.match(page, /const lunchTarget = totalLunchDays/);
+  assert.match(page, /Try to reuse ingredients/);
+  assert.match(page, /Individual chip bags/);
+  assert.match(page, /Clear selections/);
+  assert.match(page, /suggestedQuantity/);
+  assert.match(page, /Total amount needed for/);
+  assert.match(page, /not additional or optional items/);
+  assert.match(api, /WHERE id = \? AND owner_id = \?/);
+});
+
+test("prepares a secure Instacart shopping-list handoff", async () => {
+  const [page, api, worker] = await Promise.all([
+    source("app/page.tsx"),
+    source("worker/api.ts"),
+    source("worker/index.ts"),
+  ]);
+
+  assert.match(page, /Shop on Instacart/);
+  assert.match(page, /\/api\/instacart\/shopping-list/);
+  assert.match(api, /INSTACART_API_KEY/);
+  assert.match(worker, /INSTACART_API_KEY/);
+  assert.match(api, /connect\.instacart\.com\/idp\/v1\/products\/products_link/);
+  assert.match(api, /hasProductAccess\(sessionUser\)/);
+  assert.match(api, /instacartShopping: Boolean\(env\.INSTACART_API_KEY\)/);
+  assert.match(page, /instacartEnabled &&/);
+});
+
+test("keeps device-cached plans scoped to the signed-in account", async () => {
+  const page = await source("app/page.tsx");
+
+  assert.match(page, /grocer-eaze-active-plan:\$\{authData\.user\.id\}/);
+  assert.match(page, /grocer-eaze-active-plan:\$\{planStorageOwnerId\}/);
+  assert.match(page, /removeItem\("grocer-eaze-active-plan"\)/);
+  assert.match(page, /window\.location\.replace\("\/#account"\)/);
+});
+
 test("recovers approved administrators after the hosting migration", async () => {
   const [page, auth, worker, config, workflow] = await Promise.all([
     source("app/page.tsx"),

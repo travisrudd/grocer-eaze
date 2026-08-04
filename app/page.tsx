@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 type Meal = {
   id: string; day: string; date: string; kind: string; title: string; detail: string;
   time: string; cost: string; tone: string; emoji: string; sourceUrl?: string; image?: string; sortOrder?: number;
-  sourceName?: string; readyMinutes?: number; recipeId?: string; pricePerServing?: number;
+  sourceName?: string; readyMinutes?: number; recipeId?: string; pricePerServing?: number; recipeServings?: number;
   ingredients?: Array<{ name: string; aisle?: string; original?: string }>; tags?: string[];
 };
 type MemberPreferences = {
@@ -22,17 +22,88 @@ type ProfilePayload = { profile?: { household_name: string; people: number; loca
 type FavoritesPayload = { favorites?: Array<{ title: string }> };
 type FamilyPayload = { members?: Member[] };
 type RatingsPayload = { ratings?: Array<{ recipe_id: string; quality: number; ease: number }> };
+type CapabilitiesPayload = { instacartShopping?: boolean };
 
 const proteinOptions = ["Beef", "Pork", "Fish", "Shrimp"];
 const storeNames = ["Whole Foods", "Jewel-Osco", "Trader Joe’s"];
 const defaultRecipeFilters = { query: "", kind: "All meals", maxTime: "Any time", source: "All sources", protein: "All proteins", favoritesOnly: false };
 const recipeBatchSize = 12;
+const schoolLunchSideOptions = ["Individual chip bags", "Fresh fruit", "Yogurt cups", "Crunchy vegetables", "Snack bars"];
 const onboardingSteps = [
   { eyebrow: "STEP 1 OF 4", title: "Start with your household.", body: "Choose your dates, meals, budget, and dietary needs. Family preferences are included automatically." },
   { eyebrow: "STEP 2 OF 4", title: "Browse a catalog built for you.", body: "Filter a large recipe collection, save favorites, and add each recipe to lunch, dinner, or school lunch." },
   { eyebrow: "STEP 3 OF 4", title: "Shape your schedule.", body: "Quick-fill open slots or reorder meals by date. Every change stays saved on this device." },
   { eyebrow: "STEP 4 OF 4", title: "Review once, then take it anywhere.", body: "Check merged ingredients and package notes before copying your list, emailing recipes, or exporting your calendar." },
 ];
+
+const unitAliases: Record<string, string> = {
+  cup: "cup", cups: "cup", c: "cup",
+  tablespoon: "tablespoon", tablespoons: "tablespoon", tbsp: "tablespoon", tbsps: "tablespoon",
+  teaspoon: "teaspoon", teaspoons: "teaspoon", tsp: "teaspoon", tsps: "teaspoon",
+  ounce: "ounce", ounces: "ounce", oz: "ounce",
+  pound: "pound", pounds: "pound", lb: "pound", lbs: "pound",
+  gram: "gram", grams: "gram", g: "gram",
+  kilogram: "kilogram", kilograms: "kilogram", kg: "kilogram",
+  milliliter: "milliliter", milliliters: "milliliter", ml: "milliliter",
+  liter: "liter", liters: "liter", l: "liter",
+  gallon: "gallon", gallons: "gallon", gal: "gallon", pint: "pint", pints: "pint", pt: "pint",
+  quart: "quart", quarts: "quart", qt: "quart", can: "can", cans: "can", package: "package", packages: "package",
+  bunch: "bunch", bunches: "bunch", head: "head", heads: "head", large: "large", medium: "medium", small: "small",
+  clove: "each", cloves: "each", bag: "each", bags: "each", slice: "each", slices: "each", piece: "each", pieces: "each", serving: "each", servings: "each",
+};
+
+function parseNumber(value: string) {
+  if (value.includes("/")) {
+    const [numerator, denominator] = value.split("/").map(Number);
+    return denominator ? numerator / denominator : 0;
+  }
+  return Number(value) || 0;
+}
+
+function parseIngredientMeasurement(original: string) {
+  const normalized = original.trim()
+    .replace(/([0-9])([¼½¾⅓⅔⅛⅜⅝⅞])/g, "$1 $2")
+    .replace(/[¼]/g, "1/4").replace(/[½]/g, "1/2").replace(/[¾]/g, "3/4")
+    .replace(/[⅓]/g, "1/3").replace(/[⅔]/g, "2/3").replace(/[⅛]/g, "1/8")
+    .replace(/[⅜]/g, "3/8").replace(/[⅝]/g, "5/8").replace(/[⅞]/g, "7/8");
+  const match = normalized.match(/^(\d+\/\d+|\d+(?:\.\d+)?(?:\s+\d+\/\d+)?)\s*(.*)$/i);
+  if (!match) return null;
+  const quantity = match[1].split(/\s+/).reduce((sum, token) => sum + parseNumber(token), 0);
+  if (!quantity) return null;
+  const unitMatch = match[2].replace(/^\([^)]*\)\s*/, "").match(/^([a-zA-Z]+)\b/);
+  const unit = unitMatch ? unitAliases[unitMatch[1].toLowerCase()] || "each" : "each";
+  return { quantity, unit };
+}
+
+function formatIngredientAmount(value: number) {
+  const rounded = Math.round(value * 100) / 100;
+  const whole = Math.floor(rounded);
+  const decimal = Math.round((rounded - whole) * 100) / 100;
+  const fractions: Record<string, string> = { "0.25": "¼", "0.33": "⅓", "0.5": "½", "0.67": "⅔", "0.75": "¾" };
+  const fraction = fractions[String(decimal)];
+  if (fraction) return whole ? `${whole}${fraction}` : fraction;
+  return rounded.toLocaleString("en-US", { maximumFractionDigits: 2 });
+}
+
+function formatMeasurement(quantity: number, unit: string) {
+  const plurals: Record<string, string> = { bunch: "bunches", large: "large", medium: "medium", small: "small" };
+  const label = unit === "each" ? "" : ` ${quantity === 1 ? unit : plurals[unit] || `${unit}s`}`;
+  return `${formatIngredientAmount(quantity)}${label}`;
+}
+
+function grocerySection(name: string, aisle = "") {
+  const haystack = `${aisle} ${name}`.toLowerCase();
+  if (/pantry|canned|spice|pasta|rice|chip|snack bar/.test(haystack)) return "Pantry";
+  if (/meat|seafood|fish|salmon|shrimp|beef|pork|chicken|turkey|tuna|cod/.test(haystack)) return "Meat & seafood";
+  if (/milk|cheese|refrigerated|dairy|egg|yogurt|butter/.test(haystack)) return "Refrigerated";
+  if (/bakery|bread|tortilla|pita|bun/.test(haystack)) return "Bakery";
+  if (/produce|vegetable|fruit|herb|onion|garlic|lettuce|spinach|tomato|pepper|lemon|lime/.test(haystack)) return "Produce";
+  return "Pantry";
+}
+
+function ingredientOverlapScore(meal: Meal, ingredientNames: Set<string>) {
+  return (meal.ingredients || []).reduce((score, ingredient) => score + Number(ingredientNames.has(ingredient.name.trim().toLowerCase())), 0);
+}
 
 function parseServingCost(meal: Meal) {
   return meal.pricePerServing || Number(meal.cost.match(/\$([\d.]+)/)?.[1] || 3.75);
@@ -99,10 +170,12 @@ export default function Home() {
   const [people, setPeople] = useState(4);
   const [budget, setBudget] = useState(150);
   const [leftovers, setLeftovers] = useState(true);
+  const [reuseIngredients, setReuseIngredients] = useState(false);
   const [glutenFree, setGlutenFree] = useState(true);
   const [lowDairy, setLowDairy] = useState(true);
   const [mediterranean, setMediterranean] = useState(true);
   const [kidLunches, setKidLunches] = useState(true);
+  const [schoolLunchSides, setSchoolLunchSides] = useState(["Individual chip bags", "Fresh fruit"]);
   const [oneStore, setOneStore] = useState(false);
   const [household, setHousehold] = useState("My household");
   const [maxTime, setMaxTime] = useState("45 minutes");
@@ -151,7 +224,10 @@ export default function Home() {
   const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
   const [onboardingStep, setOnboardingStep] = useState<number | null>(null);
   const [ingredientAdjustments, setIngredientAdjustments] = useState<Record<string, string>>({});
+  const [ingredientNameEdits, setIngredientNameEdits] = useState<Record<string, string>>({});
   const [reviewedPlanSignature, setReviewedPlanSignature] = useState("");
+  const [planStorageOwnerId, setPlanStorageOwnerId] = useState("");
+  const [instacartEnabled, setInstacartEnabled] = useState(false);
   const [familyStatus, setFamilyStatus] = useState("");
   const [recipeFilters, setRecipeFilters] = useState(defaultRecipeFilters);
   const [accessibilityFeedback, setAccessibilityFeedback] = useState({ name: "", email: "", details: "", website: "" });
@@ -161,7 +237,7 @@ export default function Home() {
   const dinnerTarget = range === "Day" ? 1 : range === "Week" ? 7 : 30;
   const schoolLunchTarget = kidLunches ? (range === "Day" ? 1 : range === "Week" ? 5 : 22) : 0;
   const totalLunchDays = mealType === "Lunch + dinner" ? (range === "Day" ? 1 : range === "Week" ? 7 : 30) : 0;
-  const lunchTarget = Math.max(0, totalLunchDays - schoolLunchTarget);
+  const lunchTarget = totalLunchDays;
   const mealTargets = useMemo(() => ({ Lunch: lunchTarget, Dinner: dinnerTarget, "School lunch": schoolLunchTarget }), [lunchTarget, dinnerTarget, schoolLunchTarget]);
   const activeMealKinds = useMemo(() => (Object.entries(mealTargets) as Array<[string, number]>).filter(([, target]) => target > 0).map(([kind]) => kind), [mealTargets]);
   const totalTarget = dinnerTarget + lunchTarget + schoolLunchTarget;
@@ -194,7 +270,12 @@ export default function Home() {
     low: Math.max(12, Math.round(totalTarget * people * 2.65 * .84)),
     high: Math.max(18, Math.round(totalTarget * people * 4.15 * .9)),
   }), [totalTarget, people]);
-  const recipeSubtotal = useMemo(() => Math.round(plannedMeals.reduce((sum, meal) => sum + parseServingCost(meal) * people, 0)), [plannedMeals, people]);
+  const schoolLunchSideEstimate = useMemo(() => {
+    const perPerson: Record<string, number> = { "Individual chip bags": .55, "Fresh fruit": .7, "Yogurt cups": .8, "Crunchy vegetables": .5, "Snack bars": .65 };
+    const schoolLunchCount = plannedMeals.filter((meal) => meal.kind === "School lunch").length;
+    return schoolLunchCount * people * schoolLunchSides.reduce((sum, side) => sum + (perPerson[side] || 0), 0);
+  }, [plannedMeals, people, schoolLunchSides]);
+  const recipeSubtotal = useMemo(() => Math.round(plannedMeals.reduce((sum, meal) => sum + parseServingCost(meal) * people, 0) + schoolLunchSideEstimate), [plannedMeals, people, schoolLunchSideEstimate]);
   const storeEstimates = useMemo(() => [
     { name: "Whole Foods", price: Math.round(recipeSubtotal * 1.08), availability: 96 },
     { name: "Jewel-Osco", price: Math.round(recipeSubtotal * .98), availability: 98 },
@@ -202,50 +283,56 @@ export default function Home() {
   ], [recipeSubtotal]);
   const selectedEstimate = storeEstimates.find((store) => store.name === selectedStore)?.price || recipeSubtotal;
   const visibleStoreEstimates = oneStore ? storeEstimates.filter((store) => store.name === selectedStore) : storeEstimates;
+  const groceryIngredients = useMemo(() => plannedMeals.flatMap((meal) => {
+    const scale = people / Math.max(1, meal.recipeServings || 4);
+    const recipeIngredients = (meal.ingredients || []).map((ingredient) => ({ ingredient, scale }));
+    if (meal.kind !== "School lunch") return recipeIngredients;
+    const sides = schoolLunchSides.map((side) => ({
+      ingredient: {
+        name: side.toLowerCase(),
+        aisle: /fruit|vegetable/i.test(side) ? "Produce" : /yogurt/i.test(side) ? "Refrigerated" : "Pantry",
+        original: `${people} ${side.toLowerCase()}`,
+      },
+      scale: 1,
+    }));
+    return [...recipeIngredients, ...sides];
+  }), [plannedMeals, people, schoolLunchSides]);
+  const groceryEntries = useMemo(() => {
+    const merged = new Map<string, { name: string; aisle: string; occurrences: number; originals: string[]; totals: Record<string, number> }>();
+    groceryIngredients.forEach(({ ingredient, scale }) => {
+      const name = (ingredient.name || ingredient.original || "").trim();
+      if (!name) return;
+      const key = name.toLowerCase();
+      const current = merged.get(key) || { name: name[0].toUpperCase() + name.slice(1), aisle: ingredient.aisle || "", occurrences: 0, originals: [], totals: {} };
+      current.occurrences += 1;
+      if (ingredient.original && !current.originals.includes(ingredient.original)) current.originals.push(ingredient.original);
+      const measurement = parseIngredientMeasurement(ingredient.original || "");
+      if (measurement) current.totals[measurement.unit] = (current.totals[measurement.unit] || 0) + measurement.quantity * scale;
+      merged.set(key, current);
+    });
+    return [...merged.entries()].map(([key, value]) => ({
+      key,
+      ...value,
+      suggestedQuantity: Object.entries(value.totals).length
+        ? Object.entries(value.totals).map(([unit, quantity]) => formatMeasurement(quantity, unit)).join(" + ")
+        : value.originals.join(" + ") || `Needed for ${value.occurrences} recipe${value.occurrences === 1 ? "" : "s"}`,
+    })).sort((a, b) => a.name.localeCompare(b.name));
+  }, [groceryIngredients]);
   const groceryGroups = useMemo(() => {
-    const groups: Record<string, { icon: string; title: string; items: string[] }> = {
+    const groups: Record<string, { icon: string; title: string; items: typeof groceryEntries }> = {
       Produce: { icon: "🥬", title: "Produce", items: [] },
       "Meat & seafood": { icon: "🐟", title: "Meat & seafood", items: [] },
       Refrigerated: { icon: "🧊", title: "Refrigerated", items: [] },
       Bakery: { icon: "🥖", title: "Bakery", items: [] },
       Pantry: { icon: "🥫", title: "Pantry", items: [] },
     };
-    const seen = new Set<string>();
-    plannedMeals.flatMap((meal) => meal.ingredients || []).forEach((ingredient) => {
-      const name = (ingredient.name || ingredient.original || "").trim();
-      const key = name.toLowerCase();
-      if (!name || seen.has(key)) return;
-      seen.add(key);
-      const aisle = (ingredient.aisle || "").toLowerCase();
-      const haystack = `${aisle} ${name}`.toLowerCase();
-      const group = /pantry|canned|spice|pasta|rice/.test(aisle) ? "Pantry"
-        : /meat|seafood/.test(aisle) ? "Meat & seafood"
-          : /milk|cheese|refrigerated|dairy|egg/.test(aisle) ? "Refrigerated"
-            : /bakery|bread/.test(aisle) ? "Bakery"
-              : /produce|vegetable|fruit|herb|onion|garlic|lettuce|spinach|tomato|pepper|lemon|lime/.test(haystack) ? "Produce"
-                : /fish|salmon|shrimp|beef|pork|chicken|turkey|tuna|cod/.test(haystack) ? "Meat & seafood"
-                  : /milk|cheese|yogurt|egg|butter/.test(haystack) ? "Refrigerated"
-                    : /bread|tortilla|pita|bun/.test(haystack) ? "Bakery" : "Pantry";
-      groups[group].items.push(name[0].toUpperCase() + name.slice(1));
-    });
+    groceryEntries.forEach((entry) => groups[grocerySection(ingredientNameEdits[entry.key] || entry.name, entry.aisle)].items.push(entry));
     return Object.values(groups).filter((group) => group.items.length).map((group) => ({ ...group, count: group.items.length }));
-  }, [plannedMeals]);
-  const groceryEntries = useMemo(() => {
-    const merged = new Map<string, { name: string; occurrences: number; originals: string[] }>();
-    plannedMeals.flatMap((meal) => meal.ingredients || []).forEach((ingredient) => {
-      const name = (ingredient.name || ingredient.original || "").trim();
-      if (!name) return;
-      const key = name.toLowerCase();
-      const current = merged.get(key) || { name: name[0].toUpperCase() + name.slice(1), occurrences: 0, originals: [] };
-      current.occurrences += 1;
-      if (ingredient.original && !current.originals.includes(ingredient.original)) current.originals.push(ingredient.original);
-      merged.set(key, current);
-    });
-    return [...merged.entries()].map(([key, value]) => ({ key, ...value })).sort((a, b) => a.name.localeCompare(b.name));
-  }, [plannedMeals]);
-  const planSignature = useMemo(() => `${people}:${plannedMeals.map((meal) => meal.id).join("|")}`, [people, plannedMeals]);
+  }, [groceryEntries, ingredientNameEdits]);
+  const planSignature = useMemo(() => `${people}:${schoolLunchSides.join("|")}:${plannedMeals.map((meal) => meal.id).join("|")}`, [people, plannedMeals, schoolLunchSides]);
   const ingredientsReviewed = Boolean(planSignature && reviewedPlanSignature === planSignature);
   const recipeSources = useMemo(() => [...new Set(recipeIdeas.map((meal) => meal.sourceName).filter(Boolean) as string[])].sort(), [recipeIdeas]);
+  const selectedIngredientNames = useMemo(() => new Set(plannedMeals.flatMap((meal) => meal.ingredients || []).map((ingredient) => ingredient.name.trim().toLowerCase()).filter(Boolean)), [plannedMeals]);
   const filteredRecipeIdeas = useMemo(() => recipeIdeas.filter((meal) => {
     const query = recipeFilters.query.trim().toLowerCase();
     const max = recipeFilters.maxTime === "Any time" ? Infinity : Number(recipeFilters.maxTime);
@@ -258,7 +345,7 @@ export default function Home() {
       && (!effectiveLowDairy || meal.tags?.includes("Low dairy"))
       && (!mediterranean || meal.tags?.includes("Mediterranean"))
       && (!recipeFilters.favoritesOnly || favorites.includes(meal.title));
-  }), [recipeIdeas, recipeFilters, favorites, effectiveGlutenFree, effectiveLowDairy, mediterranean]);
+  }).sort((a, b) => reuseIngredients ? ingredientOverlapScore(b, selectedIngredientNames) - ingredientOverlapScore(a, selectedIngredientNames) : 0), [recipeIdeas, recipeFilters, favorites, effectiveGlutenFree, effectiveLowDairy, mediterranean, reuseIngredients, selectedIngredientNames]);
   const visibleRecipeIdeas = filteredRecipeIdeas.slice(0, visibleRecipeCount);
   const recipeFiltersActive = recipeFilters.query !== ""
     || recipeFilters.kind !== defaultRecipeFilters.kind
@@ -279,10 +366,12 @@ export default function Home() {
         if (preferences.mealType) setMealType(preferences.mealType);
         if (preferences.budget) setBudget(preferences.budget);
         if (typeof preferences.leftovers === "boolean") setLeftovers(preferences.leftovers);
+        if (typeof preferences.reuseIngredients === "boolean") setReuseIngredients(preferences.reuseIngredients);
         if (typeof preferences.glutenFree === "boolean") setGlutenFree(preferences.glutenFree);
         if (typeof preferences.lowDairy === "boolean") setLowDairy(preferences.lowDairy);
         if (typeof preferences.mediterranean === "boolean") setMediterranean(preferences.mediterranean);
         if (typeof preferences.kidLunches === "boolean") setKidLunches(preferences.kidLunches);
+        if (Array.isArray(preferences.schoolLunchSides)) setSchoolLunchSides(preferences.schoolLunchSides.filter((side: unknown) => schoolLunchSideOptions.includes(String(side))).map(String));
         if (typeof preferences.oneStore === "boolean") setOneStore(preferences.oneStore);
         if (preferences.selectedStore) setSelectedStore(preferences.selectedStore);
         if (preferences.maxTime) setMaxTime(preferences.maxTime);
@@ -293,6 +382,38 @@ export default function Home() {
     if (favoriteData.favorites) setFavorites(favoriteData.favorites.map((recipe: { title: string }) => recipe.title));
     if (familyData.members) setMembers(familyData.members);
     if (ratingData.ratings) setRatings(Object.fromEntries(ratingData.ratings.map((rating: { recipe_id: string; quality: number; ease: number }) => [rating.recipe_id, { quality: rating.quality, ease: rating.ease }])));
+  }
+
+  function applyCachedPlan(cachedPlan: string | null) {
+    if (!cachedPlan) return;
+    try {
+      const saved = JSON.parse(cachedPlan);
+      if (Array.isArray(saved.plannedMeals)) setPlannedMeals(saved.plannedMeals.map((meal: Meal) => ({ ...meal, image: recipeThumbnail(meal) })));
+      if (Array.isArray(saved.recipeIdeas)) setRecipeIdeas(saved.recipeIdeas.map((meal: Meal) => ({ ...meal, image: recipeThumbnail(meal) })));
+      if (saved.range) setRange(saved.range);
+      if (saved.planStartDate) setPlanStartDate(saved.planStartDate);
+      if (saved.mealType) setMealType(saved.mealType);
+      if (saved.people) setPeople(saved.people);
+      if (saved.budget) setBudget(saved.budget);
+      if (typeof saved.leftovers === "boolean") setLeftovers(saved.leftovers);
+      if (typeof saved.reuseIngredients === "boolean") setReuseIngredients(saved.reuseIngredients);
+      if (typeof saved.glutenFree === "boolean") setGlutenFree(saved.glutenFree);
+      if (typeof saved.lowDairy === "boolean") setLowDairy(saved.lowDairy);
+      if (typeof saved.mediterranean === "boolean") setMediterranean(saved.mediterranean);
+      if (typeof saved.kidLunches === "boolean") setKidLunches(saved.kidLunches);
+      if (Array.isArray(saved.schoolLunchSides)) setSchoolLunchSides(saved.schoolLunchSides.filter((side: unknown) => schoolLunchSideOptions.includes(String(side))).map(String));
+      if (typeof saved.oneStore === "boolean") setOneStore(saved.oneStore);
+      if (saved.selectedStore) setSelectedStore(saved.selectedStore);
+      if (saved.household) setHousehold(saved.household);
+      if (saved.maxTime) setMaxTime(saved.maxTime);
+      if (saved.skill) setSkill(saved.skill);
+      if (typeof saved.exclusions === "string") setExclusions(saved.exclusions);
+      if (saved.location) { setLocation(saved.location); setLocationQuery(saved.location); }
+      if (saved.calendarOrder === "random") setCalendarOrder("random");
+      if (saved.ingredientAdjustments && typeof saved.ingredientAdjustments === "object") setIngredientAdjustments(saved.ingredientAdjustments);
+      if (saved.ingredientNameEdits && typeof saved.ingredientNameEdits === "object") setIngredientNameEdits(saved.ingredientNameEdits);
+      if (typeof saved.reviewedPlanSignature === "string") setReviewedPlanSignature(saved.reviewedPlanSignature);
+    } catch { /* Ignore a corrupted device cache. */ }
   }
 
   async function reloadPersonalData() {
@@ -308,7 +429,6 @@ export default function Home() {
   useEffect(() => {
     let id = window.localStorage.getItem("grocer-eaze-owner");
     if (!id) { id = crypto.randomUUID(); window.localStorage.setItem("grocer-eaze-owner", id); }
-    const cachedPlan = window.localStorage.getItem("grocer-eaze-active-plan");
     const onboardingComplete = window.localStorage.getItem("grocer-eaze-onboarding-complete") === "true";
     Promise.all([
       fetch("/api/profile", { headers: { "x-grocer-owner": id } }).then((r) => r.json()),
@@ -316,10 +436,22 @@ export default function Home() {
       fetch("/api/family", { headers: { "x-grocer-owner": id } }).then((r) => r.json()),
       fetch("/api/ratings", { headers: { "x-grocer-owner": id } }).then((r) => r.json()),
       fetch("/api/auth/me").then((r) => r.json()),
-    ]).then(([profileData, favoriteData, familyData, ratingData, authData]) => {
+      fetch("/api/capabilities").then((r) => r.ok ? r.json() : {}).catch(() => ({})),
+    ]).then(([profileData, favoriteData, familyData, ratingData, authData, capabilities]: [ProfilePayload, FavoritesPayload, FamilyPayload, RatingsPayload, { user?: AccountUser | null }, CapabilitiesPayload]) => {
       setOwnerId(id);
       applyPersonalData(profileData, favoriteData, familyData, ratingData);
-      if (authData.user) { setUser(authData.user); setEmail(authData.user.email); }
+      setInstacartEnabled(Boolean(capabilities.instacartShopping));
+      const scopedPlanKey = authData.user ? `grocer-eaze-active-plan:${authData.user.id}` : "";
+      let cachedPlan = scopedPlanKey ? window.localStorage.getItem(scopedPlanKey) : null;
+      const legacyPlan = window.localStorage.getItem("grocer-eaze-active-plan");
+      if (scopedPlanKey && !cachedPlan && legacyPlan) {
+        cachedPlan = legacyPlan;
+        window.localStorage.setItem(scopedPlanKey, legacyPlan);
+      }
+      window.localStorage.removeItem("grocer-eaze-active-plan");
+      if (authData.user) {
+        setUser(authData.user); setEmail(authData.user.email); setPlanStorageOwnerId(authData.user.id);
+      }
       const requestedView = window.location.hash.replace("#", "") as View;
       if (["meals", "list"].includes(requestedView) && !authData.user?.hasAccess) {
         const destination: View = authData.user ? "plans" : "account";
@@ -328,31 +460,7 @@ export default function Home() {
         setAccountStatus(authData.user ? "Choose a membership to unlock meal planning and exports." : "Sign in before using meal planning tools.");
       }
       setAuthLoaded(true);
-      if (cachedPlan) {
-        try {
-          const saved = JSON.parse(cachedPlan);
-          if (Array.isArray(saved.plannedMeals)) setPlannedMeals(saved.plannedMeals.map((meal: Meal) => ({ ...meal, image: recipeThumbnail(meal) })));
-          if (Array.isArray(saved.recipeIdeas)) setRecipeIdeas(saved.recipeIdeas.map((meal: Meal) => ({ ...meal, image: recipeThumbnail(meal) })));
-          if (saved.range) setRange(saved.range);
-          if (saved.planStartDate) setPlanStartDate(saved.planStartDate);
-          if (saved.mealType) setMealType(saved.mealType);
-          if (saved.people) setPeople(saved.people);
-          if (saved.budget) setBudget(saved.budget);
-          if (typeof saved.leftovers === "boolean") setLeftovers(saved.leftovers);
-          if (typeof saved.glutenFree === "boolean") setGlutenFree(saved.glutenFree);
-          if (typeof saved.lowDairy === "boolean") setLowDairy(saved.lowDairy);
-          if (typeof saved.mediterranean === "boolean") setMediterranean(saved.mediterranean);
-          if (typeof saved.kidLunches === "boolean") setKidLunches(saved.kidLunches);
-          if (typeof saved.oneStore === "boolean") setOneStore(saved.oneStore);
-          if (saved.selectedStore) setSelectedStore(saved.selectedStore);
-          if (saved.household) setHousehold(saved.household);
-          if (saved.maxTime) setMaxTime(saved.maxTime);
-          if (saved.skill) setSkill(saved.skill);
-          if (typeof saved.exclusions === "string") setExclusions(saved.exclusions);
-          if (saved.location) { setLocation(saved.location); setLocationQuery(saved.location); }
-          if (saved.calendarOrder === "random") setCalendarOrder("random");
-        } catch { /* Ignore a corrupted device cache. */ }
-      }
+      applyCachedPlan(cachedPlan);
       setPlanHydrated(true);
       if (!onboardingComplete) setOnboardingStep(0);
     }).catch(() => {
@@ -369,16 +477,17 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!planHydrated) return;
+    if (!planHydrated || !planStorageOwnerId) return;
     try {
-      window.localStorage.setItem("grocer-eaze-active-plan", JSON.stringify({
+      window.localStorage.setItem(`grocer-eaze-active-plan:${planStorageOwnerId}`, JSON.stringify({
         plannedMeals,
         recipeIdeas: recipeIdeas.slice(0, 90),
-        range, planStartDate, mealType, people, budget, leftovers, glutenFree, lowDairy, mediterranean,
-        kidLunches, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder,
+        range, planStartDate, mealType, people, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
+        kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder,
+        ingredientAdjustments, ingredientNameEdits, reviewedPlanSignature,
       }));
     } catch { /* Device storage can be unavailable in private browsing. */ }
-  }, [planHydrated, plannedMeals, recipeIdeas, range, planStartDate, mealType, people, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder]);
+  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, range, planStartDate, mealType, people, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, reviewedPlanSignature]);
 
   useEffect(() => {
     if (!undoAction) return;
@@ -489,7 +598,8 @@ export default function Home() {
       const data = await result.json().catch(() => ({ error: "That code could not be verified." }));
       if (!result.ok) { setAccountStatus(data.error || "That code could not be verified."); return; }
       const me = await fetch("/api/auth/me").then((r) => r.json());
-      setUser(me.user); setEmail(me.user.email); setAuthForm((current) => ({ ...current, name: me.user.name, phone: me.user.phone || "" }));
+      setUser(me.user); setEmail(me.user.email); setPlanStorageOwnerId(me.user.id); setAuthForm((current) => ({ ...current, name: me.user.name, phone: me.user.phone || "" }));
+      applyCachedPlan(window.localStorage.getItem(`grocer-eaze-active-plan:${me.user.id}`));
       await reloadPersonalData();
       setAccountStatus(data.returning ? "Welcome back. Your household information has been restored." : "Your secure account is ready. Choose a plan to start your free trial.");
     } catch {
@@ -497,6 +607,13 @@ export default function Home() {
     } finally {
       setAuthBusy(false);
     }
+  }
+
+  async function signOut() {
+    await fetch("/api/auth/signout", { method: "POST" });
+    setPlanStorageOwnerId("");
+    setUser(null);
+    window.location.replace("/#account");
   }
 
   async function loadAdminUsers(query = adminSearch) {
@@ -584,6 +701,7 @@ export default function Home() {
       sourceName: String(recipe.sourceName || "Recipe source"),
       readyMinutes: Number(recipe.readyInMinutes || 35),
       pricePerServing: servingCost,
+      recipeServings: Math.max(1, Number(recipe.servings || 4)),
       ingredients,
       tags: [...new Set(tags)],
     };
@@ -596,10 +714,10 @@ export default function Home() {
     const proteinPrompt = familyProteins.length ? familyProteins.join(" or ") : "healthy";
     const avoidPrompt = familyAvoids.length ? `without ${familyAvoids.join(", ")}` : "";
     const skillPrompt = skill === "Keep it simple" ? "easy" : skill === "Adventurous" ? "gourmet" : "";
-    const batchPrompt = leftovers ? "meal prep" : "";
+    const batchPrompt = [leftovers ? "meal prep" : "", reuseIngredients ? "shared versatile ingredients" : ""].filter(Boolean).join(" ");
     const dinnerQuery = queryOverride || `${mediterranean ? "Mediterranean " : ""}${skillPrompt} ${batchPrompt} ${proteinPrompt} dinner ${avoidPrompt}`;
     const lunchQuery = `${mediterranean ? "Mediterranean " : ""}${skillPrompt} ${batchPrompt} ${proteinPrompt} lunch ${avoidPrompt}`;
-    const schoolQuery = `wrap ${avoidPrompt}`;
+    const schoolQuery = `simple kid friendly lunchbox wrap sandwich bento ${avoidPrompt}`;
     const providerExclusions = [...familyAvoids, ...(lowDairy ? ["cream cheese", "heavy cream"] : [])];
     const resultCount = range === "Month" ? "48" : "30";
     const searchParams = (q: string, time: string) => new URLSearchParams({
@@ -627,10 +745,16 @@ export default function Home() {
         .sort((a, b) => Number(Boolean(b.tags?.includes("Budget fit"))) - Number(Boolean(a.tags?.includes("Budget fit"))));
       if (!uniqueIdeas.length) throw new Error("No recipes matched this search. Try relaxing one preference and search again.");
       const previousPlan = plannedMeals;
+      const previousAdjustments = ingredientAdjustments;
+      const previousNameEdits = ingredientNameEdits;
+      const previousReview = reviewedPlanSignature;
       if (previousPlan.length) {
-        setUndoAction({ message: "Your previous schedule was cleared for the new catalog.", restore: () => setPlannedMeals(previousPlan) });
+        setUndoAction({ message: "Your previous schedule was cleared for the new catalog.", restore: () => { setPlannedMeals(previousPlan); setIngredientAdjustments(previousAdjustments); setIngredientNameEdits(previousNameEdits); setReviewedPlanSignature(previousReview); } });
       }
       setPlannedMeals([]);
+      setIngredientAdjustments({});
+      setIngredientNameEdits({});
+      setReviewedPlanSignature("");
       setRecipeIdeas(uniqueIdeas);
       setRecipeFilters({ ...defaultRecipeFilters });
       setRecipePage(1);
@@ -639,7 +763,7 @@ export default function Home() {
       const fallbackActive = payloads.some((data) => data.demo);
       const providers = [...new Set(payloads.flatMap((data) => Array.isArray(data.providers) ? data.providers.map(String) : []))];
       setRecipeNotice(`${uniqueIdeas.length} recipes ready to browse.${providers.length ? ` Sources: ${providers.join(", ")}.` : ""}${fallbackActive ? " Backup recipes fill any remaining gaps." : ""}`);
-      if (ownerId) await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, planStartDate, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, maxTime, skill, exclusions } }) });
+      if (ownerId) await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, maxTime, skill, exclusions } }) });
       setSimilarTo(queryOverride || ""); navigateTo("meals");
     } catch (error) {
       setPlannerNotice(error instanceof Error ? error.message : "Recipes are temporarily unavailable. Please try again.");
@@ -652,7 +776,7 @@ export default function Home() {
     const familyProtein = familyProteins.length ? familyProteins[recipePage % familyProteins.length] : "healthy";
     const proteinPrompt = recipeFilters.protein === "All proteins" ? familyProtein : recipeFilters.protein;
     const skillPrompt = skill === "Keep it simple" ? "easy" : skill === "Adventurous" ? "gourmet" : "";
-    const query = recipeFilters.query.trim() || (kind === "School lunch" ? "wrap" : `${mediterranean ? "Mediterranean " : ""}${skillPrompt} ${leftovers ? "meal prep " : ""}${proteinPrompt} ${kind.toLowerCase()}`);
+    const query = recipeFilters.query.trim() || (kind === "School lunch" ? "simple kid friendly lunchbox wrap sandwich bento" : `${mediterranean ? "Mediterranean " : ""}${skillPrompt} ${leftovers ? "meal prep " : ""}${reuseIngredients ? "shared versatile ingredients " : ""}${proteinPrompt} ${kind.toLowerCase()}`);
     const maxTimeFilter = recipeFilters.maxTime === "Any time" ? (maxTime.match(/\d+/)?.[0] || "60") : recipeFilters.maxTime;
     const providerExclusions = [...familyAvoids, ...(lowDairy ? ["cream cheese", "heavy cream"] : [])];
     try {
@@ -784,8 +908,14 @@ export default function Home() {
   function clearSelections() {
     if (!plannedMeals.length) return;
     const previous = plannedMeals;
+    const previousAdjustments = ingredientAdjustments;
+    const previousNameEdits = ingredientNameEdits;
+    const previousReview = reviewedPlanSignature;
     setPlannedMeals([]);
-    showUndo("All selected meals were cleared.", () => setPlannedMeals(previous));
+    setIngredientAdjustments({});
+    setIngredientNameEdits({});
+    setReviewedPlanSignature("");
+    showUndo("All selected meals were cleared.", () => { setPlannedMeals(previous); setIngredientAdjustments(previousAdjustments); setIngredientNameEdits(previousNameEdits); setReviewedPlanSignature(previousReview); });
   }
 
   function movePlannedMeal(id: string, direction: -1 | 1) {
@@ -845,12 +975,13 @@ export default function Home() {
         const existingCount = next.filter((meal) => meal.kind === kind).length;
         const preferred = recipeIdeas.filter((meal) => meal.kind === kind);
         const usedTitles = new Set(next.map((meal) => meal.title.toLowerCase()));
-        const rankedPool = (preferred.length ? preferred : recipeIdeas)
-          .sort((a, b) => Number(Boolean(b.tags?.includes("Budget fit"))) - Number(Boolean(a.tags?.includes("Budget fit"))));
-        const unusedPool = rankedPool.filter((meal) => !usedTitles.has(meal.title.toLowerCase()));
-        const pool = unusedPool.length ? unusedPool : rankedPool;
+        const currentIngredients = new Set(next.flatMap((meal) => meal.ingredients || []).map((ingredient) => ingredient.name.trim().toLowerCase()).filter(Boolean));
         for (let index = existingCount; index < target; index++) {
-          const meal = pool[(index - existingCount) % pool.length];
+          const rankedPool = [...(preferred.length ? preferred : recipeIdeas)]
+            .sort((a, b) => (reuseIngredients ? ingredientOverlapScore(b, currentIngredients) - ingredientOverlapScore(a, currentIngredients) : 0)
+              || Number(Boolean(b.tags?.includes("Budget fit"))) - Number(Boolean(a.tags?.includes("Budget fit"))));
+          const unusedPool = rankedPool.filter((meal) => !usedTitles.has(meal.title.toLowerCase()));
+          const meal = (unusedPool.length ? unusedPool : rankedPool)[0];
           next.push({
             ...meal,
             ...mealDateFor(kind, index, planStartDate),
@@ -859,11 +990,13 @@ export default function Home() {
             kind,
             tags: [...new Set([...(meal.tags || []), ...(kind === "School lunch" ? ["Kid-friendly", "Packable"] : [])])],
           });
+          usedTitles.add(meal.title.toLowerCase());
+          (meal.ingredients || []).forEach((ingredient) => currentIngredients.add(ingredient.name.trim().toLowerCase()));
         }
       });
       return next.sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder) || a.kind.localeCompare(b.kind));
     });
-    setRecipeNotice("Open meal slots filled with the best available preference and price matches. You can still remove or replace any recipe.");
+    setRecipeNotice(`Open meal slots filled with the best available preference and price matches${reuseIngredients ? ", favoring ingredients already in your plan" : ""}. You can still remove or replace any recipe.`);
   }
 
   function toggleSchoolLunches() {
@@ -873,6 +1006,11 @@ export default function Home() {
       setVisibleRecipeCount(recipeBatchSize);
     }
     setKidLunches(!kidLunches);
+  }
+
+  function toggleSchoolLunchSide(side: string) {
+    setSchoolLunchSides((current) => current.includes(side) ? current.filter((item) => item !== side) : [...current, side]);
+    setReviewedPlanSignature("");
   }
 
   async function locateMe() {
@@ -944,6 +1082,14 @@ export default function Home() {
     });
   }
 
+  function groceryItemName(entry: { key: string; name: string }) {
+    return ingredientNameEdits[entry.key]?.trim() || entry.name;
+  }
+
+  function groceryItemQuantity(entry: { key: string; suggestedQuantity: string }) {
+    return ingredientAdjustments[entry.key]?.trim() || entry.suggestedQuantity;
+  }
+
   async function shareGroceryList() {
     if (!ingredientsReviewed) { setExportStatus("Review and confirm the merged ingredient list before exporting."); return; }
     const start = new Date(`${planStartDate}T12:00:00`);
@@ -952,7 +1098,7 @@ export default function Home() {
     const dateLabel = range === "Day"
       ? start.toLocaleDateString("en-US", { month: "short", day: "numeric" })
       : `${start.toLocaleDateString("en-US", { month: "short", day: "numeric" })} - ${end.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
-    const text = `Groceries, ${dateLabel}\n\n${groceryGroups.map((group) => `${group.title}\n${group.items.map((item) => `• ${item}${ingredientAdjustments[item.toLowerCase()] ? ` — ${ingredientAdjustments[item.toLowerCase()]}` : ""}`).join("\n")}`).join("\n\n")}`;
+    const text = `Groceries, ${dateLabel}\n\n${groceryGroups.map((group) => `${group.title}\n${group.items.map((entry) => `• ${groceryItemName(entry)} — ${groceryItemQuantity(entry)}`).join("\n")}`).join("\n\n")}`;
     if (navigator.share) {
       try {
         await navigator.share({ title: `Groceries, ${dateLabel}`, text });
@@ -967,6 +1113,35 @@ export default function Home() {
       setExportStatus("Grocery list copied. Paste it into Apple Notes, Reminders, Google Keep, or your preferred list app.");
     } catch {
       setExportStatus("Your browser blocked sharing and copying. Try the calendar or email export instead.");
+    }
+  }
+
+  async function shopOnInstacart() {
+    if (!ingredientsReviewed) { setExportStatus("Review and confirm the merged ingredient list before shopping."); return; }
+    const destination = window.open("about:blank", "_blank");
+    if (destination) destination.opener = null;
+    setExportStatus("Preparing your Instacart shopping list…");
+    try {
+      const response = await fetch("/api/instacart/shopping-list", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: `Grocer-Eaze groceries starting ${planStartDate}`,
+          items: groceryEntries.map((entry) => {
+            const quantity = groceryItemQuantity(entry);
+            const measurement = parseIngredientMeasurement(quantity);
+            return { name: groceryItemName(entry), displayText: `${quantity} ${groceryItemName(entry)}`, measurements: measurement ? [measurement] : [] };
+          }),
+        }),
+      });
+      const data = await response.json() as { url?: string; error?: string };
+      if (!response.ok || !data.url) throw new Error(data.error || "Instacart could not prepare this list.");
+      if (destination) destination.location.href = data.url;
+      else window.location.href = data.url;
+      setExportStatus("Your grocery list is ready to review and shop on Instacart.");
+    } catch (error) {
+      destination?.close();
+      setExportStatus(error instanceof Error ? error.message : "Instacart is temporarily unavailable.");
     }
   }
   function downloadCalendar() {
@@ -1039,6 +1214,7 @@ export default function Home() {
   }
 
   function requireMembership() {
+    if (!authLoaded) { setPlannerNotice("Checking your account access…"); return false; }
     if (!user) { navigateTo("account"); setAccountStatus("Sign in before using meal planning tools."); return false; }
     if (!user.hasAccess) { navigateTo("plans"); setAccountStatus("Choose a membership to unlock meal planning and exports."); return false; }
     return true;
@@ -1107,9 +1283,9 @@ export default function Home() {
       <button className="brand" aria-label="Grocer-Eaze home" onClick={() => navigateTo("plan")}><span className="brand-mark" aria-hidden="true"><span>g</span></span><span>Grocer<span>•</span>Eaze</span></button>
       <nav aria-label="Primary navigation">
         <button className={view === "plan" ? "active" : ""} aria-current={view === "plan" ? "page" : undefined} onClick={() => navigateTo("plan")}>Plan</button>
-        <button className={view === "meals" ? "active" : ""} aria-current={view === "meals" ? "page" : undefined} onClick={() => navigateTo("meals")}>My meals</button>
-        <button className={view === "list" ? "active" : ""} aria-current={view === "list" ? "page" : undefined} onClick={() => navigateTo("list")}>Grocery list</button>
-        <button className={view === "family" ? "active" : ""} aria-current={view === "family" ? "page" : undefined} onClick={() => navigateTo("family")}>Family</button>
+        <button disabled={!authLoaded} className={view === "meals" ? "active" : ""} aria-current={view === "meals" ? "page" : undefined} onClick={() => navigateTo("meals")}>My meals</button>
+        <button disabled={!authLoaded} className={view === "list" ? "active" : ""} aria-current={view === "list" ? "page" : undefined} onClick={() => navigateTo("list")}>Grocery list</button>
+        <button disabled={!authLoaded} className={view === "family" ? "active" : ""} aria-current={view === "family" ? "page" : undefined} onClick={() => navigateTo("family")}>Family</button>
         {user?.role === "admin" && <button className={view === "admin" ? "active" : ""} aria-current={view === "admin" ? "page" : undefined} onClick={() => { navigateTo("admin"); loadAdminUsers(); }}>Admin</button>}
       </nav>
       <button className="avatar" aria-label="Open profile" aria-current={view === "account" ? "page" : undefined} onClick={() => navigateTo("account")}>{user ? user.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() : "ME"}</button>
@@ -1128,7 +1304,8 @@ export default function Home() {
         <div className="two-col"><div className="field"><label htmlFor="max-cook-time">Maximum cook time</label><select id="max-cook-time" value={maxTime} onChange={(e) => setMaxTime(e.target.value)}><option>20 minutes</option><option>30 minutes</option><option>45 minutes</option><option>60 minutes</option></select></div><div className="field"><label htmlFor="cooking-comfort">Cooking comfort</label><select id="cooking-comfort" value={skill} onChange={(e) => setSkill(e.target.value)}><option>Keep it simple</option><option>Comfortable</option><option>Adventurous</option></select></div></div>
         <div className="field"><div className="label-line"><label htmlFor="grocery-budget">Grocery budget for this plan</label><strong>{budget >= 500 ? "$500+" : `$${budget}`}</strong></div><input id="grocery-budget" aria-label="Grocery budget for this plan" type="range" min="50" max="500" step="10" value={budget} onChange={(e) => setBudget(Number(e.target.value))} /><div className="range-labels"><span>$50</span><span>$500+</span></div></div>
         <div className="preference-heading"><strong>Plan preferences</strong><span>Choose the options that should shape your recipes and shopping plan.</span></div>
-        <div className="option-grid"><Toggle label="Plan for leftovers" checked={leftovers} onChange={() => setLeftovers(!leftovers)} note="Cook once, eat twice" /><Toggle label="School lunches" checked={kidLunches} onChange={toggleSchoolLunches} note={`${schoolLunchTarget || (range === "Month" ? 22 : range === "Week" ? 5 : 1)} packable weekday lunch${range === "Day" ? "" : "es"}`} /><Toggle label="Gluten-free" checked={glutenFree} onChange={() => setGlutenFree(!glutenFree)} note={familyGlutenFree ? "Also required by a family member" : undefined} /><Toggle label="Low dairy" checked={lowDairy} onChange={() => setLowDairy(!lowDairy)} note={familyLowDairy ? "Also preferred by a family member" : undefined} /><Toggle label="Mediterranean" checked={mediterranean} onChange={() => setMediterranean(!mediterranean)} /><Toggle label="One store only" checked={oneStore} onChange={() => setOneStore(!oneStore)} /></div>
+        <div className="option-grid"><Toggle label="Plan for leftovers" checked={leftovers} onChange={() => setLeftovers(!leftovers)} note="Cook once, eat twice" /><Toggle label="Try to reuse ingredients" checked={reuseIngredients} onChange={() => setReuseIngredients(!reuseIngredients)} note="Favor recipes with useful overlap" /><Toggle label="School lunches" checked={kidLunches} onChange={toggleSchoolLunches} note={`${schoolLunchTarget || (range === "Month" ? 22 : range === "Week" ? 5 : 1)} extra weekday lunch${range === "Day" ? "" : "es"} · separate from lunch`} /><Toggle label="Gluten-free" checked={glutenFree} onChange={() => setGlutenFree(!glutenFree)} note={familyGlutenFree ? "Also required by a family member" : undefined} /><Toggle label="Low dairy" checked={lowDairy} onChange={() => setLowDairy(!lowDairy)} note={familyLowDairy ? "Also preferred by a family member" : undefined} /><Toggle label="Mediterranean" checked={mediterranean} onChange={() => setMediterranean(!mediterranean)} /><Toggle label="One store only" checked={oneStore} onChange={() => setOneStore(!oneStore)} /></div>
+        {kidLunches && <div className="school-lunch-builder"><div><strong>Make school lunches easy</strong><span>Each school lunch is a simple, packable main plus the sides you choose. These are additional lunches and never reduce your regular lunch count.</span></div><div role="group" aria-label="School lunch sides">{schoolLunchSideOptions.map((side) => <button type="button" key={side} className={schoolLunchSides.includes(side) ? "selected" : ""} aria-pressed={schoolLunchSides.includes(side)} onClick={() => toggleSchoolLunchSide(side)}>{schoolLunchSides.includes(side) ? "✓ " : "+ "}{side}</button>)}</div></div>}
         {oneStore && <div className="field"><label htmlFor="preferred-store">Preferred store</label><select id="preferred-store" value={selectedStore} onChange={(event) => setSelectedStore(event.target.value)}>{storeNames.map((store) => <option key={store}>{store}</option>)}</select></div>}
         <div className="field"><label htmlFor="ingredient-exclusions">Allergies or ingredients to avoid</label><input id="ingredient-exclusions" className="text-input" placeholder="e.g. shellfish, peanuts, mushrooms" value={exclusions} onChange={(e) => setExclusions(e.target.value)} /></div>
         <div className="location-picker">
@@ -1136,7 +1313,7 @@ export default function Home() {
           {locationResults.length > 0 && <div className="location-results" id="location-options" role="listbox" aria-label="Location suggestions">{locationResults.map((result) => <button role="option" aria-selected="false" key={`${result.lat}-${result.lon}`} onClick={() => { setLocation(result.label); setLocationQuery(result.label); setLocationResults([]); setLocationStatus("Location updated."); }}>{result.label}</button>)}</div>}
           <small aria-live="polite">{locationStatus || `Searching stores near ${location}`}</small>
         </div>
-        <button className="primary" onClick={() => generatePlan()} disabled={planning}>{planning ? "Building your recipe catalog…" : "Browse recipes for my plan"} <span>→</span></button><p className="estimate">Estimated groceries for a full plan: <strong>${planningEstimate.low}–${planningEstimate.high}</strong>{planningEstimate.high > budget && <span> · above your {budget >= 500 ? "$500+" : `$${budget}`} target</span>}</p>{plannerNotice && <p className="form-notice error" role="alert">{plannerNotice}</p>}
+        <button className="primary" onClick={() => generatePlan()} disabled={planning || !authLoaded}>{!authLoaded ? "Checking your account…" : planning ? "Building your recipe catalog…" : "Browse recipes for my plan"} <span>→</span></button><p className="estimate">Estimated groceries for a full plan: <strong>${planningEstimate.low}–${planningEstimate.high}</strong>{planningEstimate.high > budget && <span> · above your {budget >= 500 ? "$500+" : `$${budget}`} target</span>}</p>{plannerNotice && <p className="form-notice error" role="alert">{plannerNotice}</p>}
       </section>
     </div>}
 
@@ -1162,6 +1339,7 @@ export default function Home() {
           <button className={mediterranean ? "active" : ""} aria-pressed={mediterranean} onClick={() => setMediterranean(!mediterranean)}>Mediterranean</button>
           <button className={kidLunches ? "active" : ""} aria-pressed={kidLunches} onClick={toggleSchoolLunches}>School lunches</button>
           {leftovers && <span>Leftovers planned</span>}
+          {reuseIngredients && <span>Ingredient reuse prioritized</span>}
           {familyGlutenFree && <span>Family requires gluten-free</span>}
           {familyLowDairy && <span>Family prefers low dairy</span>}
           {familyKidFriendly && <span>Family prefers kid-friendly</span>}
@@ -1197,7 +1375,7 @@ export default function Home() {
         </details>
         {filteredRecipeIdeas.length ? <div className="recipe-card-grid">{visibleRecipeIdeas.map((meal) => <article className="recipe-card" key={`idea-${meal.kind}-${meal.id}-${meal.title}`}>
           <div className={`recipe-thumb ${meal.tone}`}><img src={meal.image || recipeThumbnail(meal)} alt={`${meal.title} recipe`} loading="lazy" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.nextElementSibling?.removeAttribute("hidden"); }} /><span hidden aria-hidden="true">{meal.emoji}</span><em>{meal.kind === "School lunch" ? "Kid-friendly lunch" : meal.kind}</em><button className={favorites.includes(meal.title) ? "saved" : ""} onClick={() => toggleFavorite(meal)} aria-label={`${favorites.includes(meal.title) ? "Remove" : "Add"} ${meal.title} ${favorites.includes(meal.title) ? "from" : "to"} favorites`}>{favorites.includes(meal.title) ? "♥" : "♡"}</button></div>
-          <div className="recipe-card-copy"><small>{meal.sourceName}</small><h4>{meal.title}</h4><p>{meal.readyMinutes} min · {meal.cost}</p><div className="recipe-tags">{meal.tags?.slice(0, 6).map((tag) => <span key={tag}>{tag}</span>)}</div><div className="catalog-secondary-actions">{meal.sourceUrl && <a href={meal.sourceUrl} target="_blank" rel="noreferrer">Recipe ↗</a>}<button onClick={() => findSimilar(meal)}>Find similar</button><button onClick={() => setRatingMeal(meal)}>Rate</button></div><div className="add-meal-actions">{activeMealKinds.map((kind) => {
+          <div className="recipe-card-copy"><small>{meal.sourceName}</small><h4>{meal.title}</h4><p>{meal.readyMinutes} min · {meal.cost}</p><div className="recipe-tags">{reuseIngredients && ingredientOverlapScore(meal, selectedIngredientNames) > 0 && <span className="reuse-tag">Reuses {ingredientOverlapScore(meal, selectedIngredientNames)} selected ingredient{ingredientOverlapScore(meal, selectedIngredientNames) === 1 ? "" : "s"}</span>}{meal.tags?.slice(0, 6).map((tag) => <span key={tag}>{tag}</span>)}</div><div className="catalog-secondary-actions">{meal.sourceUrl && <a href={meal.sourceUrl} target="_blank" rel="noreferrer">Recipe ↗</a>}<button onClick={() => findSimilar(meal)}>Find similar</button><button onClick={() => setRatingMeal(meal)}>Rate</button></div><div className="add-meal-actions">{activeMealKinds.map((kind) => {
             const target = mealTargets[kind as keyof typeof mealTargets];
             const full = plannedMeals.filter((item) => item.kind === kind).length >= target;
             return <button key={kind} className="add-meal-button" disabled={full} onClick={() => addToMeal(meal, kind)}>{full ? `${kind} full` : `+ Add to ${kind.toLowerCase()}`}</button>;
@@ -1247,25 +1425,26 @@ export default function Home() {
           <div className="grocery-head"><strong>{selectedStore}</strong><span>{plannedMeals.length} meals × {people} people · recipe-derived estimate</span></div>
           <p className="estimate-method"><strong>How this is calculated:</strong> We add each selected recipe’s listed cost per serving for {people} people, then adjust for typical pricing at {selectedStore}. It is an estimate—not an exact checkout total—because package sizes, sales, taxes, availability, and items you already have can change the final cost.</p>
           <details className="ingredient-review" open={!ingredientsReviewed}>
-            <summary><span>Review merged ingredients</span><small>{ingredientsReviewed ? "Confirmed" : "Required before export"}</small></summary>
+            <summary><span>1. Review and edit the combined ingredient totals</span><small>{ingredientsReviewed ? "Confirmed" : "Required before export"}</small></summary>
             <div className="ingredient-review-body">
-              <p>We merged repeated ingredients from every recipe. Add a package or quantity note wherever the recipe wording needs clarification.</p>
-              <div className="ingredient-review-list">{groceryEntries.map((entry) => <label key={entry.key}>
-                <span><strong>{entry.name}</strong><small>Used in {entry.occurrences} recipe{entry.occurrences === 1 ? "" : "s"}{entry.originals[0] ? ` · ${entry.originals[0]}` : ""}</small></span>
-                <input className="text-input" value={ingredientAdjustments[entry.key] || ""} onChange={(event) => {
-                  setIngredientAdjustments((current) => ({ ...current, [entry.key]: event.target.value }));
-                  setReviewedPlanSignature("");
-                }} placeholder="Quantity or package note" aria-label={`Quantity or package note for ${entry.name}`} />
-              </label>)}</div>
+              <p>These are the ingredients required across every selected recipe, scaled for {people} people and merged where names match. Recipe wording varies, so review the totals and edit anything that needs a different package size or amount.</p>
+              <div className="ingredient-review-columns" aria-hidden="true"><span>Ingredient</span><span>Total needed</span></div>
+              <div className="ingredient-review-list">{groceryEntries.map((entry) => <div className="ingredient-edit-row" key={entry.key}>
+                <label><span>Ingredient name</span><input className="text-input" value={ingredientNameEdits[entry.key] ?? entry.name} onChange={(event) => { setIngredientNameEdits((current) => ({ ...current, [entry.key]: event.target.value })); setReviewedPlanSignature(""); }} aria-label={`Ingredient name for ${entry.name}`} /></label>
+                <label><span>Total needed</span><input className="text-input" value={ingredientAdjustments[entry.key] ?? entry.suggestedQuantity} onChange={(event) => { setIngredientAdjustments((current) => ({ ...current, [entry.key]: event.target.value })); setReviewedPlanSignature(""); }} aria-label={`Total amount needed for ${entry.name}`} /></label>
+                <small>Combined from {entry.occurrences} recipe use{entry.occurrences === 1 ? "" : "s"}{entry.originals[0] ? ` · source example: ${entry.originals[0]}` : ""}</small>
+              </div>)}</div>
               <button className="primary compact" disabled={!groceryEntries.length} onClick={() => { setReviewedPlanSignature(planSignature); setExportStatus("Ingredients confirmed. Your exports are ready."); }}>{ingredientsReviewed ? "Ingredients confirmed" : "Confirm ingredient list"}</button>
             </div>
           </details>
-          {groceryGroups.length ? groceryGroups.map((group) => <details open key={group.title}><summary><span>{group.icon} {group.title}</span><small>{group.count} {group.count === 1 ? "item" : "items"}</small></summary><div className="checklist">{group.items.map((item) => <label key={item}><input type="checkbox" /> <span>{item}</span><em>{ingredientAdjustments[item.toLowerCase()] || `for ${people}`}</em></label>)}</div></details>) : <p className="empty-state">Select recipes to build your grocery list.</p>}
+          <div className="shopping-checklist-heading"><span className="mini-label">2. SHOPPING CHECKLIST</span><h3>Check items off while you shop</h3><p>This is the same confirmed ingredient list above, reorganized by grocery aisle—not additional or optional items.</p></div>
+          {groceryGroups.length ? groceryGroups.map((group) => <details open key={group.title}><summary><span>{group.icon} {group.title}</span><small>{group.count} {group.count === 1 ? "item" : "items"}</small></summary><div className="checklist">{group.items.map((entry) => <label key={entry.key}><input type="checkbox" /> <span>{groceryItemName(entry)}</span><em>{groceryItemQuantity(entry)}</em></label>)}</div></details>) : <p className="empty-state">Select recipes to build your grocery list.</p>}
         </section>
         <aside className="export-panel">
           <span className="mini-label">READY WHEN YOU ARE</span><h3>Take your plan with you</h3><p>Send lists, recipes, and reminders where you already use them.</p>
           {!ingredientsReviewed && <p className="review-required">Confirm the merged ingredient list to unlock exports.</p>}
           <button disabled={!ingredientsReviewed} onClick={shareGroceryList}><span className="icon-centered" aria-hidden="true">↗</span><div><strong>Share grocery list</strong><small>Send to Notes, Reminders, Keep, or another app</small></div><b>Share</b></button>
+          {instacartEnabled && <button className="instacart-button" disabled={!ingredientsReviewed} onClick={shopOnInstacart}><span aria-hidden="true">●</span><div><strong>Shop on Instacart</strong><small>Review matched products, choose a store, and check out</small></div><b>Open</b></button>}
           <div className="calendar-export"><label htmlFor="calendar-order">Calendar recipe order</label><select id="calendar-order" value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle within each meal type</option></select><button disabled={!ingredientsReviewed} onClick={downloadCalendar}><span className="icon-centered" aria-hidden="true">31</span><div><strong>Google or Apple Calendar</strong><small>Recipes appear on their scheduled dates</small></div><b>Export</b></button></div>
           <div className="email-export"><input type="email" aria-label="Email address for recipe export" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" /><button disabled={!ingredientsReviewed} onClick={emailRecipes}><span className="icon-centered" aria-hidden="true">@</span><div><strong>Email me recipes</strong><small>Send the complete plan</small></div><b>Email</b></button></div>
           {exportStatus && <p className="export-status" aria-live="polite">{exportStatus}</p>}
@@ -1310,7 +1489,7 @@ export default function Home() {
           </div>
           {user.subscriptionStatus ? <button className="primary compact" disabled={billingBusy} onClick={() => openBilling("portal")}>Manage billing</button> : user.role === "admin" ? null : <button className="primary compact" onClick={() => navigateTo("plans")}>View plans</button>}
         </section>
-        <section className="settings-card danger-zone"><h3>Account controls</h3><button className="outline" onClick={async () => { await fetch("/api/auth/signout", { method: "POST" }); setUser(null); setAuthStep("email"); }}>Sign out</button></section>
+        <section className="settings-card danger-zone"><h3>Account controls</h3><button className="outline" onClick={signOut}>Sign out</button></section>
       </div>}
     </div>}
 
@@ -1356,7 +1535,6 @@ export default function Home() {
     {onboardingStep !== null && <div className="onboarding-backdrop"><section className="onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" tabIndex={-1}>
       <button className="modal-close icon-centered" aria-label="Skip introduction" onClick={finishOnboarding}>×</button>
       <span className="mini-label">{onboardingSteps[onboardingStep].eyebrow}</span>
-      <div className="onboarding-icon icon-centered" aria-hidden="true">{["⌂", "⌕", "↕", "✓"][onboardingStep]}</div>
       <h2 id="onboarding-title">{onboardingSteps[onboardingStep].title}</h2>
       <p>{onboardingSteps[onboardingStep].body}</p>
       <div className="onboarding-progress" role="progressbar" aria-valuemin={1} aria-valuemax={onboardingSteps.length} aria-valuenow={onboardingStep + 1} aria-label={`Introduction step ${onboardingStep + 1} of ${onboardingSteps.length}`}>{onboardingSteps.map((step, index) => <i key={step.title} className={index <= onboardingStep ? "active" : ""} />)}</div>

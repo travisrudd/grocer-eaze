@@ -12,6 +12,7 @@ type AppEnv = {
   STRIPE_YEARLY_PRICE_ID?: string;
   PEXELS_API_KEY?: string;
   THEMEALDB_API_KEY?: string;
+  INSTACART_API_KEY?: string;
 };
 import { getSessionUser, handleAuthRequest, hasProductAccess } from "./auth";
 import { handleBillingRequest } from "./billing";
@@ -513,6 +514,7 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
   if (authResponse) return authResponse;
   const sessionUser = await getSessionUser(request, env);
   if (url.pathname === "/api/health") return json({ ok: true });
+  if (url.pathname === "/api/capabilities" && request.method === "GET") return json({ instacartShopping: Boolean(env.INSTACART_API_KEY) });
   if (url.pathname === "/api/location/search" && request.method === "GET") return locationLookup(url);
   if (url.pathname === "/api/location/reverse" && request.method === "GET") return locationLookup(url, true);
   if (url.pathname === "/api/accessibility-feedback" && request.method === "POST") {
@@ -543,13 +545,53 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
     return json({ sent: true });
   }
 
-  const paidPaths = new Set(["/api/recipes/search", "/api/recipes/import", "/api/recipe-image", "/api/calendar", "/api/favorites", "/api/ratings", "/api/email"]);
+  const paidPaths = new Set(["/api/recipes/search", "/api/recipes/import", "/api/recipe-image", "/api/calendar", "/api/favorites", "/api/ratings", "/api/email", "/api/instacart/shopping-list"]);
   if (paidPaths.has(url.pathname) && !sessionUser) return json({ error: "Sign in and choose a membership to continue.", code: "PAYMENT_REQUIRED" }, 401);
   if (paidPaths.has(url.pathname) && !hasProductAccess(sessionUser)) return json({ error: "An active membership or trial is required.", code: "PAYMENT_REQUIRED" }, 402);
   if (url.pathname === "/api/recipes/search" && request.method === "GET") return searchRecipes(url, env);
   if (url.pathname === "/api/recipes/import" && request.method === "POST") return importRecipe(request, env);
   if (url.pathname === "/api/recipe-image" && request.method === "GET") return recipeImageResponse(url, env);
   if (url.pathname === "/api/calendar" && request.method === "POST") return calendarResponse(await request.json());
+  if (url.pathname === "/api/instacart/shopping-list" && request.method === "POST") {
+    if (!env.INSTACART_API_KEY) return json({ error: "Instacart shopping will activate after provider approval and production-key setup." }, 503);
+    const body = await request.json() as {
+      title?: string;
+      items?: Array<{ name?: string; displayText?: string; measurements?: Array<{ quantity?: number; unit?: string }> }>;
+    };
+    const allowedUnits = new Set(["each", "cup", "tablespoon", "teaspoon", "ounce", "pound", "gram", "kilogram", "milliliter", "liter", "gallon", "pint", "quart", "can", "package", "bunch", "head", "large", "medium", "small"]);
+    const items = Array.isArray(body.items) ? body.items.slice(0, 200).map((item) => {
+      const name = String(item.name || "").trim().slice(0, 160);
+      const measurements = (Array.isArray(item.measurements) ? item.measurements : []).slice(0, 4).flatMap((measurement) => {
+        const quantity = Number(measurement.quantity || 0);
+        const unit = String(measurement.unit || "each").toLowerCase();
+        return quantity > 0 && quantity <= 10_000 && allowedUnits.has(unit) ? [{ quantity, unit }] : [];
+      });
+      return {
+        name,
+        display_text: String(item.displayText || name).trim().slice(0, 220),
+        ...(measurements.length ? { line_item_measurements: measurements } : {}),
+      };
+    }).filter((item) => item.name) : [];
+    if (!items.length) return json({ error: "Your grocery list needs at least one ingredient before shopping." }, 400);
+    try {
+      const instacartResponse = await fetch("https://connect.instacart.com/idp/v1/products/products_link", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${env.INSTACART_API_KEY}`, Accept: "application/json", "Content-Type": "application/json", "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)" },
+        body: JSON.stringify({
+          title: String(body.title || "Grocer-Eaze grocery list").trim().slice(0, 200),
+          link_type: "shopping_list",
+          expires_in: 30,
+          line_items: items,
+          landing_page_configuration: { partner_linkback_url: `${url.origin}/#list` },
+        }),
+      });
+      const payload = await instacartResponse.json() as { products_link_url?: string; message?: string; error?: string };
+      if (!instacartResponse.ok || !safeHttpUrl(payload.products_link_url)) return json({ error: payload.message || payload.error || "Instacart could not match this grocery list." }, 502);
+      return json({ url: safeHttpUrl(payload.products_link_url) });
+    } catch {
+      return json({ error: "Instacart is temporarily unavailable. Your Grocer-Eaze list is unchanged." }, 502);
+    }
+  }
 
   if (!sessionUser) return json({ error: "Sign in to access household information." }, 401);
   const ownerId = sessionUser.id;
@@ -594,10 +636,31 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
     }
     if (request.method === "POST") {
       const body = await request.json() as { id?: string; name: string; role: string; preferences?: unknown; allergies?: string };
-      const id = body.id || crypto.randomUUID();
+      const id = String(body.id || crypto.randomUUID()).trim().slice(0, 100);
+      const name = String(body.name || "").trim().slice(0, 100);
+      if (!id || !name) return json({ error: "Enter a name for this family member." }, 400);
+      const role = ["Adult", "Teen", "Child"].includes(String(body.role)) ? String(body.role) : "Family member";
+      const submittedPreferences = body.preferences && typeof body.preferences === "object" ? body.preferences as Record<string, unknown> : {};
+      const preferences = {
+        glutenFree: Boolean(submittedPreferences.glutenFree),
+        lowDairy: Boolean(submittedPreferences.lowDairy),
+        kidFriendly: Boolean(submittedPreferences.kidFriendly),
+        avoidOnions: Boolean(submittedPreferences.avoidOnions),
+        proteins: Array.isArray(submittedPreferences.proteins)
+          ? submittedPreferences.proteins.map(String).filter((protein) => ["Beef", "Pork", "Fish", "Shrimp"].includes(protein)).slice(0, 4)
+          : [],
+      };
+      const allergies = String(body.allergies || "").trim().slice(0, 500);
       const now = new Date().toISOString();
-      await env.DB.prepare("INSERT INTO family_members(id, owner_id, name, role, preferences_json, allergies, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, role=excluded.role, preferences_json=excluded.preferences_json, allergies=excluded.allergies, updated_at=excluded.updated_at")
-        .bind(id, ownerId, body.name, body.role, JSON.stringify(body.preferences || {}), body.allergies || "", now, now).run();
+      const existing = await env.DB.prepare("SELECT owner_id FROM family_members WHERE id = ?").bind(id).first();
+      if (existing && String(existing.owner_id) !== ownerId) return json({ error: "That family member was not found." }, 404);
+      if (existing) {
+        await env.DB.prepare("UPDATE family_members SET name = ?, role = ?, preferences_json = ?, allergies = ?, updated_at = ? WHERE id = ? AND owner_id = ?")
+          .bind(name, role, JSON.stringify(preferences), allergies, now, id, ownerId).run();
+      } else {
+        await env.DB.prepare("INSERT INTO family_members(id, owner_id, name, role, preferences_json, allergies, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)")
+          .bind(id, ownerId, name, role, JSON.stringify(preferences), allergies, now, now).run();
+      }
       return json({ saved: true, id });
     }
     if (request.method === "DELETE") {
