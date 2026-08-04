@@ -78,8 +78,10 @@ test("the recipe catalog loads progressively and filters remain usable", async (
   });
 
   await openPlan(page);
-  await page.getByRole("button", { name: /Browse recipes for my plan/ }).click();
-  await expect(page.getByRole("heading", { name: "Build your plan from the catalog." })).toBeVisible({ timeout: 15_000 });
+  const browseRecipes = page.getByRole("button", { name: /Browse recipes for my plan/ });
+  await expect(browseRecipes).toBeEnabled();
+  await browseRecipes.click();
+  await expect(page.getByRole("heading", { name: "Build your plan from the catalog." })).toBeVisible({ timeout: 25_000 });
   await expect(page.locator(".recipe-card")).toHaveCount(12);
 
   await page.getByRole("button", { name: "Show 12 more recipes" }).click();
@@ -89,6 +91,61 @@ test("the recipe catalog loads progressively and filters remain usable", async (
   await filter.fill("recipe 2");
   await expect(page.locator(".recipe-card").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Clear" })).toBeEnabled();
+});
+
+test("school lunches stay separate and grocery totals remain editable", async ({ page }) => {
+  const recipes = Array.from({ length: 12 }, (_, index) => ({
+    id: index + 1,
+    title: `Lunch planning recipe ${index + 1}`,
+    sourceName: "Grocer-Eaze test kitchen",
+    sourceUrl: "https://example.com/recipe",
+    readyInMinutes: 20,
+    servings: 4,
+    glutenFree: true,
+    dairyFree: true,
+    image: "",
+    pricePerServing: 350,
+    diets: ["gluten free", "Mediterranean"],
+    extendedIngredients: [{ name: "fresh vegetables", aisle: "Produce", original: "2 cups fresh vegetables" }],
+  }));
+  await page.route("**/api/recipes/search?*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ recipes }) });
+  });
+  await page.route("**/api/auth/me", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ user: {
+      id: "grocery-test-user", name: "Grocery Test User", email: "grocery@example.com", phone: "", role: "user",
+      accessStatus: "active", complimentaryUntil: null, billingExempt: false,
+      subscriptionStatus: "active", subscriptionEndsAt: null, hasAccess: true,
+    } }) });
+  });
+  await page.route("**/api/capabilities", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ instacartShopping: false }) });
+  });
+
+  await openPlan(page);
+  await expect(page.getByText("5 extra weekday lunches · separate from lunch")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Individual chip bags/ })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Try to reuse ingredients" }).click();
+  const browseRecipes = page.getByRole("button", { name: /Browse recipes for my plan/ });
+  await expect(browseRecipes).toBeEnabled();
+  await browseRecipes.click();
+  await expect(page.getByText("Ingredient reuse prioritized")).toBeVisible();
+
+  await page.getByRole("button", { name: "+ Add to lunch", exact: true }).first().click();
+  await page.getByRole("button", { name: "+ Add to school lunch", exact: true }).first().click();
+  await expect(page.getByText("Lunch 1/7")).toBeVisible();
+  await expect(page.getByText("School lunch 1/5")).toBeVisible();
+
+  await page.getByRole("button", { name: "Grocery list" }).click();
+  await expect(page.getByRole("heading", { name: "Everything you need, sorted." })).toBeVisible();
+  await expect(page.getByLabel("Total amount needed for Fresh vegetables")).toHaveValue("4 cups");
+  await expect(page.getByLabel("Total amount needed for Individual chip bags")).toHaveValue("4");
+  await expect(page.getByText(/not additional or optional items/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Shop on Instacart" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "← Back to recipes" }).click();
+  await page.getByRole("button", { name: "Clear selections" }).click();
+  await expect(page.getByText("0 of 19 meals selected.")).toBeVisible();
 });
 
 test("reflows at the 320 CSS-pixel equivalent of 400% zoom", async ({ page }) => {

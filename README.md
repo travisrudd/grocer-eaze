@@ -32,4 +32,6 @@ Major interaction or layout changes should also complete the [manual accessibili
 
 ## Hosting
 
-The application uses the existing OpenAI Sites project declared in `.openai/hosting.json`, with Cloudflare-compatible server output and D1-backed application data.
+The production application runs on Cloudflare Workers with D1-backed account data and deploys from GitHub Actions. The original OpenAI Sites project identifier remains in `.openai/hosting.json` as recovery history and must not be duplicated.
+
+Hosted service credentials are configured as server-side Worker secrets. The shopping handoff uses `INSTACART_API_KEY`; the interface exposes it only after Instacart approves a production key and the secret is configured. DoorDash and Uber Eats consumer-cart handoffs remain deferred until those providers offer or approve suitable consumer integrations.
