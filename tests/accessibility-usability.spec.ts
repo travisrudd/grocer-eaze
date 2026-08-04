@@ -240,6 +240,7 @@ test("school lunches stay separate and grocery totals remain editable", async ({
 
   await page.getByRole("button", { name: "Confirm ingredients & build shopping list →" }).click();
   await expect(page.getByRole("heading", { name: "Review the list you’ll take shopping." })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   await expect(page.getByText("This is your final shopping list—not optional add-ons.", { exact: false })).toBeVisible();
   await expect(page.locator(".shopping-list-preview input")).toHaveCount(0);
   await expect(page.locator(".shopping-list-preview li").filter({ hasText: "Yellow onions" })).toHaveCount(1);
@@ -256,7 +257,18 @@ test("school lunches stay separate and grocery totals remain editable", async ({
   await expect(page.getByText("Approve your shopping list before choosing how to send or save it.")).toBeVisible();
   await page.getByRole("button", { name: "Approve list & choose how to send or save →" }).click();
   await expect(page.getByRole("heading", { name: "Choose what happens next." })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   await expect(page.getByRole("button", { name: "Select all" })).toBeVisible();
+  await expect(page.getByRole("radio", { name: "Text list" })).toBeChecked();
+  await expect(page.getByRole("radio", { name: "Email list" })).not.toBeChecked();
+  await expect(page.getByRole("radio", { name: "Copy list to clipboard" })).not.toBeChecked();
+  await expect(page.getByRole("radio", { name: "Note" })).not.toBeChecked();
+  await expect(page.getByRole("radio", { name: "Reminder or task list" })).toHaveCount(0);
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.getByRole("radio", { name: "Copy list to clipboard" }).check();
+  await page.getByRole("button", { name: "Run 1 action →" }).click();
+  await expect(page.getByText("Grocery list copied to your clipboard.")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain("Groceries +");
   await page.getByRole("button", { name: "← Review shopping list" }).click();
   await expect(page.getByRole("heading", { name: "Review the list you’ll take shopping." })).toBeVisible();
   await page.locator(".page-heading").getByRole("button", { name: "← Edit ingredients" }).click();

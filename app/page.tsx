@@ -339,7 +339,7 @@ export default function Home() {
   const [planSaveStatus, setPlanSaveStatus] = useState("");
   const [instacartEnabled, setInstacartEnabled] = useState(false);
   const [deliveryActions, setDeliveryActions] = useState({ grocery: true, email: false, calendar: false, instacart: false });
-  const [groceryDestination, setGroceryDestination] = useState<"reminders" | "notes">("reminders");
+  const [groceryDestination, setGroceryDestination] = useState<"text" | "email" | "copy" | "notes">("text");
   const [calendarProvider, setCalendarProvider] = useState<"google" | "apple">("google");
   const [emailRecipients, setEmailRecipients] = useState("");
   const [emailDialogOpen, setEmailDialogOpen] = useState(false);
@@ -628,7 +628,7 @@ export default function Home() {
         const actions = saved.deliveryActions as Record<string, unknown>;
         setDeliveryActions({ grocery: Boolean(actions.grocery), email: Boolean(actions.email), calendar: Boolean(actions.calendar), instacart: Boolean(actions.instacart) });
       }
-      if (saved.groceryDestination === "notes" || saved.groceryDestination === "reminders") setGroceryDestination(saved.groceryDestination);
+      if (["text", "email", "copy", "notes"].includes(String(saved.groceryDestination))) setGroceryDestination(saved.groceryDestination as "text" | "email" | "copy" | "notes");
       if (saved.calendarProvider === "apple" || saved.calendarProvider === "google") setCalendarProvider(saved.calendarProvider);
       if (typeof saved.emailRecipients === "string") setEmailRecipients(saved.emailRecipients.slice(0, 2000));
     } catch { /* Ignore a corrupted device cache. */ }
@@ -806,6 +806,13 @@ export default function Home() {
       accessibility: "Accessibility",
     };
     document.title = `${titles[view]} | Grocer-Eaze`;
+  }, [view]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      scrollViewportToTop();
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [view]);
 
   useEffect(() => {
@@ -1532,26 +1539,41 @@ export default function Home() {
       : `${start.toLocaleDateString("en-US", { month: "short", day: "numeric" })} - ${end.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
   }
 
-  function groceryListText(destination: "reminders" | "notes") {
-    const heading = destination === "reminders" ? "Shopping reminders" : "Grocery note";
-    return `${heading}: Groceries, ${groceryDateLabel()}\n\n${groceryGroups.map((group) => `${group.title}\n${group.items.map((entry) => `☐ ${groceryItemName(entry)} — ${groceryItemQuantity(entry)}`).join("\n")}`).join("\n\n")}`;
+  function groceryListTitle() {
+    return `Groceries + ${groceryDateLabel()}`;
   }
 
-  async function shareGroceryList(destination: "reminders" | "notes" = groceryDestination) {
+  function groceryListText() {
+    return `${groceryListTitle()}\n\n${groceryGroups.map((group) => `${group.title}\n${group.items.map((entry) => `☐ ${groceryItemName(entry)} — ${groceryItemQuantity(entry)}`).join("\n")}`).join("\n\n")}`;
+  }
+
+  async function shareGroceryList(destination: "text" | "email" | "copy" | "notes" = groceryDestination) {
     if (!groceryListApproved) throw new Error("Approve the grocery list before sending it.");
     if (!groceryGroups.length) throw new Error("Every ingredient is marked as already on hand, so there is no shopping list to send.");
-    const text = groceryListText(destination);
-    const targetLabel = destination === "reminders" ? "Reminders or Tasks" : "Notes or Keep";
+    const title = groceryListTitle();
+    const text = groceryListText();
+    if (destination === "text") {
+      window.location.href = `sms:?&body=${encodeURIComponent(text)}`;
+      return "Text message draft opened with your grocery list.";
+    }
+    if (destination === "email") {
+      window.location.href = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(text)}`;
+      return "Email draft opened with your grocery list.";
+    }
+    if (destination === "copy") {
+      await navigator.clipboard.writeText(text);
+      return "Grocery list copied to your clipboard.";
+    }
     if (navigator.share) {
       try {
-        await navigator.share({ title: `Groceries, ${groceryDateLabel()}`, text });
-        return `Grocery list shared for ${targetLabel}.`;
+        await navigator.share({ title, text });
+        return "Grocery list shared for Notes or Keep.";
       } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") return "Grocery sharing was cancelled; the rest of your selected actions continued.";
+        if (error instanceof DOMException && error.name === "AbortError") return "Note sharing was cancelled; the rest of your selected actions continued.";
       }
     }
     await navigator.clipboard.writeText(text);
-    return `Grocery list copied for ${targetLabel}.`;
+    return "The share menu is unavailable, so the grocery list was copied for Notes or Keep.";
   }
 
   async function shopOnInstacart() {
@@ -1774,7 +1796,17 @@ export default function Home() {
     setView(nextView);
     const nextHash = `#${nextView}`;
     if (window.location.hash !== nextHash) window.history.pushState(null, "", nextHash);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    scrollViewportToTop();
+  }
+
+  function scrollViewportToTop() {
+    const root = document.documentElement;
+    const previousBehavior = root.style.scrollBehavior;
+    root.style.scrollBehavior = "auto";
+    root.scrollTop = 0;
+    document.body.scrollTop = 0;
+    window.scrollTo(0, 0);
+    root.style.scrollBehavior = previousBehavior;
   }
 
   function focusMainContent() {
@@ -2031,7 +2063,7 @@ export default function Home() {
       {plannedMeals.length && groceryListApproved ? <>
         <div className="delivery-toolbar"><div><strong>{selectedDeliveryActionCount} selected</strong><small>{plannedMeals.length} meals · {shoppingEntries.length} shopping items</small></div><button type="button" className="outline compact" onClick={() => setDeliveryActions((current) => ({ grocery: !allDeliveryActionsSelected, email: !allDeliveryActionsSelected, calendar: !allDeliveryActionsSelected, instacart: instacartEnabled ? !allDeliveryActionsSelected : current.instacart }))}>{allDeliveryActionsSelected ? "Clear all" : "Select all"}</button></div>
         <section className="delivery-action-grid" aria-label="Send and save options">
-          <article className={deliveryActions.grocery ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.grocery} onChange={() => setDeliveryActions((current) => ({ ...current, grocery: !current.grocery }))} /><span><strong>Send grocery list</strong><small>{shoppingEntries.length} items; “already have” ingredients stay excluded</small></span></label>{deliveryActions.grocery && <fieldset><legend>Send as</legend><label><input type="radio" name="grocery-destination" checked={groceryDestination === "reminders"} onChange={() => setGroceryDestination("reminders")} /> Reminder or task list</label><label><input type="radio" name="grocery-destination" checked={groceryDestination === "notes"} onChange={() => setGroceryDestination("notes")} /> Note</label><small>Your device’s share menu opens so you can choose Apple Reminders, Notes, Google Tasks, Keep, or another installed app.</small></fieldset>}</article>
+          <article className={deliveryActions.grocery ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.grocery} onChange={() => setDeliveryActions((current) => ({ ...current, grocery: !current.grocery }))} /><span><strong>Send grocery list</strong><small>{shoppingEntries.length} items; “already have” ingredients stay excluded</small></span></label>{deliveryActions.grocery && <fieldset><legend>Send as</legend><label><input type="radio" name="grocery-destination" checked={groceryDestination === "text"} onChange={() => setGroceryDestination("text")} /> Text list</label><label><input type="radio" name="grocery-destination" checked={groceryDestination === "email"} onChange={() => setGroceryDestination("email")} /> Email list</label><label><input type="radio" name="grocery-destination" checked={groceryDestination === "copy"} onChange={() => setGroceryDestination("copy")} /> Copy list to clipboard</label><label><input type="radio" name="grocery-destination" checked={groceryDestination === "notes"} onChange={() => setGroceryDestination("notes")} /> Note</label><small>{groceryDestination === "text" ? "Opens a prefilled message with the complete list." : groceryDestination === "email" ? "Opens a prefilled email with the complete list." : groceryDestination === "copy" ? "Copies the list so you can paste it into Reminders or any other app." : "Opens your device’s share menu so you can choose Notes, Keep, or another installed app."}</small></fieldset>}</article>
           <article className={deliveryActions.email ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.email} onChange={() => { const next = !deliveryActions.email; setDeliveryActions((current) => ({ ...current, email: next })); if (next && !emailRecipients.trim()) setEmailDialogOpen(true); }} /><span><strong>Email recipes</strong><small>Recipe names link to their original pages</small></span></label>{deliveryActions.email && <div className="delivery-action-settings"><span>{parsedEmailRecipients().length ? `${parsedEmailRecipients().length} recipient${parsedEmailRecipients().length === 1 ? "" : "s"}` : "Recipients needed"}</span><button type="button" className="outline compact" onClick={() => setEmailDialogOpen(true)}>Add or edit recipients</button></div>}</article>
           <article className={deliveryActions.calendar ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.calendar} onChange={() => setDeliveryActions((current) => ({ ...current, calendar: !current.calendar }))} /><span><strong>Save meal plan to calendar</strong><small>Each recipe, link, and meal type appears on its scheduled date</small></span></label>{deliveryActions.calendar && <fieldset><legend>Calendar</legend><label><input type="radio" name="calendar-provider" checked={calendarProvider === "google"} onChange={() => setCalendarProvider("google")} /> Google Calendar</label><label><input type="radio" name="calendar-provider" checked={calendarProvider === "apple"} onChange={() => setCalendarProvider("apple")} /> Apple Calendar</label><label className="delivery-select">Recipe order<select value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle within each meal type</option></select></label><small>A standard calendar file downloads, ready to open or import into your chosen calendar.</small></fieldset>}</article>
           {instacartEnabled && <article className={deliveryActions.instacart ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.instacart} onChange={() => setDeliveryActions((current) => ({ ...current, instacart: !current.instacart }))} /><span><strong>Open in Instacart</strong><small>Match your shopping list, choose a store, and review before checkout</small></span></label></article>}

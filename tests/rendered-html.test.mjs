@@ -116,7 +116,17 @@ test("shares grocery lists cross-platform and safely links emailed recipes", asy
   ]);
 
   assert.match(page, /navigator\.share/);
-  assert.match(page, /Apple Reminders, Notes, Google Tasks, Keep/);
+  assert.match(page, /useState<"text" \| "email" \| "copy" \| "notes">\("text"\)/);
+  assert.match(page, /Text list/);
+  assert.match(page, /Email list/);
+  assert.match(page, /Copy list to clipboard/);
+  assert.match(page, /sms:\?&body=\$\{encodeURIComponent\(text\)\}/);
+  assert.match(page, /mailto:\?subject=\$\{encodeURIComponent\(title\)\}&body=\$\{encodeURIComponent\(text\)\}/);
+  assert.match(page, /Groceries \+ \$\{groceryDateLabel\(\)\}/);
+  assert.doesNotMatch(page, /Apple Reminders|Reminder or task list/);
+  assert.match(page, /function scrollViewportToTop\(\)/);
+  assert.match(page, /root\.style\.scrollBehavior = "auto"/);
+  assert.match(page, /window\.scrollTo\(0, 0\)/);
   assert.match(page, /Choose what happens next/);
   assert.match(page, /Select all/);
   assert.match(page, /meals: plannedMeals\.map/);
