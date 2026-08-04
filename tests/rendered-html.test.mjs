@@ -202,6 +202,10 @@ test("keeps school lunches separate and turns merged ingredients into editable t
   assert.doesNotMatch(api, /extendedIngredients:\s*\[\{ name: "fresh vegetables"/i);
   assert.match(css, /grid-template-columns:\s*minmax\(180px, 1\.2fr\)\s+minmax\(160px, \.85fr\)\s+minmax\(140px, \.65fr\)\s+minmax\(150px, \.7fr\)/);
   assert.match(css, /ingredient-choice-control/);
+  assert.match(css, /\.ingredient-choice-control\s*\{[^}]*height:\s*40px[^}]*margin-top:\s*18\.5px/);
+  assert.match(css, /\.ingredient-review-list\s*\{\s*display:\s*grid/);
+  assert.doesNotMatch(css, /\.ingredient-review-list\s*\{[^}]*max-height/);
+  assert.doesNotMatch(css, /\.ingredient-review-list\s*\{[^}]*overflow-y/);
 });
 
 test("tracks recipe provider expansion as a release-safe backlog item", async () => {
