@@ -152,3 +152,21 @@ test("restores returning accounts and hardens passwordless sign-in", async () =>
   assert.match(worker, /X-Content-Type-Options/);
   assert.match(worker, /Strict-Transport-Security/);
 });
+
+test("recovers approved administrators after the hosting migration", async () => {
+  const [auth, worker, config, workflow] = await Promise.all([
+    source("worker/auth.ts"),
+    source("worker/index.ts"),
+    source("wrangler.production.jsonc"),
+    source(".github/workflows/cloudflare-deploy.yml"),
+  ]);
+
+  assert.match(auth, /INITIAL_ADMIN_EMAILS/);
+  assert.match(auth, /split\(","\)/);
+  assert.match(auth, /isInitialAdmin \? "admin" : "user"/);
+  assert.match(worker, /INITIAL_ADMIN_EMAILS/);
+  assert.match(config, /"database_name": "grocer-eaze-production"/);
+  assert.match(config, /"INITIAL_ADMIN_EMAILS"/);
+  assert.match(workflow, /workflow_dispatch/);
+  assert.match(workflow, /wrangler\.production\.jsonc/);
+});

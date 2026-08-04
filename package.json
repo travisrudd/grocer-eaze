@@ -9,6 +9,11 @@
     "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
+    "preview:cloudflare": "npm run build && wrangler dev --config wrangler.production.jsonc",
+    "deploy:cloudflare": "npm run build && wrangler deploy --config wrangler.production.jsonc",
+    "deploy:cloudflare:dry-run": "npm run build && wrangler deploy --config wrangler.production.jsonc --dry-run",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote --config wrangler.production.jsonc",
+    "cf:types": "wrangler types --config wrangler.production.jsonc worker-configuration.d.ts",
     "test": "npm run build && npm run test:unit && npm run ux:audit",
     "test:unit": "node --test tests/rendered-html.test.mjs",
     "test:e2e": "playwright test",
@@ -45,13 +50,14 @@
   },
   "overrides": {
     "@babel/core": "7.29.7",
-    "brace-expansion@<1.1.16": "1.1.16",
+    "brace-expansion@<1.1.18": "1.1.18",
     "brace-expansion@>=3.0.0 <5.0.9": "5.0.9",
     "esbuild": "0.28.1",
     "fast-uri": "3.1.5",
     "js-yaml": "4.3.0",
     "postcss": "8.5.25",
-    "sharp": "0.35.3"
+    "sharp": "0.35.3",
+    "undici@>=7.0.0 <7.29.0": "7.29.0"
   },
   "type": "module"
 }
