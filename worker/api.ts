@@ -16,8 +16,10 @@ type AppEnv = {
 };
 import { getSessionUser, handleAuthRequest, hasProductAccess } from "./auth";
 import { handleBillingRequest } from "./billing";
+import { cleanRecipeText, normalizeRecipeInstructions, renderRecipeReader, type RecipeInstructionSection, type RecipeReaderContent } from "./recipe-reader";
 
 const preferredSources = ["allrecipes.com", "foodnetwork.com", "eatingwell.com", "seriouseats.com", "simplyrecipes.com"];
+const publicAppOrigin = "https://grocer-eaze.com";
 
 const fallbackTitles = [
   "Lemon Herb Salmon", "Tuscan White Bean Skillet", "Chicken Souvlaki Bowls", "Tomato Basil Turkey Meatballs",
@@ -174,6 +176,7 @@ const fallbackRecipes = fallbackTitles.map((title, index) => {
     pricePerServing: 280 + (index % 7) * 55,
     diets: ["gluten free", "Mediterranean"],
     extendedIngredients,
+    instructions: [] as RecipeInstructionSection[],
   };
 });
 
@@ -203,6 +206,7 @@ type Recipe = {
   pricePerServing: number;
   diets: string[];
   extendedIngredients: Array<{ name: string; aisle: string; original: string }>;
+  instructions: RecipeInstructionSection[];
 };
 
 const glutenWords = /\b(wheat|flour|bread|breadcrumbs|pasta|noodles|couscous|barley|rye|soy sauce|tortilla)\b/i;
@@ -267,6 +271,7 @@ function normalizeMealDb(meal: Record<string, unknown>): Recipe {
     pricePerServing: Math.min(900, 250 + ingredients.length * 18),
     diets: mediterranean ? ["Mediterranean"] : [],
     extendedIngredients: ingredients,
+    instructions: normalizeRecipeInstructions(meal.strInstructions),
   };
 }
 
@@ -313,11 +318,31 @@ async function spoonacularRecipes(url: URL, env: AppEnv, requested: number) {
     if (!response.ok) return { recipes: [] as Recipe[], status: `error-${response.status}` };
     const data = await response.json() as { results?: Array<Record<string, unknown>> };
     const recipes = (data.results || []).map((result) => {
-      const recipe = result as unknown as Recipe;
+      const recipe = result as Record<string, unknown>;
       const extendedIngredients = Array.isArray(recipe.extendedIngredients)
-        ? recipe.extendedIngredients.filter((ingredient) => isConcreteIngredientName(ingredient.name))
+        ? recipe.extendedIngredients.flatMap((ingredient) => {
+          if (!ingredient || typeof ingredient !== "object") return [];
+          const item = ingredient as Record<string, unknown>;
+          const name = String(item.name || item.nameClean || item.original || "").trim();
+          return isConcreteIngredientName(name) ? [{ name, aisle: String(item.aisle || ingredientAisle(name)), original: String(item.original || name) }] : [];
+        })
         : [];
-      return { ...recipe, extendedIngredients };
+      const ingredientText = extendedIngredients.map((ingredient) => ingredient.name).join(" ");
+      return {
+        id: String(recipe.id || crypto.randomUUID()),
+        title: String(recipe.title || "Spoonacular recipe"),
+        sourceName: String(recipe.sourceName || "Spoonacular"),
+        sourceUrl: safeHttpUrl(recipe.sourceUrl || recipe.spoonacularSourceUrl),
+        readyInMinutes: Math.max(1, Number(recipe.readyInMinutes || 40)),
+        servings: Math.max(1, Number(recipe.servings || 4)),
+        glutenFree: recipe.glutenFree === true || !glutenWords.test(ingredientText),
+        dairyFree: recipe.dairyFree === true || !dairyWords.test(ingredientText),
+        image: safeHttpUrl(recipe.image),
+        pricePerServing: Math.max(0, Number(recipe.pricePerServing || 0)),
+        diets: Array.isArray(recipe.diets) ? recipe.diets.map(String).slice(0, 20) : [],
+        extendedIngredients,
+        instructions: normalizeRecipeInstructions(recipe.analyzedInstructions || recipe.instructions),
+      } satisfies Recipe;
     }).filter((recipe) => recipe.extendedIngredients.length > 0);
     return { recipes, status: "ok" };
   } catch {
@@ -413,6 +438,8 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE INDEX IF NOT EXISTS recipe_ratings_owner_idx ON recipe_ratings(owner_id)"),
     db.prepare("CREATE TABLE IF NOT EXISTS recipe_catalog (id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_name TEXT NOT NULL, source_url TEXT NOT NULL, title TEXT NOT NULL, search_text TEXT NOT NULL, recipe_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE INDEX IF NOT EXISTS recipe_catalog_updated_idx ON recipe_catalog(updated_at)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS recipe_readers (share_token TEXT PRIMARY KEY, owner_id TEXT NOT NULL, recipe_key TEXT NOT NULL, source_url TEXT NOT NULL, content_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS recipe_readers_owner_recipe_idx ON recipe_readers(owner_id, recipe_key)"),
   ]);
 }
 
@@ -445,7 +472,10 @@ async function searchRecipes(url: URL, env: AppEnv) {
     spoonacularRecipes(url, env, requested),
     mealDbRecipes(url, env, requested),
   ]);
-  await cacheRecipes(env.DB, mealDb.recipes, "themealdb");
+  await Promise.all([
+    cacheRecipes(env.DB, spoonacular.recipes, "spoonacular"),
+    cacheRecipes(env.DB, mealDb.recipes, "themealdb"),
+  ]);
   const preferred = spoonacular.recipes.sort((a, b) => {
     const aUrl = String(a.sourceUrl || "");
     const bUrl = String(b.sourceUrl || "");
@@ -476,11 +506,11 @@ async function searchRecipes(url: URL, env: AppEnv) {
 
 function isPublicRecipeUrl(value: unknown) {
   const safe = safeHttpUrl(value);
-  if (!safe) return "";
+  if (!safe || safe.length > 2_048) return "";
   const parsed = new URL(safe);
   const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (parsed.username || parsed.password || !["", "80", "443"].includes(parsed.port)) return "";
-  if (host === "localhost" || host.endsWith(".local") || host === "0.0.0.0" || host === "::1") return "";
+  if (host === "localhost" || host === "metadata" || host === "instance-data" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal") || host.endsWith(".home") || host.endsWith(".lan") || host.endsWith(".svc") || host === "0.0.0.0" || host === "::1") return "";
   if (/^\d+$/.test(host) || host.includes(":") || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return "";
   if (/^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) return "";
   return parsed.toString();
@@ -492,6 +522,7 @@ async function fetchRecipePage(input: string) {
     const response = await fetch(current, {
       redirect: "manual",
       headers: { "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)", Accept: "text/html,application/xhtml+xml" },
+      signal: AbortSignal.timeout(10_000),
     });
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       const next = isPublicRecipeUrl(new URL(response.headers.get("location") || "", current).toString());
@@ -501,7 +532,26 @@ async function fetchRecipePage(input: string) {
     }
     if (!response.ok) throw new Error("That recipe page could not be opened.");
     if (!String(response.headers.get("content-type") || "").toLowerCase().includes("html")) throw new Error("That link is not an HTML recipe page.");
-    return { html: (await response.text()).slice(0, 1_500_000), finalUrl: response.url || current };
+    const maximumBytes = 1_500_000;
+    const declaredBytes = Number(response.headers.get("content-length") || 0);
+    if (declaredBytes > maximumBytes) throw new Error("That recipe page is too large to read safely.");
+    if (!response.body) return { html: "", finalUrl: response.url || current };
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let received = 0;
+    let html = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > maximumBytes) {
+        await reader.cancel();
+        throw new Error("That recipe page is too large to read safely.");
+      }
+      html += decoder.decode(value, { stream: true });
+    }
+    html += decoder.decode();
+    return { html, finalUrl: response.url || current };
   }
   throw new Error("That recipe link redirects too many times.");
 }
@@ -518,6 +568,16 @@ function findRecipeJsonLd(value: unknown): Record<string, unknown> | null {
   for (const key of ["@graph", "mainEntity", "itemListElement"]) {
     const found = findRecipeJsonLd(record[key]);
     if (found) return found;
+  }
+  return null;
+}
+
+function recipeJsonLdFromHtml(html: string) {
+  for (const match of html.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const recipe = findRecipeJsonLd(JSON.parse(match[1].trim()));
+      if (recipe) return recipe;
+    } catch { /* Some pages include unrelated malformed structured data; try the next block. */ }
   }
   return null;
 }
@@ -540,13 +600,7 @@ async function importRecipe(request: Request, env: AppEnv) {
   if (!input) return json({ error: "Enter a public recipe page link beginning with http:// or https://." }, 400);
   try {
     const { html, finalUrl } = await fetchRecipePage(input);
-    let recipeData: Record<string, unknown> | null = null;
-    for (const match of html.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
-      try {
-        recipeData = findRecipeJsonLd(JSON.parse(match[1].trim()));
-        if (recipeData) break;
-      } catch { /* Some pages include unrelated malformed structured data; try the next block. */ }
-    }
+    const recipeData = recipeJsonLdFromHtml(html);
     if (!recipeData) return json({ error: "We couldn’t find structured recipe details on that page. Try another recipe link." }, 422);
     const ingredientLines = Array.isArray(recipeData.recipeIngredient) ? recipeData.recipeIngredient.map(String).filter(Boolean) : [];
     if (!ingredientLines.length) return json({ error: "That page names a recipe but does not provide an ingredient list we can import." }, 422);
@@ -575,6 +629,7 @@ async function importRecipe(request: Request, env: AppEnv) {
       pricePerServing: Math.min(900, 250 + extendedIngredients.length * 18),
       diets: /mediterranean/i.test(descriptor) ? ["Mediterranean"] : [],
       extendedIngredients,
+      instructions: normalizeRecipeInstructions(recipeData.recipeInstructions),
     };
     await ensureSchema(env.DB);
     await cacheRecipes(env.DB, [recipe], "import");
@@ -582,6 +637,198 @@ async function importRecipe(request: Request, env: AppEnv) {
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : "That recipe could not be imported." }, 502);
   }
+}
+
+type ReaderMealInput = {
+  mealId?: unknown;
+  recipeId?: unknown;
+  title?: unknown;
+  sourceName?: unknown;
+  sourceUrl?: unknown;
+  readyInMinutes?: unknown;
+  servings?: unknown;
+  ingredients?: unknown;
+  instructions?: unknown;
+  recipeServings?: unknown;
+  extendedIngredients?: unknown;
+  recipeInstructions?: unknown;
+  analyzedInstructions?: unknown;
+};
+
+function readerContentFromRecipe(value: ReaderMealInput | Record<string, unknown>): RecipeReaderContent | null {
+  const sourceUrl = isPublicRecipeUrl(value.sourceUrl);
+  if (!sourceUrl) return null;
+  const ingredients = Array.isArray(value.ingredients)
+    ? value.ingredients.flatMap((ingredient) => {
+      if (typeof ingredient === "string") {
+        const text = cleanRecipeText(ingredient, 400);
+        return text ? [text] : [];
+      }
+      if (!ingredient || typeof ingredient !== "object") return [];
+      const item = ingredient as Record<string, unknown>;
+      const text = cleanRecipeText(item.original || item.name, 400);
+      return text ? [text] : [];
+    }).slice(0, 250)
+    : Array.isArray(value.extendedIngredients)
+      ? (value.extendedIngredients as unknown[]).flatMap((ingredient) => {
+        if (!ingredient || typeof ingredient !== "object") return [];
+        const item = ingredient as Record<string, unknown>;
+        const text = cleanRecipeText(item.original || item.name, 400);
+        return text ? [text] : [];
+      }).slice(0, 250)
+      : [];
+  const instructions = normalizeRecipeInstructions(value.instructions || value.recipeInstructions || value.analyzedInstructions);
+  return {
+    title: cleanRecipeText(value.title, 200) || "Recipe",
+    sourceName: cleanRecipeText(value.sourceName, 120) || new URL(sourceUrl).hostname.replace(/^www\./, ""),
+    sourceUrl,
+    readyInMinutes: Math.max(0, Math.min(1_440, Math.round(Number(value.readyInMinutes || 0)) || 0)),
+    servings: Math.max(0, Math.min(100, Math.round(Number(value.servings || value.recipeServings || 0)) || 0)),
+    ingredients,
+    instructions,
+    extractionStatus: instructions.length ? "complete" : "pending",
+  };
+}
+
+async function readerRecipeKey(recipeId: string, sourceUrl: string) {
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${recipeId}\n${sourceUrl}`));
+  return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function randomReaderToken() {
+  return [...crypto.getRandomValues(new Uint8Array(32))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function requestTextWithinLimit(request: Request, maximumBytes: number) {
+  const declaredBytes = Number(request.headers.get("content-length") || 0);
+  if (declaredBytes > maximumBytes) throw new Error("REQUEST_TOO_LARGE");
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder();
+  let received = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > maximumBytes) {
+      await reader.cancel();
+      throw new Error("REQUEST_TOO_LARGE");
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
+async function createRecipeReaders(request: Request, env: AppEnv, ownerId: string) {
+  let bodyText = "";
+  try { bodyText = await requestTextWithinLimit(request, 750_000); }
+  catch { return json({ error: "This meal plan is too large to prepare for the recipe reader." }, 413); }
+  let body: { meals?: ReaderMealInput[] };
+  try { body = JSON.parse(bodyText) as { meals?: ReaderMealInput[] }; }
+  catch { return json({ error: "A valid meal plan is required." }, 400); }
+  const meals = Array.isArray(body.meals) ? body.meals.slice(0, 100) : [];
+  if (!meals.length) return json({ error: "Add at least one recipe before creating calendar links." }, 400);
+  await ensureSchema(env.DB);
+
+  const catalogResults = await env.DB.batch(meals.map((meal) => env.DB.prepare("SELECT recipe_json FROM recipe_catalog WHERE id = ? OR source_url = ? ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END LIMIT 1")
+    .bind(String(meal.recipeId || "").slice(0, 200), isPublicRecipeUrl(meal.sourceUrl), String(meal.recipeId || "").slice(0, 200))));
+  const prepared = (await Promise.all(meals.map(async (meal, index) => {
+    const mealId = String(meal.mealId || "").slice(0, 200);
+    const recipeId = String(meal.recipeId || mealId || "").slice(0, 200);
+    let submitted = readerContentFromRecipe(meal);
+    const catalogRow = catalogResults[index]?.results?.[0] as { recipe_json?: unknown } | undefined;
+    if (catalogRow?.recipe_json) {
+      try {
+        const cached = readerContentFromRecipe(JSON.parse(String(catalogRow.recipe_json)) as Record<string, unknown>);
+        if (cached) {
+          submitted = submitted ? {
+            ...submitted,
+            ingredients: submitted.ingredients.length ? submitted.ingredients : cached.ingredients,
+            instructions: submitted.instructions.length ? submitted.instructions : cached.instructions,
+            extractionStatus: submitted.instructions.length || cached.instructions.length ? "complete" : "pending",
+          } : cached;
+        }
+      } catch { /* Use the validated plan copy when an old catalog row is malformed. */ }
+    }
+    if (!submitted) return null;
+    return { mealId, recipeId, recipeKey: await readerRecipeKey(recipeId, submitted.sourceUrl), content: submitted };
+  }))).filter((recipe): recipe is NonNullable<typeof recipe> => Boolean(recipe));
+  if (!prepared.length) return json({ error: "These recipes do not include supported public source links." }, 422);
+
+  const uniqueRecipes = [...new Map(prepared.map((recipe) => [recipe.recipeKey, recipe])).values()];
+  const existingResults = await env.DB.batch(uniqueRecipes.map((recipe) => env.DB.prepare("SELECT share_token, content_json FROM recipe_readers WHERE owner_id = ? AND recipe_key = ? LIMIT 1").bind(ownerId, recipe.recipeKey)));
+  const now = new Date().toISOString();
+  const readers = uniqueRecipes.map((recipe, index) => {
+    const existing = existingResults[index]?.results?.[0] as { share_token?: unknown; content_json?: unknown } | undefined;
+    let content = recipe.content;
+    if (!content.instructions.length && existing?.content_json) {
+      try {
+        const previous = readerContentFromRecipe(JSON.parse(String(existing.content_json)) as Record<string, unknown>);
+        if (previous?.instructions.length) content = { ...content, instructions: previous.instructions, extractionStatus: "complete" };
+        else if ((JSON.parse(String(existing.content_json)) as Record<string, unknown>).extractionStatus === "unavailable") content = { ...content, extractionStatus: "unavailable" };
+      } catch { /* Replace malformed legacy content with the normalized current recipe. */ }
+    }
+    return { ...recipe, token: String(existing?.share_token || randomReaderToken()), content };
+  });
+  await env.DB.batch(readers.map((reader) => env.DB.prepare("INSERT INTO recipe_readers(share_token, owner_id, recipe_key, source_url, content_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(owner_id, recipe_key) DO UPDATE SET source_url=excluded.source_url, content_json=excluded.content_json, updated_at=excluded.updated_at")
+    .bind(reader.token, ownerId, reader.recipeKey, reader.content.sourceUrl, JSON.stringify(reader.content), now, now)));
+  const tokensByRecipe = new Map(readers.map((reader) => [reader.recipeKey, reader.token]));
+  return json({ readers: prepared.map((recipe) => ({ mealId: recipe.mealId, recipeId: recipe.recipeId, url: `${publicAppOrigin}/recipe/${tokensByRecipe.get(recipe.recipeKey)}` })) });
+}
+
+function recipeReaderErrorPage(message: string, status = 404) {
+  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Recipe unavailable | Grocer-Eaze</title></head><body style="margin:0;background:#f5f4ed;color:#183329;font:16px/1.5 system-ui"><main style="width:min(620px,calc(100% - 32px));margin:64px auto;background:#fffdf8;border:1px solid #d8e4dc;border-radius:20px;padding:32px"><h1 style="font-family:Georgia,serif">Recipe unavailable</h1><p>${escapeHtml(message)}</p><a href="/" style="color:#126b4d;font-weight:700">Return to Grocer-Eaze</a></main></body></html>`, {
+    status,
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow, noarchive" },
+  });
+}
+
+export async function handleRecipeReaderPage(request: Request, env: AppEnv): Promise<Response> {
+  if (!['GET', 'HEAD'].includes(request.method)) return recipeReaderErrorPage("This recipe reader only supports viewing shared recipes.", 405);
+  const url = new URL(request.url);
+  const token = url.pathname.match(/^\/recipe\/([a-f0-9]{64})\/?$/i)?.[1]?.toLowerCase();
+  if (!token) return recipeReaderErrorPage("This clean recipe link is incomplete or invalid.");
+  await ensureSchema(env.DB);
+  const row = await env.DB.prepare("SELECT content_json FROM recipe_readers WHERE share_token = ? LIMIT 1").bind(token).first();
+  if (!row?.content_json) return recipeReaderErrorPage("This clean recipe link is no longer available.");
+  let stored: Record<string, unknown>;
+  try { stored = JSON.parse(String(row.content_json)) as Record<string, unknown>; }
+  catch { return recipeReaderErrorPage("This recipe could not be read safely.", 500); }
+  let content = readerContentFromRecipe(stored);
+  if (!content) return recipeReaderErrorPage("This recipe does not include a supported original source.", 422);
+  content.extractionStatus = stored.extractionStatus === "unavailable" && !content.instructions.length ? "unavailable" : content.extractionStatus;
+
+  if (!content.instructions.length && content.extractionStatus === "pending") {
+    try {
+      const { html, finalUrl } = await fetchRecipePage(content.sourceUrl);
+      const recipeData = recipeJsonLdFromHtml(html);
+      const instructions = normalizeRecipeInstructions(recipeData?.recipeInstructions);
+      const extractedIngredients = Array.isArray(recipeData?.recipeIngredient)
+        ? recipeData.recipeIngredient.map((ingredient) => cleanRecipeText(ingredient, 400)).filter(Boolean).slice(0, 250)
+        : [];
+      content = {
+        ...content,
+        sourceUrl: isPublicRecipeUrl(finalUrl) || content.sourceUrl,
+        ingredients: content.ingredients.length ? content.ingredients : extractedIngredients,
+        instructions,
+        extractionStatus: instructions.length ? "complete" : "unavailable",
+      };
+    } catch {
+      content = { ...content, extractionStatus: "unavailable" };
+    }
+    await env.DB.prepare("UPDATE recipe_readers SET source_url = ?, content_json = ?, updated_at = ? WHERE share_token = ?")
+      .bind(content.sourceUrl, JSON.stringify(content), new Date().toISOString(), token).run();
+  }
+
+  const html = renderRecipeReader(content, `${publicAppOrigin}${url.pathname}`);
+  return new Response(request.method === "HEAD" ? null : html, {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Robots-Tag": "noindex, nofollow, noarchive",
+    },
+  });
 }
 
 async function locationLookup(url: URL, reverse = false) {
@@ -783,12 +1030,13 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
     return json({ sent: true });
   }
 
-  const paidPaths = new Set(["/api/recipes/search", "/api/recipes/import", "/api/recipe-image", "/api/calendar", "/api/favorites", "/api/ratings", "/api/email", "/api/instacart/shopping-list"]);
+  const paidPaths = new Set(["/api/recipes/search", "/api/recipes/import", "/api/recipe-image", "/api/recipe-readers", "/api/calendar", "/api/favorites", "/api/ratings", "/api/email", "/api/instacart/shopping-list"]);
   if (paidPaths.has(url.pathname) && !sessionUser) return json({ error: "Sign in and choose a membership to continue.", code: "PAYMENT_REQUIRED" }, 401);
   if (paidPaths.has(url.pathname) && !hasProductAccess(sessionUser)) return json({ error: "An active membership or trial is required.", code: "PAYMENT_REQUIRED" }, 402);
   if (url.pathname === "/api/recipes/search" && request.method === "GET") return searchRecipes(url, env);
   if (url.pathname === "/api/recipes/import" && request.method === "POST") return importRecipe(request, env);
   if (url.pathname === "/api/recipe-image" && request.method === "GET") return recipeImageResponse(url, env);
+  if (url.pathname === "/api/recipe-readers" && request.method === "POST" && sessionUser) return createRecipeReaders(request, env, sessionUser.id);
   if (url.pathname === "/api/calendar" && request.method === "POST") return calendarResponse(await request.json());
   if (url.pathname === "/api/instacart/shopping-list" && request.method === "POST") {
     if (!env.INSTACART_API_KEY) return json({ error: "Instacart shopping will activate after provider approval and production-key setup." }, 503);

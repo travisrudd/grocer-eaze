@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import ts from "typescript";
 
 const root = new URL("../", import.meta.url);
 
 async function source(path) {
   return readFile(new URL(path, root), "utf8");
+}
+
+async function importTypeScriptModule(path) {
+  const compiled = ts.transpileModule(await source(path), {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  return import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
 }
 
 test("ships product-specific metadata and no starter preview", async () => {
@@ -279,6 +287,59 @@ test("retains prioritized nearby stores at the account level", async () => {
   assert.match(page, /\/api\/stores\/search/);
   assert.match(api, /overpass-api\.de\/api\/interpreter/);
   assert.match(api, /distanceInMiles/);
+});
+
+test("creates private clean-recipe readers for calendar links", async () => {
+  const [page, api, worker, reader, schema, migration] = await Promise.all([
+    source("app/page.tsx"),
+    source("worker/api.ts"),
+    source("worker/index.ts"),
+    source("worker/recipe-reader.ts"),
+    source("db/schema.ts"),
+    source("drizzle/0007_pale_scarlet_witch.sql"),
+  ]);
+
+  assert.match(page, /fetch\("\/api\/recipe-readers"/);
+  assert.match(page, /Clean recipe: \$\{readerUrl\}/);
+  assert.match(page, /Original source: \$\{recipe\.sourceUrl\}/);
+  assert.match(page, /URL:\$\{calendarText\(readerUrl\)\}/);
+  assert.match(api, /recipe_readers/);
+  assert.match(api, /crypto\.getRandomValues\(new Uint8Array\(32\)\)/);
+  assert.match(api, /WHERE owner_id = \? AND recipe_key = \?/);
+  assert.match(api, /AbortSignal\.timeout\(10_000\)/);
+  assert.match(api, /maximumBytes = 1_500_000/);
+  assert.match(worker, /url\.pathname\.startsWith\("\/recipe\/"\)/);
+  assert.match(schema, /recipeReaders/);
+  assert.match(migration, /CREATE TABLE `recipe_readers`/);
+  assert.match(reader, /noindex,nofollow,noarchive/);
+  assert.match(reader, /Copy clean recipe/);
+  assert.match(reader, /Open email draft/);
+  assert.match(reader, /Open text draft/);
+  assert.match(reader, /View the original recipe and publisher notes/);
+  assert.match(reader, /Enter up to 10 valid email addresses/);
+  assert.match(reader, /7 to 15 digits/);
+  assert.doesNotMatch(reader, /api\.resend\.com/);
+});
+
+test("normalizes provider directions and escapes reader content", async () => {
+  const { normalizeRecipeInstructions, renderRecipeReader } = await importTypeScriptModule("worker/recipe-reader.ts");
+  const instructions = normalizeRecipeInstructions([{ name: "Sauce", steps: [{ step: "Mix &amp; stir." }, { text: "Serve <b>warm</b>." }] }]);
+  assert.deepEqual(instructions, [{ name: "Sauce", steps: ["Mix & stir.", "Serve warm."] }]);
+  const jsonLdSteps = normalizeRecipeInstructions([
+    { "@type": "HowToStep", name: "Step 1", text: "Heat the oven." },
+    { "@type": "HowToStep", name: "Step 2", text: "Bake until done." },
+  ]);
+  assert.deepEqual(jsonLdSteps, [{ name: "", steps: ["Heat the oven.", "Bake until done."] }]);
+  const html = renderRecipeReader({
+    title: "Test <Dish>", sourceName: "Publisher", sourceUrl: "https://example.com/recipe", readyInMinutes: 20,
+    servings: 4, ingredients: ["2 cups rice"], instructions, extractionStatus: "complete",
+  }, "https://grocer-eaze.com/recipe/test");
+  assert.match(html, /Test &lt;Dish&gt;/);
+  assert.match(html, /Mix &amp; stir\./);
+  assert.doesNotMatch(html, /<b>warm<\/b>/);
+  assert.match(html, /Clean recipe copied to your clipboard/);
+  const readerScript = html.match(/<script>([\s\S]*?)<\/script>/)?.[1] || "";
+  assert.doesNotThrow(() => new Function(readerScript));
 });
 
 test("recovers approved administrators after the hosting migration", async () => {

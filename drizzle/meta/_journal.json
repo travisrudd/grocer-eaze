@@ -50,6 +50,13 @@
       "when": 1785867417137,
       "tag": "0006_blue_nebula",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1785881794220,
+      "tag": "0007_pale_scarlet_witch",
+      "breakpoints": true
     }
   ]
 }
