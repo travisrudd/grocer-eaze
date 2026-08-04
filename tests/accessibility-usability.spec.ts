@@ -93,6 +93,34 @@ test("the recipe catalog loads progressively and filters remain usable", async (
   await expect(page.getByRole("button", { name: "Clear" })).toBeEnabled();
 });
 
+test("nearby stores can be added, reprioritized, removed, and retained through the profile API", async ({ page }) => {
+  let profileWrites = 0;
+  await page.route("**/api/auth/me", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ user: {
+      id: "store-test-user", name: "Store Test User", email: "stores@example.com", phone: "", role: "user",
+      accessStatus: "active", complimentaryUntil: null, billingExempt: false,
+      subscriptionStatus: "active", subscriptionEndsAt: null, hasAccess: true,
+    } }) });
+  });
+  await page.route("**/api/profile", async (route) => {
+    if (route.request().method() === "PUT") { profileWrites += 1; await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ saved: true }) }); }
+    else await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ profile: null }) });
+  });
+  await page.route("**/api/stores/search?*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ stores: [{ id: "osm-node-42", name: "Lakeview Market", address: "123 Clark St, Chicago", distanceMiles: 1.2, lat: "41.97", lon: "-87.66" }], center: { lat: "41.97", lon: "-87.66" } }) });
+  });
+
+  await openPlan(page);
+  await page.getByRole("button", { name: "Find nearby stores" }).click();
+  await page.getByRole("button", { name: /Lakeview Market/ }).click();
+  await expect(page.locator(".preferred-store-list").getByText("Lakeview Market", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Move Lakeview Market higher" }).click();
+  await expect(page.locator(".preferred-store-list li").nth(2).getByText("Lakeview Market", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Remove Lakeview Market" }).click();
+  await expect(page.locator(".preferred-store-list").getByText("Lakeview Market", { exact: true })).toHaveCount(0);
+  await expect.poll(() => profileWrites).toBeGreaterThan(0);
+});
+
 test("school lunches stay separate and grocery totals remain editable", async ({ page }) => {
   const recipes = Array.from({ length: 12 }, (_, index) => ({
     id: index + 1,
@@ -137,11 +165,17 @@ test("school lunches stay separate and grocery totals remain editable", async ({
   await expect(page.getByText("School lunch 1/5")).toBeVisible();
 
   await page.getByRole("button", { name: "Grocery list" }).click();
-  await expect(page.getByRole("heading", { name: "Everything you need, sorted." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Review what you’ll actually buy." })).toBeVisible();
   await expect(page.getByLabel("Total amount needed for Fresh vegetables")).toHaveValue("4 cups");
   await expect(page.getByLabel("Total amount needed for Individual chip bags")).toHaveValue("4");
-  await expect(page.getByText(/not additional or optional items/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Shop on Instacart" })).toHaveCount(0);
+  await page.locator(".already-have-control input").first().check();
+  await expect(page.getByRole("button", { name: "Move to shopping list" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open in Instacart" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Approve grocery list & continue →" }).click();
+  await expect(page.getByRole("heading", { name: "Choose what happens next." })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select all" })).toBeVisible();
+  await page.getByRole("button", { name: "← Edit grocery list" }).click();
 
   await page.getByRole("button", { name: "← Back to recipes" }).click();
   await page.getByRole("button", { name: "Clear selections" }).click();

@@ -14,7 +14,8 @@ type MemberPreferences = {
 type Member = { id: string; name: string; role: string; allergies: string; preferences?: MemberPreferences };
 type Rating = { quality: number; ease: number };
 type LocationResult = { label: string; lat?: string; lon?: string };
-type View = "plan" | "meals" | "list" | "account" | "family" | "plans" | "admin" | "accessibility";
+type StorePreference = { id: string; name: string; address: string; distanceMiles?: number; lat?: string; lon?: string };
+type View = "plan" | "meals" | "list" | "delivery" | "account" | "family" | "plans" | "admin" | "accessibility";
 type UndoAction = { message: string; restore: () => void };
 type AccountUser = { id: string; name: string; email: string; phone: string; role: "user" | "admin"; accessStatus: string; complimentaryUntil: string | null; billingExempt: boolean; subscriptionStatus: string | null; subscriptionEndsAt: string | null; hasAccess: boolean };
 type AdminUser = { id: string; name: string; email: string; phone: string; role: string; access_status: string; trial_ends_at?: string; complimentary_until?: string; billing_exempt: number };
@@ -25,15 +26,19 @@ type RatingsPayload = { ratings?: Array<{ recipe_id: string; quality: number; ea
 type CapabilitiesPayload = { instacartShopping?: boolean };
 
 const proteinOptions = ["Beef", "Pork", "Fish", "Shrimp"];
-const storeNames = ["Whole Foods", "Jewel-Osco", "Trader Joe’s"];
+const defaultStores: StorePreference[] = [
+  { id: "default-whole-foods", name: "Whole Foods", address: "Near your shopping location" },
+  { id: "default-jewel-osco", name: "Jewel-Osco", address: "Near your shopping location" },
+  { id: "default-trader-joes", name: "Trader Joe’s", address: "Near your shopping location" },
+];
 const defaultRecipeFilters = { query: "", kind: "All meals", maxTime: "Any time", source: "All sources", protein: "All proteins", favoritesOnly: false };
 const recipeBatchSize = 12;
 const schoolLunchSideOptions = ["Individual chip bags", "Fresh fruit", "Yogurt cups", "Crunchy vegetables", "Snack bars"];
 const onboardingSteps = [
   { eyebrow: "STEP 1 OF 4", title: "Start with your household.", body: "Choose your dates, meals, budget, and dietary needs. Family preferences are included automatically." },
   { eyebrow: "STEP 2 OF 4", title: "Browse a catalog built for you.", body: "Filter a large recipe collection, save favorites, and add each recipe to lunch, dinner, or school lunch." },
-  { eyebrow: "STEP 3 OF 4", title: "Shape your schedule.", body: "Quick-fill open slots or reorder meals by date. Every change stays saved on this device." },
-  { eyebrow: "STEP 4 OF 4", title: "Review once, then take it anywhere.", body: "Check merged ingredients and package notes before copying your list, emailing recipes, or exporting your calendar." },
+  { eyebrow: "STEP 3 OF 4", title: "Shape your schedule.", body: "Quick-fill open slots or reorder meals by date. Your active plan follows your account across devices." },
+  { eyebrow: "STEP 4 OF 4", title: "Review once, then take it anywhere.", body: "Mark what you already have, approve your grocery list, then choose exactly how to send or save it." },
 ];
 
 const unitAliases: Record<string, string> = {
@@ -183,6 +188,11 @@ export default function Home() {
   const [exclusions, setExclusions] = useState("");
   const [favorites, setFavorites] = useState<string[]>([]);
   const [selectedStore, setSelectedStore] = useState("Whole Foods");
+  const [preferredStores, setPreferredStores] = useState<StorePreference[]>(defaultStores);
+  const [storeRadius, setStoreRadius] = useState(5);
+  const [nearbyStores, setNearbyStores] = useState<StorePreference[]>([]);
+  const [storeSearchStatus, setStoreSearchStatus] = useState("");
+  const [storeSearchBusy, setStoreSearchBusy] = useState(false);
   const [exportStatus, setExportStatus] = useState("");
   const [ownerId, setOwnerId] = useState("");
   const [plannedMeals, setPlannedMeals] = useState<Meal[]>([]);
@@ -191,6 +201,7 @@ export default function Home() {
   const [location, setLocation] = useState("Uptown, Chicago, IL");
   const [locationQuery, setLocationQuery] = useState("Uptown, Chicago, IL");
   const [locationResults, setLocationResults] = useState<LocationResult[]>([]);
+  const [locationCoordinates, setLocationCoordinates] = useState<{ lat: string; lon: string } | null>(null);
   const [locationStatus, setLocationStatus] = useState("");
   const [members, setMembers] = useState<Member[]>([]);
   const [memberDraft, setMemberDraft] = useState({ name: "", role: "Adult", allergies: "", glutenFree: true, lowDairy: false, kidFriendly: false, avoidOnions: false, proteins: [] as string[] });
@@ -226,8 +237,16 @@ export default function Home() {
   const [ingredientAdjustments, setIngredientAdjustments] = useState<Record<string, string>>({});
   const [ingredientNameEdits, setIngredientNameEdits] = useState<Record<string, string>>({});
   const [reviewedPlanSignature, setReviewedPlanSignature] = useState("");
+  const [alreadyHaveIngredients, setAlreadyHaveIngredients] = useState<string[]>([]);
   const [planStorageOwnerId, setPlanStorageOwnerId] = useState("");
+  const [planSaveStatus, setPlanSaveStatus] = useState("");
   const [instacartEnabled, setInstacartEnabled] = useState(false);
+  const [deliveryActions, setDeliveryActions] = useState({ grocery: true, email: false, calendar: false, instacart: false });
+  const [groceryDestination, setGroceryDestination] = useState<"reminders" | "notes">("reminders");
+  const [calendarProvider, setCalendarProvider] = useState<"google" | "apple">("google");
+  const [emailRecipients, setEmailRecipients] = useState("");
+  const [emailDialogOpen, setEmailDialogOpen] = useState(false);
+  const [deliveryBusy, setDeliveryBusy] = useState(false);
   const [familyStatus, setFamilyStatus] = useState("");
   const [recipeFilters, setRecipeFilters] = useState(defaultRecipeFilters);
   const [accessibilityFeedback, setAccessibilityFeedback] = useState({ name: "", email: "", details: "", website: "" });
@@ -276,11 +295,14 @@ export default function Home() {
     return schoolLunchCount * people * schoolLunchSides.reduce((sum, side) => sum + (perPerson[side] || 0), 0);
   }, [plannedMeals, people, schoolLunchSides]);
   const recipeSubtotal = useMemo(() => Math.round(plannedMeals.reduce((sum, meal) => sum + parseServingCost(meal) * people, 0) + schoolLunchSideEstimate), [plannedMeals, people, schoolLunchSideEstimate]);
-  const storeEstimates = useMemo(() => [
-    { name: "Whole Foods", price: Math.round(recipeSubtotal * 1.08), availability: 96 },
-    { name: "Jewel-Osco", price: Math.round(recipeSubtotal * .98), availability: 98 },
-    { name: "Trader Joe’s", price: Math.round(recipeSubtotal * .92), availability: 86 },
-  ], [recipeSubtotal]);
+  const storeEstimates = useMemo(() => preferredStores.map((store, index) => {
+    const normalizedName = store.name.toLowerCase();
+    const priceFactor = normalizedName.includes("whole foods") ? 1.08
+      : normalizedName.includes("trader joe") || normalizedName.includes("aldi") ? .92
+      : normalizedName.includes("jewel") || normalizedName.includes("mariano") ? .98
+      : 1 + Math.min(index, 4) * .01;
+    return { ...store, price: Math.round(recipeSubtotal * priceFactor), availability: Math.max(84, 98 - index * 2) };
+  }), [preferredStores, recipeSubtotal]);
   const selectedEstimate = storeEstimates.find((store) => store.name === selectedStore)?.price || recipeSubtotal;
   const visibleStoreEstimates = oneStore ? storeEstimates.filter((store) => store.name === selectedStore) : storeEstimates;
   const groceryIngredients = useMemo(() => plannedMeals.flatMap((meal) => {
@@ -326,10 +348,18 @@ export default function Home() {
       Bakery: { icon: "🥖", title: "Bakery", items: [] },
       Pantry: { icon: "🥫", title: "Pantry", items: [] },
     };
-    groceryEntries.forEach((entry) => groups[grocerySection(ingredientNameEdits[entry.key] || entry.name, entry.aisle)].items.push(entry));
+    groceryEntries.filter((entry) => !alreadyHaveIngredients.includes(entry.key)).forEach((entry) => groups[grocerySection(ingredientNameEdits[entry.key] || entry.name, entry.aisle)].items.push(entry));
     return Object.values(groups).filter((group) => group.items.length).map((group) => ({ ...group, count: group.items.length }));
-  }, [groceryEntries, ingredientNameEdits]);
-  const planSignature = useMemo(() => `${people}:${schoolLunchSides.join("|")}:${plannedMeals.map((meal) => meal.id).join("|")}`, [people, plannedMeals, schoolLunchSides]);
+  }, [groceryEntries, ingredientNameEdits, alreadyHaveIngredients]);
+  const alreadyHaveEntries = useMemo(() => groceryEntries.filter((entry) => alreadyHaveIngredients.includes(entry.key)), [groceryEntries, alreadyHaveIngredients]);
+  const planSignature = useMemo(() => JSON.stringify({
+    people,
+    schoolLunchSides,
+    mealIds: plannedMeals.map((meal) => meal.id),
+    ingredientAdjustments,
+    ingredientNameEdits,
+    alreadyHaveIngredients: [...alreadyHaveIngredients].sort(),
+  }), [people, schoolLunchSides, plannedMeals, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients]);
   const ingredientsReviewed = Boolean(planSignature && reviewedPlanSignature === planSignature);
   const recipeSources = useMemo(() => [...new Set(recipeIdeas.map((meal) => meal.sourceName).filter(Boolean) as string[])].sort(), [recipeIdeas]);
   const selectedIngredientNames = useMemo(() => new Set(plannedMeals.flatMap((meal) => meal.ingredients || []).map((ingredient) => ingredient.name.trim().toLowerCase()).filter(Boolean)), [plannedMeals]);
@@ -354,6 +384,14 @@ export default function Home() {
     || recipeFilters.protein !== defaultRecipeFilters.protein
     || recipeFilters.favoritesOnly;
   const shortLocation = location.split(",").slice(0, 2).join(",").trim() || location;
+  const availableDeliveryActionKeys = useMemo(() => (["grocery", "email", "calendar", ...(instacartEnabled ? ["instacart"] : [])] as Array<keyof typeof deliveryActions>), [instacartEnabled]);
+  const selectedDeliveryActionCount = availableDeliveryActionKeys.filter((key) => deliveryActions[key]).length;
+  const allDeliveryActionsSelected = availableDeliveryActionKeys.every((key) => deliveryActions[key]);
+  const profilePreferences = useMemo(() => ({
+    range, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
+    kidLunches, schoolLunchSides, oneStore, selectedStore, maxTime, skill, exclusions,
+    preferredStores, storeRadius, locationCoordinates,
+  }), [range, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, maxTime, skill, exclusions, preferredStores, storeRadius, locationCoordinates]);
 
   function applyPersonalData(profileData: ProfilePayload, favoriteData: FavoritesPayload, familyData: FamilyPayload, ratingData: RatingsPayload) {
     if (profileData.profile) {
@@ -374,6 +412,24 @@ export default function Home() {
         if (Array.isArray(preferences.schoolLunchSides)) setSchoolLunchSides(preferences.schoolLunchSides.filter((side: unknown) => schoolLunchSideOptions.includes(String(side))).map(String));
         if (typeof preferences.oneStore === "boolean") setOneStore(preferences.oneStore);
         if (preferences.selectedStore) setSelectedStore(preferences.selectedStore);
+        if (Array.isArray(preferences.preferredStores)) {
+          const savedStores = preferences.preferredStores.slice(0, 12).flatMap((store: unknown) => {
+            if (!store || typeof store !== "object") return [];
+            const item = store as Record<string, unknown>;
+            const name = String(item.name || "").trim().slice(0, 120);
+            if (!name) return [];
+            return [{ id: String(item.id || crypto.randomUUID()).slice(0, 160), name, address: String(item.address || "").slice(0, 200), distanceMiles: Number(item.distanceMiles) || undefined, lat: String(item.lat || "") || undefined, lon: String(item.lon || "") || undefined }];
+          });
+          if (savedStores.length) {
+            setPreferredStores(savedStores);
+            if (!savedStores.some((store: StorePreference) => store.name === preferences.selectedStore)) setSelectedStore(savedStores[0].name);
+          }
+        }
+        if ([1, 3, 5, 10, 15, 25].includes(Number(preferences.storeRadius))) setStoreRadius(Number(preferences.storeRadius));
+        if (preferences.locationCoordinates && typeof preferences.locationCoordinates === "object") {
+          const coordinates = preferences.locationCoordinates as Record<string, unknown>;
+          if (coordinates.lat && coordinates.lon) setLocationCoordinates({ lat: String(coordinates.lat), lon: String(coordinates.lon) });
+        }
         if (preferences.maxTime) setMaxTime(preferences.maxTime);
         if (preferences.skill) setSkill(preferences.skill);
         if (typeof preferences.exclusions === "string") setExclusions(preferences.exclusions);
@@ -384,10 +440,10 @@ export default function Home() {
     if (ratingData.ratings) setRatings(Object.fromEntries(ratingData.ratings.map((rating: { recipe_id: string; quality: number; ease: number }) => [rating.recipe_id, { quality: rating.quality, ease: rating.ease }])));
   }
 
-  function applyCachedPlan(cachedPlan: string | null) {
+  function applySavedPlan(cachedPlan: string | Record<string, unknown> | null | undefined) {
     if (!cachedPlan) return;
     try {
-      const saved = JSON.parse(cachedPlan);
+      const saved = typeof cachedPlan === "string" ? JSON.parse(cachedPlan) : cachedPlan;
       if (Array.isArray(saved.plannedMeals)) setPlannedMeals(saved.plannedMeals.map((meal: Meal) => ({ ...meal, image: recipeThumbnail(meal) })));
       if (Array.isArray(saved.recipeIdeas)) setRecipeIdeas(saved.recipeIdeas.map((meal: Meal) => ({ ...meal, image: recipeThumbnail(meal) })));
       if (saved.range) setRange(saved.range);
@@ -412,7 +468,15 @@ export default function Home() {
       if (saved.calendarOrder === "random") setCalendarOrder("random");
       if (saved.ingredientAdjustments && typeof saved.ingredientAdjustments === "object") setIngredientAdjustments(saved.ingredientAdjustments);
       if (saved.ingredientNameEdits && typeof saved.ingredientNameEdits === "object") setIngredientNameEdits(saved.ingredientNameEdits);
+      if (Array.isArray(saved.alreadyHaveIngredients)) setAlreadyHaveIngredients(saved.alreadyHaveIngredients.map(String).slice(0, 500));
       if (typeof saved.reviewedPlanSignature === "string") setReviewedPlanSignature(saved.reviewedPlanSignature);
+      if (saved.deliveryActions && typeof saved.deliveryActions === "object") {
+        const actions = saved.deliveryActions as Record<string, unknown>;
+        setDeliveryActions({ grocery: Boolean(actions.grocery), email: Boolean(actions.email), calendar: Boolean(actions.calendar), instacart: Boolean(actions.instacart) });
+      }
+      if (saved.groceryDestination === "notes" || saved.groceryDestination === "reminders") setGroceryDestination(saved.groceryDestination);
+      if (saved.calendarProvider === "apple" || saved.calendarProvider === "google") setCalendarProvider(saved.calendarProvider);
+      if (typeof saved.emailRecipients === "string") setEmailRecipients(saved.emailRecipients.slice(0, 2000));
     } catch { /* Ignore a corrupted device cache. */ }
   }
 
@@ -437,7 +501,8 @@ export default function Home() {
       fetch("/api/ratings", { headers: { "x-grocer-owner": id } }).then((r) => r.json()),
       fetch("/api/auth/me").then((r) => r.json()),
       fetch("/api/capabilities").then((r) => r.ok ? r.json() : {}).catch(() => ({})),
-    ]).then(([profileData, favoriteData, familyData, ratingData, authData, capabilities]: [ProfilePayload, FavoritesPayload, FamilyPayload, RatingsPayload, { user?: AccountUser | null }, CapabilitiesPayload]) => {
+      fetch("/api/active-plan").then((r) => r.ok ? r.json() : { plan: null }).catch(() => ({ plan: null })),
+    ]).then(([profileData, favoriteData, familyData, ratingData, authData, capabilities, cloudPlan]: [ProfilePayload, FavoritesPayload, FamilyPayload, RatingsPayload, { user?: AccountUser | null }, CapabilitiesPayload, { plan?: Record<string, unknown> | null }]) => {
       setOwnerId(id);
       applyPersonalData(profileData, favoriteData, familyData, ratingData);
       setInstacartEnabled(Boolean(capabilities.instacartShopping));
@@ -451,21 +516,28 @@ export default function Home() {
       window.localStorage.removeItem("grocer-eaze-active-plan");
       if (authData.user) {
         setUser(authData.user); setEmail(authData.user.email); setPlanStorageOwnerId(authData.user.id);
+        setEmailRecipients(authData.user.email);
       }
       const requestedView = window.location.hash.replace("#", "") as View;
-      if (["meals", "list"].includes(requestedView) && !authData.user?.hasAccess) {
+      if (["meals", "list", "delivery"].includes(requestedView) && !authData.user?.hasAccess) {
         const destination: View = authData.user ? "plans" : "account";
         setView(destination);
         window.history.replaceState(null, "", `#${destination}`);
         setAccountStatus(authData.user ? "Choose a membership to unlock meal planning and exports." : "Sign in before using meal planning tools.");
       }
       setAuthLoaded(true);
-      applyCachedPlan(cachedPlan);
+      if (cloudPlan.plan) {
+        applySavedPlan(cloudPlan.plan);
+        setPlanSaveStatus("Plan restored from your account.");
+      } else {
+        applySavedPlan(cachedPlan);
+        if (cachedPlan) setPlanSaveStatus("Device plan restored and ready to sync.");
+      }
       setPlanHydrated(true);
       if (!onboardingComplete) setOnboardingStep(0);
     }).catch(() => {
       const requestedView = window.location.hash.replace("#", "") as View;
-      if (["meals", "list"].includes(requestedView)) {
+      if (["meals", "list", "delivery"].includes(requestedView)) {
         setView("account");
         window.history.replaceState(null, "", "#account");
         setAccountStatus("Sign in before using meal planning tools.");
@@ -478,16 +550,42 @@ export default function Home() {
 
   useEffect(() => {
     if (!planHydrated || !planStorageOwnerId) return;
-    try {
-      window.localStorage.setItem(`grocer-eaze-active-plan:${planStorageOwnerId}`, JSON.stringify({
-        plannedMeals,
-        recipeIdeas: recipeIdeas.slice(0, 90),
-        range, planStartDate, mealType, people, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
-        kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder,
-        ingredientAdjustments, ingredientNameEdits, reviewedPlanSignature,
-      }));
-    } catch { /* Device storage can be unavailable in private browsing. */ }
-  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, range, planStartDate, mealType, people, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, reviewedPlanSignature]);
+    const plan = {
+      plannedMeals,
+      recipeIdeas: recipeIdeas.slice(0, 90),
+      range, planStartDate, mealType, people, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean,
+      kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder,
+      ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, reviewedPlanSignature,
+      deliveryActions, groceryDestination, calendarProvider, emailRecipients,
+    };
+    try { window.localStorage.setItem(`grocer-eaze-active-plan:${planStorageOwnerId}`, JSON.stringify(plan)); }
+    catch { /* The account copy remains authoritative if device storage is unavailable. */ }
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await fetch("/api/active-plan", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ plan }), signal: controller.signal });
+        setPlanSaveStatus(response.ok ? "Plan saved to your account." : "Plan is saved on this device; account sync will retry.");
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setPlanSaveStatus("Plan is saved on this device; account sync will retry.");
+      }
+    }, 750);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [planHydrated, planStorageOwnerId, plannedMeals, recipeIdeas, range, planStartDate, mealType, people, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, household, maxTime, skill, exclusions, location, calendarOrder, ingredientAdjustments, ingredientNameEdits, alreadyHaveIngredients, reviewedPlanSignature, deliveryActions, groceryDestination, calendarProvider, emailRecipients]);
+
+  useEffect(() => {
+    if (!planHydrated || !user) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void fetch("/api/profile", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ householdName: household, people, location, preferences: profilePreferences }),
+        signal: controller.signal,
+      }).catch(() => { /* The active-plan save and a later profile edit will retry. */ });
+    }, 900);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [planHydrated, user, household, people, location, profilePreferences]);
 
   useEffect(() => {
     if (!undoAction) return;
@@ -496,7 +594,7 @@ export default function Home() {
   }, [undoAction]);
 
   useEffect(() => {
-    const validViews: View[] = ["plan", "meals", "list", "account", "family", "plans", "admin", "accessibility"];
+    const validViews: View[] = ["plan", "meals", "list", "delivery", "account", "family", "plans", "admin", "accessibility"];
     const syncViewFromUrl = () => {
       const nextView = window.location.hash.replace("#", "") as View;
       if (validViews.includes(nextView)) {
@@ -518,6 +616,7 @@ export default function Home() {
       plan: "Plan meals",
       meals: "Recipe catalog",
       list: "Grocery list",
+      delivery: "Send or save",
       account: "Account",
       family: "Family preferences",
       plans: "Membership plans",
@@ -542,7 +641,8 @@ export default function Home() {
     dialog.focus();
     const handleDialogKeys = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        if (ratingMeal) setRatingMeal(null);
+        if (emailDialogOpen) setEmailDialogOpen(false);
+        else if (ratingMeal) setRatingMeal(null);
         else finishOnboarding();
         return;
       }
@@ -571,7 +671,7 @@ export default function Home() {
       });
       if (previouslyFocused?.isConnected) previouslyFocused.focus();
     };
-  }, [onboardingStep, ratingMeal]);
+  }, [onboardingStep, ratingMeal, emailDialogOpen]);
 
   async function startAuth() {
     setAuthBusy(true); setAccountStatus("");
@@ -599,7 +699,10 @@ export default function Home() {
       if (!result.ok) { setAccountStatus(data.error || "That code could not be verified."); return; }
       const me = await fetch("/api/auth/me").then((r) => r.json());
       setUser(me.user); setEmail(me.user.email); setPlanStorageOwnerId(me.user.id); setAuthForm((current) => ({ ...current, name: me.user.name, phone: me.user.phone || "" }));
-      applyCachedPlan(window.localStorage.getItem(`grocer-eaze-active-plan:${me.user.id}`));
+      setEmailRecipients(me.user.email);
+      const cloudPlan = await fetch("/api/active-plan").then((response) => response.ok ? response.json() : { plan: null });
+      if (cloudPlan.plan) applySavedPlan(cloudPlan.plan);
+      else applySavedPlan(window.localStorage.getItem(`grocer-eaze-active-plan:${me.user.id}`));
       await reloadPersonalData();
       setAccountStatus(data.returning ? "Welcome back. Your household information has been restored." : "Your secure account is ready. Choose a plan to start your free trial.");
     } catch {
@@ -747,13 +850,15 @@ export default function Home() {
       const previousPlan = plannedMeals;
       const previousAdjustments = ingredientAdjustments;
       const previousNameEdits = ingredientNameEdits;
+      const previousAlreadyHave = alreadyHaveIngredients;
       const previousReview = reviewedPlanSignature;
       if (previousPlan.length) {
-        setUndoAction({ message: "Your previous schedule was cleared for the new catalog.", restore: () => { setPlannedMeals(previousPlan); setIngredientAdjustments(previousAdjustments); setIngredientNameEdits(previousNameEdits); setReviewedPlanSignature(previousReview); } });
+        setUndoAction({ message: "Your previous schedule was cleared for the new catalog.", restore: () => { setPlannedMeals(previousPlan); setIngredientAdjustments(previousAdjustments); setIngredientNameEdits(previousNameEdits); setAlreadyHaveIngredients(previousAlreadyHave); setReviewedPlanSignature(previousReview); } });
       }
       setPlannedMeals([]);
       setIngredientAdjustments({});
       setIngredientNameEdits({});
+      setAlreadyHaveIngredients([]);
       setReviewedPlanSignature("");
       setRecipeIdeas(uniqueIdeas);
       setRecipeFilters({ ...defaultRecipeFilters });
@@ -763,7 +868,7 @@ export default function Home() {
       const fallbackActive = payloads.some((data) => data.demo);
       const providers = [...new Set(payloads.flatMap((data) => Array.isArray(data.providers) ? data.providers.map(String) : []))];
       setRecipeNotice(`${uniqueIdeas.length} recipes ready to browse.${providers.length ? ` Sources: ${providers.join(", ")}.` : ""}${fallbackActive ? " Backup recipes fill any remaining gaps." : ""}`);
-      if (ownerId) await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, planStartDate, mealType, budget, leftovers, reuseIngredients, glutenFree, lowDairy, mediterranean, kidLunches, schoolLunchSides, oneStore, selectedStore, maxTime, skill, exclusions } }) });
+      if (ownerId) await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ householdName: household, people, location, preferences: profilePreferences }) });
       setSimilarTo(queryOverride || ""); navigateTo("meals");
     } catch (error) {
       setPlannerNotice(error instanceof Error ? error.message : "Recipes are temporarily unavailable. Please try again.");
@@ -910,12 +1015,14 @@ export default function Home() {
     const previous = plannedMeals;
     const previousAdjustments = ingredientAdjustments;
     const previousNameEdits = ingredientNameEdits;
+    const previousAlreadyHave = alreadyHaveIngredients;
     const previousReview = reviewedPlanSignature;
     setPlannedMeals([]);
     setIngredientAdjustments({});
     setIngredientNameEdits({});
+    setAlreadyHaveIngredients([]);
     setReviewedPlanSignature("");
-    showUndo("All selected meals were cleared.", () => { setPlannedMeals(previous); setIngredientAdjustments(previousAdjustments); setIngredientNameEdits(previousNameEdits); setReviewedPlanSignature(previousReview); });
+    showUndo("All selected meals were cleared.", () => { setPlannedMeals(previous); setIngredientAdjustments(previousAdjustments); setIngredientNameEdits(previousNameEdits); setAlreadyHaveIngredients(previousAlreadyHave); setReviewedPlanSignature(previousReview); });
   }
 
   function movePlannedMeal(id: string, direction: -1 | 1) {
@@ -1020,7 +1127,7 @@ export default function Home() {
       try {
         const response = await fetch(`/api/location/reverse?lat=${coords.latitude}&lon=${coords.longitude}`);
         const data = await response.json(); const result = data.results?.[0];
-        if (result) { setLocation(result.label); setLocationQuery(result.label); setLocationStatus("Location updated."); }
+        if (result) { setLocation(result.label); setLocationQuery(result.label); setLocationCoordinates({ lat: String(result.lat || coords.latitude), lon: String(result.lon || coords.longitude) }); setLocationStatus("Location updated."); }
       } catch { setLocationStatus("We couldn’t identify that location. You can type it instead."); }
     }, () => setLocationStatus("Location access was not granted. You can type it instead."), { enableHighAccuracy: false, timeout: 10000 });
   }
@@ -1028,8 +1135,63 @@ export default function Home() {
   function clearLocation() {
     setLocation("");
     setLocationQuery("");
+    setLocationCoordinates(null);
     setLocationResults([]);
+    setNearbyStores([]);
     setLocationStatus("Enter a neighborhood, city, or ZIP, or use your location.");
+  }
+
+  async function findNearbyStores() {
+    if (!location.trim()) { setStoreSearchStatus("Add a shopping location before finding stores."); return; }
+    setStoreSearchBusy(true);
+    setStoreSearchStatus("Finding grocery stores near you…");
+    try {
+      const params = new URLSearchParams({ q: location, radius: String(storeRadius) });
+      if (locationCoordinates) { params.set("lat", locationCoordinates.lat); params.set("lon", locationCoordinates.lon); }
+      const response = await fetch(`/api/stores/search?${params}`);
+      const data = await response.json() as { stores?: StorePreference[]; center?: { lat?: string; lon?: string }; error?: string };
+      if (!response.ok) throw new Error(data.error || "Nearby stores could not be loaded.");
+      const selectedIds = new Set(preferredStores.map((store) => store.id));
+      const selectedNames = new Set(preferredStores.filter((store) => !store.id.startsWith("default-")).map((store) => store.name.toLowerCase()));
+      const available = (data.stores || []).filter((store) => !selectedIds.has(store.id) && !selectedNames.has(store.name.toLowerCase()));
+      setNearbyStores(available);
+      if (data.center?.lat && data.center.lon) setLocationCoordinates({ lat: data.center.lat, lon: data.center.lon });
+      setStoreSearchStatus(available.length ? `${available.length} nearby stores found. Add any you want to prioritize.` : "No additional grocery stores were found in this radius.");
+    } catch (error) {
+      setStoreSearchStatus(error instanceof Error ? error.message : "Nearby stores could not be loaded.");
+    } finally {
+      setStoreSearchBusy(false);
+    }
+  }
+
+  function addPreferredStore(store: StorePreference) {
+    const defaultMatch = preferredStores.find((item) => item.id.startsWith("default-") && item.name.toLowerCase() === store.name.toLowerCase());
+    if (!defaultMatch && preferredStores.length >= 12) { setStoreSearchStatus("You can prioritize up to 12 stores."); return; }
+    setPreferredStores((current) => defaultMatch ? current.map((item) => item.id === defaultMatch.id ? store : item) : [...current, store]);
+    setNearbyStores((current) => current.filter((item) => item.id !== store.id));
+    setStoreSearchStatus(defaultMatch ? `${store.name} updated with its nearby location.` : `${store.name} added to your store priorities.`);
+  }
+
+  function removePreferredStore(store: StorePreference) {
+    if (preferredStores.length <= 1) { setStoreSearchStatus("Keep at least one preferred store."); return; }
+    const next = preferredStores.filter((item) => item.id !== store.id);
+    setPreferredStores(next);
+    if (selectedStore === store.name) setSelectedStore(next[0].name);
+    setStoreSearchStatus(`${store.name} removed from your store priorities.`);
+  }
+
+  function movePreferredStore(index: number, direction: -1 | 1) {
+    const target = index + direction;
+    if (target < 0 || target >= preferredStores.length) return;
+    const next = [...preferredStores];
+    [next[index], next[target]] = [next[target], next[index]];
+    setPreferredStores(next);
+    setStoreSearchStatus(`${next[target].name} is now priority ${target + 1}.`);
+  }
+
+  function toggleAlreadyHave(key: string) {
+    setAlreadyHaveIngredients((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
+    setReviewedPlanSignature("");
   }
 
   async function toggleFavorite(meal: Meal) {
@@ -1090,44 +1252,48 @@ export default function Home() {
     return ingredientAdjustments[entry.key]?.trim() || entry.suggestedQuantity;
   }
 
-  async function shareGroceryList() {
-    if (!ingredientsReviewed) { setExportStatus("Review and confirm the merged ingredient list before exporting."); return; }
+  function groceryDateLabel() {
     const start = new Date(`${planStartDate}T12:00:00`);
     const end = new Date(start);
     end.setDate(start.getDate() + (range === "Day" ? 0 : range === "Week" ? 6 : 29));
-    const dateLabel = range === "Day"
+    return range === "Day"
       ? start.toLocaleDateString("en-US", { month: "short", day: "numeric" })
       : `${start.toLocaleDateString("en-US", { month: "short", day: "numeric" })} - ${end.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
-    const text = `Groceries, ${dateLabel}\n\n${groceryGroups.map((group) => `${group.title}\n${group.items.map((entry) => `• ${groceryItemName(entry)} — ${groceryItemQuantity(entry)}`).join("\n")}`).join("\n\n")}`;
+  }
+
+  function groceryListText(destination: "reminders" | "notes") {
+    const heading = destination === "reminders" ? "Shopping reminders" : "Grocery note";
+    return `${heading}: Groceries, ${groceryDateLabel()}\n\n${groceryGroups.map((group) => `${group.title}\n${group.items.map((entry) => `☐ ${groceryItemName(entry)} — ${groceryItemQuantity(entry)}`).join("\n")}`).join("\n\n")}`;
+  }
+
+  async function shareGroceryList(destination: "reminders" | "notes" = groceryDestination) {
+    if (!ingredientsReviewed) throw new Error("Approve the grocery list before sending it.");
+    if (!groceryGroups.length) throw new Error("Every ingredient is marked as already on hand, so there is no shopping list to send.");
+    const text = groceryListText(destination);
+    const targetLabel = destination === "reminders" ? "Reminders or Tasks" : "Notes or Keep";
     if (navigator.share) {
       try {
-        await navigator.share({ title: `Groceries, ${dateLabel}`, text });
-        setExportStatus("Grocery list shared. Choose Notes, Reminders, Keep, or another list app on your device.");
-        return;
+        await navigator.share({ title: `Groceries, ${groceryDateLabel()}`, text });
+        return `Grocery list shared for ${targetLabel}.`;
       } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") { setExportStatus("Sharing cancelled. Your grocery list is unchanged."); return; }
+        if (error instanceof DOMException && error.name === "AbortError") return "Grocery sharing was cancelled; the rest of your selected actions continued.";
       }
     }
-    try {
-      await navigator.clipboard.writeText(text);
-      setExportStatus("Grocery list copied. Paste it into Apple Notes, Reminders, Google Keep, or your preferred list app.");
-    } catch {
-      setExportStatus("Your browser blocked sharing and copying. Try the calendar or email export instead.");
-    }
+    await navigator.clipboard.writeText(text);
+    return `Grocery list copied for ${targetLabel}.`;
   }
 
   async function shopOnInstacart() {
-    if (!ingredientsReviewed) { setExportStatus("Review and confirm the merged ingredient list before shopping."); return; }
+    if (!ingredientsReviewed) throw new Error("Approve the grocery list before shopping.");
     const destination = window.open("about:blank", "_blank");
     if (destination) destination.opener = null;
-    setExportStatus("Preparing your Instacart shopping list…");
     try {
       const response = await fetch("/api/instacart/shopping-list", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: `Grocer-Eaze groceries starting ${planStartDate}`,
-          items: groceryEntries.map((entry) => {
+          items: groceryEntries.filter((entry) => !alreadyHaveIngredients.includes(entry.key)).map((entry) => {
             const quantity = groceryItemQuantity(entry);
             const measurement = parseIngredientMeasurement(quantity);
             return { name: groceryItemName(entry), displayText: `${quantity} ${groceryItemName(entry)}`, measurements: measurement ? [measurement] : [] };
@@ -1138,15 +1304,15 @@ export default function Home() {
       if (!response.ok || !data.url) throw new Error(data.error || "Instacart could not prepare this list.");
       if (destination) destination.location.href = data.url;
       else window.location.href = data.url;
-      setExportStatus("Your grocery list is ready to review and shop on Instacart.");
+      return "Instacart opened with your shopping list.";
     } catch (error) {
       destination?.close();
-      setExportStatus(error instanceof Error ? error.message : "Instacart is temporarily unavailable.");
+      throw error instanceof Error ? error : new Error("Instacart is temporarily unavailable.");
     }
   }
-  function downloadCalendar() {
-    if (!plannedMeals.length) { setExportStatus("Add recipes to your plan before exporting a calendar."); return; }
-    if (!ingredientsReviewed) { setExportStatus("Review and confirm the merged ingredient list before exporting."); return; }
+  function downloadCalendar(provider: "google" | "apple" = calendarProvider) {
+    if (!plannedMeals.length) throw new Error("Add recipes to your plan before exporting a calendar.");
+    if (!ingredientsReviewed) throw new Error("Approve the grocery list before exporting a calendar.");
     const slots = [...plannedMeals].sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder));
     const shuffledByKind = new Map<string, Meal[]>();
     if (calendarOrder === "random") {
@@ -1170,13 +1336,66 @@ export default function Home() {
     }).join("\r\n");
     const file = new Blob([`BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Grocer-Eaze//Meal Plan//EN\r\n${events}\r\nEND:VCALENDAR`], { type: "text/calendar" });
     const link = document.createElement("a"); link.href = URL.createObjectURL(file); link.download = "grocer-eaze-meal-plan.ics"; link.click(); URL.revokeObjectURL(link.href);
-    setExportStatus(`Calendar downloaded in ${calendarOrder === "random" ? "a shuffled order within each meal category" : "your selected recipe order"}.`);
+    return `${provider === "google" ? "Google" : "Apple"} Calendar file downloaded in ${calendarOrder === "random" ? "a shuffled order within each meal category" : "your selected recipe order"}.`;
   }
-  async function emailRecipes() {
-    if (!email) { setExportStatus("Enter your email address first."); return; }
-    if (!ingredientsReviewed) { setExportStatus("Review and confirm the merged ingredient list before exporting."); return; }
-    const response = await fetch("/api/email", { method: "POST", headers: { "Content-Type": "application/json", "x-grocer-owner": ownerId }, body: JSON.stringify({ to: email, subject: "My Grocer-Eaze recipes", meals: plannedMeals.map(({ day, title, detail, time, sourceUrl }) => ({ day, title, detail, time, sourceUrl })) }) });
-    setExportStatus(response.ok ? `Recipes sent to ${email}.` : "We couldn’t send that email. Please try again.");
+  function parsedEmailRecipients() {
+    return [...new Set(emailRecipients.split(/[;,\n]/).map((address) => address.trim().toLowerCase()).filter(Boolean))];
+  }
+
+  async function emailRecipes(recipients = parsedEmailRecipients()) {
+    if (!ingredientsReviewed) throw new Error("Approve the grocery list before emailing recipes.");
+    if (!recipients.length || recipients.some((address) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) || recipients.length > 10) throw new Error("Add up to 10 valid recipient email addresses.");
+    const response = await fetch("/api/email", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: recipients, subject: "My Grocer-Eaze recipes", meals: plannedMeals.map(({ day, title, detail, time, sourceUrl }) => ({ day, title, detail, time, sourceUrl })) }) });
+    const data = await response.json().catch(() => ({})) as { error?: string };
+    if (!response.ok) throw new Error(data.error || "We couldn’t send those recipes. Please try again.");
+    return `Recipes sent to ${recipients.length} ${recipients.length === 1 ? "recipient" : "recipients"}.`;
+  }
+
+  function approveGroceryList() {
+    if (!groceryEntries.length) { setExportStatus("Add at least one recipe ingredient before approving the list."); return; }
+    setReviewedPlanSignature(planSignature);
+    setExportStatus("");
+    navigateTo("delivery");
+  }
+
+  async function executeDeliveryActions() {
+    const selectedCount = Object.entries(deliveryActions).filter(([key, selected]) => selected && (key !== "instacart" || instacartEnabled)).length;
+    if (!selectedCount) { setExportStatus("Select at least one action to continue."); return; }
+    if (deliveryActions.email) {
+      const recipients = parsedEmailRecipients();
+      if (!recipients.length || recipients.some((address) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) || recipients.length > 10) {
+        setEmailDialogOpen(true);
+        setExportStatus("Add up to 10 valid email recipients before continuing.");
+        return;
+      }
+    }
+    setDeliveryBusy(true);
+    setExportStatus("Completing your selected actions…");
+    const tasks: Array<Promise<string>> = [];
+    if (deliveryActions.instacart && instacartEnabled) tasks.push(shopOnInstacart());
+    if (deliveryActions.grocery) tasks.push(shareGroceryList(groceryDestination));
+    if (deliveryActions.calendar) {
+      try { tasks.push(Promise.resolve(downloadCalendar(calendarProvider))); }
+      catch (error) { tasks.push(Promise.reject(error)); }
+    }
+    if (deliveryActions.email) tasks.push(emailRecipes());
+    const results = await Promise.allSettled(tasks);
+    const completed = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+    const failed = results.flatMap((result) => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "One selected action could not be completed."] : []);
+    setExportStatus([...completed, ...failed].join(" "));
+    setDeliveryBusy(false);
+  }
+
+  function confirmEmailRecipients() {
+    const recipients = parsedEmailRecipients();
+    if (!recipients.length || recipients.some((address) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) || recipients.length > 10) {
+      setExportStatus("Enter up to 10 valid email addresses, separated by commas or new lines.");
+      return;
+    }
+    setEmailRecipients(recipients.join(", "));
+    setDeliveryActions((current) => ({ ...current, email: true }));
+    setEmailDialogOpen(false);
+    setExportStatus(`${recipients.length} email ${recipients.length === 1 ? "recipient" : "recipients"} ready.`);
   }
 
   async function submitAccessibilityFeedback(event: React.FormEvent<HTMLFormElement>) {
@@ -1221,7 +1440,7 @@ export default function Home() {
   }
 
   function navigateTo(nextView: View) {
-    if (["meals", "list"].includes(nextView) && authLoaded) {
+    if (["meals", "list", "delivery"].includes(nextView) && authLoaded) {
       if (!user) { nextView = "account"; setAccountStatus("Sign in before using meal planning tools."); }
       else if (!user.hasAccess) { nextView = "plans"; setAccountStatus("Choose a membership to unlock meal planning and exports."); }
     }
@@ -1306,14 +1525,25 @@ export default function Home() {
         <div className="preference-heading"><strong>Plan preferences</strong><span>Choose the options that should shape your recipes and shopping plan.</span></div>
         <div className="option-grid"><Toggle label="Plan for leftovers" checked={leftovers} onChange={() => setLeftovers(!leftovers)} note="Cook once, eat twice" /><Toggle label="Try to reuse ingredients" checked={reuseIngredients} onChange={() => setReuseIngredients(!reuseIngredients)} note="Favor recipes with useful overlap" /><Toggle label="School lunches" checked={kidLunches} onChange={toggleSchoolLunches} note={`${schoolLunchTarget || (range === "Month" ? 22 : range === "Week" ? 5 : 1)} extra weekday lunch${range === "Day" ? "" : "es"} · separate from lunch`} /><Toggle label="Gluten-free" checked={glutenFree} onChange={() => setGlutenFree(!glutenFree)} note={familyGlutenFree ? "Also required by a family member" : undefined} /><Toggle label="Low dairy" checked={lowDairy} onChange={() => setLowDairy(!lowDairy)} note={familyLowDairy ? "Also preferred by a family member" : undefined} /><Toggle label="Mediterranean" checked={mediterranean} onChange={() => setMediterranean(!mediterranean)} /><Toggle label="One store only" checked={oneStore} onChange={() => setOneStore(!oneStore)} /></div>
         {kidLunches && <div className="school-lunch-builder"><div><strong>Make school lunches easy</strong><span>Each school lunch is a simple, packable main plus the sides you choose. These are additional lunches and never reduce your regular lunch count.</span></div><div role="group" aria-label="School lunch sides">{schoolLunchSideOptions.map((side) => <button type="button" key={side} className={schoolLunchSides.includes(side) ? "selected" : ""} aria-pressed={schoolLunchSides.includes(side)} onClick={() => toggleSchoolLunchSide(side)}>{schoolLunchSides.includes(side) ? "✓ " : "+ "}{side}</button>)}</div></div>}
-        {oneStore && <div className="field"><label htmlFor="preferred-store">Preferred store</label><select id="preferred-store" value={selectedStore} onChange={(event) => setSelectedStore(event.target.value)}>{storeNames.map((store) => <option key={store}>{store}</option>)}</select></div>}
         <div className="field"><label htmlFor="ingredient-exclusions">Allergies or ingredients to avoid</label><input id="ingredient-exclusions" className="text-input" placeholder="e.g. shellfish, peanuts, mushrooms" value={exclusions} onChange={(e) => setExclusions(e.target.value)} /></div>
         <div className="location-picker">
           <label htmlFor="shopping-location">Shopping location</label><div className="location-input"><span className="location-mark" aria-hidden="true"><i>⌖</i></span><input id="shopping-location" value={locationQuery} onChange={(e) => { const nextLocation = e.target.value; setLocationQuery(nextLocation); setLocationResults([]); setLocationStatus(nextLocation.trim().length >= 2 ? "Finding location matches…" : nextLocation ? "Type at least 2 characters to search." : "Enter a neighborhood, city, or ZIP, or use your location."); }} placeholder="Neighborhood, city, or ZIP" aria-label="Shopping location" role="combobox" aria-autocomplete="list" aria-controls="location-options" aria-expanded={locationResults.length > 0} /><div className="location-actions">{locationQuery && <button className="location-clear" type="button" onClick={clearLocation} aria-label="Clear shopping location">Clear</button>}<button className="location-use" type="button" onClick={locateMe}><span aria-hidden="true">◎</span>Use my location</button></div></div>
-          {locationResults.length > 0 && <div className="location-results" id="location-options" role="listbox" aria-label="Location suggestions">{locationResults.map((result) => <button role="option" aria-selected="false" key={`${result.lat}-${result.lon}`} onClick={() => { setLocation(result.label); setLocationQuery(result.label); setLocationResults([]); setLocationStatus("Location updated."); }}>{result.label}</button>)}</div>}
+          {locationResults.length > 0 && <div className="location-results" id="location-options" role="listbox" aria-label="Location suggestions">{locationResults.map((result) => <button role="option" aria-selected="false" key={`${result.lat}-${result.lon}`} onClick={() => { setLocation(result.label); setLocationQuery(result.label); setLocationCoordinates(result.lat && result.lon ? { lat: result.lat, lon: result.lon } : null); setLocationResults([]); setNearbyStores([]); setLocationStatus("Location updated. Refresh nearby stores when you’re ready."); }}>{result.label}</button>)}</div>}
           <small aria-live="polite">{locationStatus || `Searching stores near ${location}`}</small>
         </div>
-        <button className="primary" onClick={() => generatePlan()} disabled={planning || !authLoaded}>{!authLoaded ? "Checking your account…" : planning ? "Building your recipe catalog…" : "Browse recipes for my plan"} <span>→</span></button><p className="estimate">Estimated groceries for a full plan: <strong>${planningEstimate.low}–${planningEstimate.high}</strong>{planningEstimate.high > budget && <span> · above your {budget >= 500 ? "$500+" : `$${budget}`} target</span>}</p>{plannerNotice && <p className="form-notice error" role="alert">{plannerNotice}</p>}
+        <details className="store-preferences" open>
+          <summary><span>Store priorities</span><small>{preferredStores.length} saved · within {storeRadius} miles</small></summary>
+          <div className="store-preferences-body">
+            <p>Your first store is your highest priority. These choices are saved to your account and used for grocery comparisons.</p>
+            <div className="store-search-controls"><label htmlFor="store-radius">Search radius<select id="store-radius" value={storeRadius} onChange={(event) => { setStoreRadius(Number(event.target.value)); setNearbyStores([]); }}><option value="1">1 mile</option><option value="3">3 miles</option><option value="5">5 miles</option><option value="10">10 miles</option><option value="15">15 miles</option><option value="25">25 miles</option></select></label><button className="outline compact" type="button" disabled={storeSearchBusy || !location.trim()} onClick={findNearbyStores}>{storeSearchBusy ? "Finding stores…" : "Find nearby stores"}</button></div>
+            <ol className="preferred-store-list">{preferredStores.map((store, index) => <li key={store.id}><span className="store-priority">{index + 1}</span><div><strong>{store.name}</strong><small>{store.distanceMiles !== undefined ? `${store.distanceMiles} mi · ` : ""}{store.address || "Address unavailable"}</small></div><div className="store-order-actions"><button type="button" disabled={index === 0} onClick={() => movePreferredStore(index, -1)} aria-label={`Move ${store.name} higher`}>↑</button><button type="button" disabled={index === preferredStores.length - 1} onClick={() => movePreferredStore(index, 1)} aria-label={`Move ${store.name} lower`}>↓</button><button type="button" disabled={preferredStores.length === 1} onClick={() => removePreferredStore(store)} aria-label={`Remove ${store.name}`}>Remove</button></div></li>)}</ol>
+            {oneStore && <div className="field"><label htmlFor="preferred-store">Only use this store</label><select id="preferred-store" value={selectedStore} onChange={(event) => setSelectedStore(event.target.value)}>{preferredStores.map((store) => <option key={store.id} value={store.name}>{store.name}</option>)}</select></div>}
+            {nearbyStores.length > 0 && <div className="nearby-store-results"><span className="mini-label">NEARBY OPTIONS</span>{nearbyStores.map((store) => <button type="button" key={store.id} onClick={() => addPreferredStore(store)}><span><strong>{store.name}</strong><small>{store.distanceMiles !== undefined ? `${store.distanceMiles} mi · ` : ""}{store.address || "Address unavailable"}</small></span><b>+ Add</b></button>)}</div>}
+            {storeSearchStatus && <p className="store-search-status" aria-live="polite">{storeSearchStatus}</p>}
+            <small className="map-attribution">Nearby store data © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap contributors</a>.</small>
+          </div>
+        </details>
+        <button className="primary" onClick={() => generatePlan()} disabled={planning || !authLoaded}>{!authLoaded ? "Checking your account…" : planning ? "Building your recipe catalog…" : "Browse recipes for my plan"} <span>→</span></button><p className="estimate">Estimated groceries for a full plan: <strong>${planningEstimate.low}–${planningEstimate.high}</strong>{planningEstimate.high > budget && <span> · above your {budget >= 500 ? "$500+" : `$${budget}`} target</span>}</p>{user && planSaveStatus && <p className="cloud-save-status" aria-live="polite">☁ {planSaveStatus}</p>}{plannerNotice && <p className="form-notice error" role="alert">{plannerNotice}</p>}
       </section>
     </div>}
 
@@ -1418,38 +1648,47 @@ export default function Home() {
     </div>}
 
     {view === "list" && <div className="dashboard" id="page-content" tabIndex={-1}>
-      <div className="page-heading"><div><p className="eyebrow">GROCERIES · {plannedMeals.length} SELECTED MEALS</p><h2>Everything you need, sorted.</h2><p>{groceryGroups.reduce((sum, group) => sum + group.count, 0)} unique ingredients for {people} people near {location}. {selectedStore} estimate: ${selectedEstimate}.</p></div><button className="outline" onClick={() => navigateTo("meals")}>← Back to recipes</button></div>
-      {plannedMeals.length ? <div className="list-layout">
-        <section className="grocery-panel">
-          <div className="store-compare"><span className="mini-label">{oneStore ? "YOUR SELECTED STORE" : "COMPARE NEARBY STORES"}</span><div>{visibleStoreEstimates.map((store) => <button key={store.name} className={selectedStore === store.name ? "selected-store" : ""} onClick={() => setSelectedStore(store.name)}><strong>{store.name}</strong><span>${store.price}</span><small>{store.availability}% estimated availability</small></button>)}</div></div>
+      <div className="page-heading"><div><p className="eyebrow">GROCERIES · {plannedMeals.length} SELECTED MEALS</p><h2>Review what you’ll actually buy.</h2><p>{groceryEntries.length} combined ingredients for {people} people near {location}. {groceryEntries.length - alreadyHaveEntries.length} remain on the shopping list.</p></div><button className="outline" onClick={() => navigateTo("meals")}>← Back to recipes</button></div>
+      {plannedMeals.length ? <div className="grocery-review-layout">
+        <section className="grocery-panel grocery-panel-full">
+          <div className="store-compare"><span className="mini-label">{oneStore ? "YOUR SELECTED STORE" : "YOUR PRIORITIZED STORES"}</span><div>{visibleStoreEstimates.map((store, index) => <button key={store.id} className={selectedStore === store.name ? "selected-store" : ""} onClick={() => setSelectedStore(store.name)}><strong>{index + 1}. {store.name}</strong><span>${store.price}</span><small>{store.distanceMiles !== undefined ? `${store.distanceMiles} mi · ` : ""}{store.availability}% estimated availability</small></button>)}</div></div>
           <div className="grocery-head"><strong>{selectedStore}</strong><span>{plannedMeals.length} meals × {people} people · recipe-derived estimate</span></div>
-          <p className="estimate-method"><strong>How this is calculated:</strong> We add each selected recipe’s listed cost per serving for {people} people, then adjust for typical pricing at {selectedStore}. It is an estimate—not an exact checkout total—because package sizes, sales, taxes, availability, and items you already have can change the final cost.</p>
+          <p className="estimate-method"><strong>How this is calculated:</strong> We add each selected recipe’s listed cost per serving for {people} people, then adjust for typical pricing at {selectedStore}. It is an estimate—not an exact checkout total—and does not subtract ingredients marked “already have.”</p>
           <details className="ingredient-review" open={!ingredientsReviewed}>
-            <summary><span>1. Review and edit the combined ingredient totals</span><small>{ingredientsReviewed ? "Confirmed" : "Required before export"}</small></summary>
+            <summary><span>1. Review ingredients, amounts, and what you already have</span><small>{ingredientsReviewed ? "Approved" : "Required"}</small></summary>
             <div className="ingredient-review-body">
-              <p>These are the ingredients required across every selected recipe, scaled for {people} people and merged where names match. Recipe wording varies, so review the totals and edit anything that needs a different package size or amount.</p>
-              <div className="ingredient-review-columns" aria-hidden="true"><span>Ingredient</span><span>Total needed</span></div>
-              <div className="ingredient-review-list">{groceryEntries.map((entry) => <div className="ingredient-edit-row" key={entry.key}>
+              <p>Totals are scaled for {people} people and merged where recipe ingredient names match. Edit package amounts as needed, then mark anything already in your kitchen so it stays off every shopping export.</p>
+              <div className="ingredient-review-columns" aria-hidden="true"><span>Ingredient</span><span>Total needed</span><span>Shopping status</span></div>
+              <div className="ingredient-review-list">{groceryEntries.map((entry) => <div className={`ingredient-edit-row ${alreadyHaveIngredients.includes(entry.key) ? "already-have" : ""}`} key={entry.key}>
                 <label><span>Ingredient name</span><input className="text-input" value={ingredientNameEdits[entry.key] ?? entry.name} onChange={(event) => { setIngredientNameEdits((current) => ({ ...current, [entry.key]: event.target.value })); setReviewedPlanSignature(""); }} aria-label={`Ingredient name for ${entry.name}`} /></label>
                 <label><span>Total needed</span><input className="text-input" value={ingredientAdjustments[entry.key] ?? entry.suggestedQuantity} onChange={(event) => { setIngredientAdjustments((current) => ({ ...current, [entry.key]: event.target.value })); setReviewedPlanSignature(""); }} aria-label={`Total amount needed for ${entry.name}`} /></label>
+                <label className="already-have-control"><input type="checkbox" checked={alreadyHaveIngredients.includes(entry.key)} onChange={() => toggleAlreadyHave(entry.key)} /><span>Already have</span><small>{alreadyHaveIngredients.includes(entry.key) ? "Excluded from shopping" : "Keep on shopping list"}</small></label>
                 <small>Combined from {entry.occurrences} recipe use{entry.occurrences === 1 ? "" : "s"}{entry.originals[0] ? ` · source example: ${entry.originals[0]}` : ""}</small>
               </div>)}</div>
-              <button className="primary compact" disabled={!groceryEntries.length} onClick={() => { setReviewedPlanSignature(planSignature); setExportStatus("Ingredients confirmed. Your exports are ready."); }}>{ingredientsReviewed ? "Ingredients confirmed" : "Confirm ingredient list"}</button>
             </div>
           </details>
-          <div className="shopping-checklist-heading"><span className="mini-label">2. SHOPPING CHECKLIST</span><h3>Check items off while you shop</h3><p>This is the same confirmed ingredient list above, reorganized by grocery aisle—not additional or optional items.</p></div>
-          {groceryGroups.length ? groceryGroups.map((group) => <details open key={group.title}><summary><span>{group.icon} {group.title}</span><small>{group.count} {group.count === 1 ? "item" : "items"}</small></summary><div className="checklist">{group.items.map((entry) => <label key={entry.key}><input type="checkbox" /> <span>{groceryItemName(entry)}</span><em>{groceryItemQuantity(entry)}</em></label>)}</div></details>) : <p className="empty-state">Select recipes to build your grocery list.</p>}
-        </section>
-        <aside className="export-panel">
-          <span className="mini-label">READY WHEN YOU ARE</span><h3>Take your plan with you</h3><p>Send lists, recipes, and reminders where you already use them.</p>
-          {!ingredientsReviewed && <p className="review-required">Confirm the merged ingredient list to unlock exports.</p>}
-          <button disabled={!ingredientsReviewed} onClick={shareGroceryList}><span className="icon-centered" aria-hidden="true">↗</span><div><strong>Share grocery list</strong><small>Send to Notes, Reminders, Keep, or another app</small></div><b>Share</b></button>
-          {instacartEnabled && <button className="instacart-button" disabled={!ingredientsReviewed} onClick={shopOnInstacart}><span aria-hidden="true">●</span><div><strong>Shop on Instacart</strong><small>Review matched products, choose a store, and check out</small></div><b>Open</b></button>}
-          <div className="calendar-export"><label htmlFor="calendar-order">Calendar recipe order</label><select id="calendar-order" value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle within each meal type</option></select><button disabled={!ingredientsReviewed} onClick={downloadCalendar}><span className="icon-centered" aria-hidden="true">31</span><div><strong>Google or Apple Calendar</strong><small>Recipes appear on their scheduled dates</small></div><b>Export</b></button></div>
-          <div className="email-export"><input type="email" aria-label="Email address for recipe export" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" /><button disabled={!ingredientsReviewed} onClick={emailRecipes}><span className="icon-centered" aria-hidden="true">@</span><div><strong>Email me recipes</strong><small>Send the complete plan</small></div><b>Email</b></button></div>
+          <div className="shopping-checklist-heading"><span className="mini-label">2. SHOPPING LIST PREVIEW</span><h3>{groceryEntries.length - alreadyHaveEntries.length} items to buy</h3><p>This preview contains only ingredients you still need, organized by grocery aisle. You’ll choose how to send or save it after approval.</p></div>
+          {groceryGroups.length ? groceryGroups.map((group) => <details open key={group.title}><summary><span>{group.icon} {group.title}</span><small>{group.count} {group.count === 1 ? "item" : "items"}</small></summary><div className="checklist">{group.items.map((entry) => <label key={entry.key}><input type="checkbox" /> <span>{groceryItemName(entry)}</span><em>{groceryItemQuantity(entry)}</em></label>)}</div></details>) : <p className="empty-state">Everything is marked as already on hand. You can still approve the plan and send recipes or save the calendar.</p>}
+          {alreadyHaveEntries.length > 0 && <details className="already-have-summary" open><summary><span>✓ Already have</span><small>{alreadyHaveEntries.length} excluded</small></summary><div>{alreadyHaveEntries.map((entry) => <p key={entry.key}><span><strong>{groceryItemName(entry)}</strong><small>{groceryItemQuantity(entry)}</small></span><button type="button" onClick={() => toggleAlreadyHave(entry.key)}>Move to shopping list</button></p>)}</div></details>}
+          <div className="grocery-approval-card"><div><span className="mini-label">NEXT STEP</span><h3>Approve, then choose how to send or save</h3><p>Nothing will be sent yet. The next screen lets you select grocery sharing, email, calendar, Instacart when available, or all of them.</p></div><button className="primary" onClick={approveGroceryList}>{ingredientsReviewed ? "Continue to send or save →" : "Approve grocery list & continue →"}</button></div>
           {exportStatus && <p className="export-status" aria-live="polite">{exportStatus}</p>}
-        </aside>
+        </section>
       </div> : <section className="empty-journey"><span className="empty-journey-icon icon-centered" aria-hidden="true">🛒</span><h3>Your grocery list starts with a meal.</h3><p>Browse the recipe catalog, add meals to your schedule, and Grocer-Eaze will combine the ingredients here.</p><div><button className="primary compact" onClick={() => navigateTo(recipeIdeas.length ? "meals" : "plan")}>{recipeIdeas.length ? "Choose recipes" : "Build my plan"}</button></div></section>}
+    </div>}
+
+    {view === "delivery" && <div className="dashboard narrow delivery-dashboard" id="page-content" tabIndex={-1}>
+      <div className="page-heading"><div><p className="eyebrow">SEND OR SAVE · FINAL STEP</p><h2>Choose what happens next.</h2><p>Select one or more actions. Grocer-Eaze won’t run anything until you press the final button.</p></div><button className="outline" onClick={() => navigateTo("list")}>← Edit grocery list</button></div>
+      {plannedMeals.length && ingredientsReviewed ? <>
+        <div className="delivery-toolbar"><div><strong>{selectedDeliveryActionCount} selected</strong><small>{plannedMeals.length} meals · {groceryEntries.length - alreadyHaveEntries.length} shopping items</small></div><button type="button" className="outline compact" onClick={() => setDeliveryActions((current) => ({ grocery: !allDeliveryActionsSelected, email: !allDeliveryActionsSelected, calendar: !allDeliveryActionsSelected, instacart: instacartEnabled ? !allDeliveryActionsSelected : current.instacart }))}>{allDeliveryActionsSelected ? "Clear all" : "Select all"}</button></div>
+        <section className="delivery-action-grid" aria-label="Send and save options">
+          <article className={deliveryActions.grocery ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.grocery} onChange={() => setDeliveryActions((current) => ({ ...current, grocery: !current.grocery }))} /><span><strong>Send grocery list</strong><small>{groceryEntries.length - alreadyHaveEntries.length} items; “already have” ingredients stay excluded</small></span></label>{deliveryActions.grocery && <fieldset><legend>Send as</legend><label><input type="radio" name="grocery-destination" checked={groceryDestination === "reminders"} onChange={() => setGroceryDestination("reminders")} /> Reminder or task list</label><label><input type="radio" name="grocery-destination" checked={groceryDestination === "notes"} onChange={() => setGroceryDestination("notes")} /> Note</label><small>Your device’s share menu opens so you can choose Apple Reminders, Notes, Google Tasks, Keep, or another installed app.</small></fieldset>}</article>
+          <article className={deliveryActions.email ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.email} onChange={() => { const next = !deliveryActions.email; setDeliveryActions((current) => ({ ...current, email: next })); if (next && !emailRecipients.trim()) setEmailDialogOpen(true); }} /><span><strong>Email recipes</strong><small>Recipe names link to their original pages</small></span></label>{deliveryActions.email && <div className="delivery-action-settings"><span>{parsedEmailRecipients().length ? `${parsedEmailRecipients().length} recipient${parsedEmailRecipients().length === 1 ? "" : "s"}` : "Recipients needed"}</span><button type="button" className="outline compact" onClick={() => setEmailDialogOpen(true)}>Add or edit recipients</button></div>}</article>
+          <article className={deliveryActions.calendar ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.calendar} onChange={() => setDeliveryActions((current) => ({ ...current, calendar: !current.calendar }))} /><span><strong>Save meal plan to calendar</strong><small>Each recipe, link, and meal type appears on its scheduled date</small></span></label>{deliveryActions.calendar && <fieldset><legend>Calendar</legend><label><input type="radio" name="calendar-provider" checked={calendarProvider === "google"} onChange={() => setCalendarProvider("google")} /> Google Calendar</label><label><input type="radio" name="calendar-provider" checked={calendarProvider === "apple"} onChange={() => setCalendarProvider("apple")} /> Apple Calendar</label><label className="delivery-select">Recipe order<select value={calendarOrder} onChange={(event) => setCalendarOrder(event.target.value as "plan" | "random")}><option value="plan">Keep my selected order</option><option value="random">Shuffle within each meal type</option></select></label><small>A standard calendar file downloads, ready to open or import into your chosen calendar.</small></fieldset>}</article>
+          {instacartEnabled && <article className={deliveryActions.instacart ? "selected" : ""}><label className="delivery-action-title"><input type="checkbox" checked={deliveryActions.instacart} onChange={() => setDeliveryActions((current) => ({ ...current, instacart: !current.instacart }))} /><span><strong>Open in Instacart</strong><small>Match your shopping list, choose a store, and review before checkout</small></span></label></article>}
+        </section>
+        <div className="delivery-confirm"><p><strong>Ready when you are.</strong> Your selected actions may open your device share menu, download a calendar file, or open a provider in a new tab.</p><button className="primary" disabled={deliveryBusy || selectedDeliveryActionCount === 0} onClick={executeDeliveryActions}>{deliveryBusy ? "Completing actions…" : `Run ${selectedDeliveryActionCount || "selected"} action${selectedDeliveryActionCount === 1 ? "" : "s"} →`}</button></div>
+        {exportStatus && <p className="export-status delivery-status" aria-live="polite">{exportStatus}</p>}
+      </> : <section className="empty-journey"><h3>Approve your grocery list first.</h3><p>Review ingredient amounts and mark what you already have before choosing how to send or save the plan.</p><div><button className="primary compact" onClick={() => navigateTo("list")}>Review grocery list</button></div></section>}
     </div>}
 
     {view === "family" && <div className="dashboard narrow" id="page-content"><div className="page-heading"><div><p className="eyebrow">HOUSEHOLD PREFERENCES</p><h2>Your family, thoughtfully fed.</h2><p>Allergies, avoided ingredients, and favorite proteins shape every catalog search.</p></div></div>{familyStatus && <p className="form-notice success" aria-live="polite">{familyStatus}</p>}<div className="family-grid"><section className="settings-card"><h3>Family members</h3>{members.length === 0 && <p className="empty-state">No family members yet. Add the first person below.</p>}{members.map((member) => <article className="member-card" key={member.id}><span className="member-avatar icon-centered">{member.name.slice(0, 1).toUpperCase()}</span><div><strong>{member.name}</strong><small>{member.role} · {member.allergies || "No listed allergies"}</small><p>{[member.preferences?.glutenFree && "Gluten-free", member.preferences?.lowDairy && "Low dairy", member.preferences?.kidFriendly && "Kid-friendly", member.preferences?.avoidOnions && "Avoid onions", ...(member.preferences?.proteins || []).map((protein) => `${protein} favorite`)].filter(Boolean).join(" · ") || "No preferences yet"}</p></div><div className="member-actions"><button onClick={() => editMember(member)}>Edit</button><button onClick={() => deleteMember(member.id)} aria-label={`Remove ${member.name}`}>Remove</button></div></article>)}</section><section className="settings-card"><h3>{editingMemberId ? "Edit family member" : "Add a family member"}</h3><div className="field"><label htmlFor="family-member-name">Name</label><input id="family-member-name" className="text-input" value={memberDraft.name} onChange={(e) => setMemberDraft({ ...memberDraft, name: e.target.value })} /></div><div className="field"><label htmlFor="family-member-role">Role</label><select id="family-member-role" value={memberDraft.role} onChange={(e) => setMemberDraft({ ...memberDraft, role: e.target.value })}><option>Adult</option><option>Teen</option><option>Child</option></select></div><div className="field"><label htmlFor="family-member-allergies">Allergies / avoid</label><input id="family-member-allergies" className="text-input" placeholder="Peanuts, shellfish…" value={memberDraft.allergies} onChange={(e) => setMemberDraft({ ...memberDraft, allergies: e.target.value })} /></div><div className="field"><label>Favorite proteins</label><div className="preference-check-grid" role="group" aria-label="Favorite proteins">{proteinOptions.map((protein) => <button type="button" key={protein} className={memberDraft.proteins.includes(protein) ? "selected" : ""} aria-pressed={memberDraft.proteins.includes(protein)} onClick={() => setMemberDraft({ ...memberDraft, proteins: memberDraft.proteins.includes(protein) ? memberDraft.proteins.filter((item) => item !== protein) : [...memberDraft.proteins, protein] })}>{protein}</button>)}</div></div><Toggle label="Avoid onions" checked={memberDraft.avoidOnions} onChange={() => setMemberDraft({ ...memberDraft, avoidOnions: !memberDraft.avoidOnions })} /><Toggle label="Gluten-free" checked={memberDraft.glutenFree} onChange={() => setMemberDraft({ ...memberDraft, glutenFree: !memberDraft.glutenFree })} /><Toggle label="Low dairy" checked={memberDraft.lowDairy} onChange={() => setMemberDraft({ ...memberDraft, lowDairy: !memberDraft.lowDairy })} /><Toggle label="Kid-friendly" checked={memberDraft.kidFriendly} onChange={() => setMemberDraft({ ...memberDraft, kidFriendly: !memberDraft.kidFriendly })} /><button className="primary" onClick={saveMember}>{editingMemberId ? "Save changes" : "Add family member"}</button>{editingMemberId && <button className="text-button" onClick={() => { setEditingMemberId(""); setMemberDraft({ name: "", role: "Adult", allergies: "", glutenFree: true, lowDairy: false, kidFriendly: false, avoidOnions: false, proteins: [] }); }}>Cancel editing</button>}</section></div></div>}
@@ -1477,8 +1716,8 @@ export default function Home() {
         <section className="settings-card">
           <h3>Profile</h3>
           <div className="account-identity"><span className="member-avatar icon-centered">{user.name[0].toUpperCase()}</span><div><strong>{user.name}</strong><small>{user.email}{user.phone ? ` · ${user.phone}` : ""}</small></div><em>{user.role}</em></div>
-          <div className="two-col"><div className="field"><label htmlFor="profile-household">Household name</label><input id="profile-household" className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /></div><div className="field"><label htmlFor="profile-email">Email for recipes</label><input id="profile-email" className="text-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div></div>
-          <button className="outline" onClick={async () => { await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ householdName: household, people, location, preferences: { range, planStartDate, mealType, budget, leftovers, glutenFree, lowDairy, mediterranean, kidLunches, oneStore, selectedStore, maxTime, skill, exclusions } }) }); setAccountStatus("Profile saved."); }}>Save profile</button>{accountStatus && <span className="success-note" role="status">{accountStatus}</span>}
+          <div className="two-col"><div className="field"><label htmlFor="profile-household">Household name</label><input id="profile-household" className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /></div><div className="field"><label htmlFor="profile-email">Default recipe email</label><input id="profile-email" className="text-input" type="email" value={email} onChange={(e) => { setEmail(e.target.value); setEmailRecipients(e.target.value); }} /></div></div>
+          <button className="outline" onClick={async () => { await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ householdName: household, people, location, preferences: profilePreferences }) }); setAccountStatus("Profile saved."); }}>Save profile</button>{accountStatus && <span className="success-note" role="status">{accountStatus}</span>}
         </section>
         <section className="settings-card security-card"><div className="icon-centered" aria-hidden="true">🔒</div><div><h3>Security</h3><p>Your email is verified. Your session is stored in a secure, HTTP-only cookie, protected data is checked on the server, and sensitive service keys never reach your browser.</p></div></section>
         <section className="settings-card plan-row">
@@ -1531,6 +1770,8 @@ export default function Home() {
     </main>
 
     {ratingMeal && <div className="modal-backdrop" onClick={() => setRatingMeal(null)}><section className="rating-modal" role="dialog" aria-modal="true" aria-labelledby="rating-title" tabIndex={-1} onClick={(e) => e.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close recipe rating" onClick={() => setRatingMeal(null)}>×</button><span className="mini-label">RATE THIS RECIPE</span><h3 id="rating-title">{ratingMeal.title}</h3><label>Meal quality</label><Stars label="Meal quality" value={ratings[ratingMeal.id]?.quality || 0} onChange={(quality) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality, ease: current[ratingMeal.id]?.ease || 0 } }))} /><label>Ease of preparation</label><Stars label="Ease of preparation" value={ratings[ratingMeal.id]?.ease || 0} onChange={(ease) => setRatings((current) => ({ ...current, [ratingMeal.id]: { quality: current[ratingMeal.id]?.quality || 0, ease } }))} /><button className="primary" disabled={!ratings[ratingMeal.id]?.quality || !ratings[ratingMeal.id]?.ease} onClick={() => saveRating(ratingMeal, ratings[ratingMeal.id])}>Save rating</button></section></div>}
+
+    {emailDialogOpen && <div className="modal-backdrop" onClick={() => setEmailDialogOpen(false)}><section className="email-recipient-modal" role="dialog" aria-modal="true" aria-labelledby="email-recipient-title" tabIndex={-1} onClick={(event) => event.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close email recipients" onClick={() => setEmailDialogOpen(false)}>×</button><span className="mini-label">EMAIL RECIPES</span><h3 id="email-recipient-title">Who should receive the plan?</h3><p>Add up to 10 addresses. Separate them with commas or put each address on a new line.</p><label htmlFor="recipe-email-recipients">Email recipients</label><textarea id="recipe-email-recipients" autoComplete="email" value={emailRecipients} onChange={(event) => setEmailRecipients(event.target.value)} placeholder="you@example.com, family@example.com" /><div className="modal-actions"><button className="outline" type="button" onClick={() => setEmailDialogOpen(false)}>Cancel</button><button className="primary compact" type="button" onClick={confirmEmailRecipients}>Save recipients</button></div></section></div>}
 
     {onboardingStep !== null && <div className="onboarding-backdrop"><section className="onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" tabIndex={-1}>
       <button className="modal-close icon-centered" aria-label="Skip introduction" onClick={finishOnboarding}>×</button>
