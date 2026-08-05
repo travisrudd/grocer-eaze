@@ -148,7 +148,7 @@ export function renderRecipeReader(content: RecipeReaderContent, readerUrl: stri
   <meta name="robots" content="noindex,nofollow,noarchive">
   <title>${title} | Grocer-Eaze Recipe Reader</title>
   <style>
-    :root{color-scheme:light;--ink:#183329;--muted:#5f6f67;--green:#126b4d;--soft:#eef8f1;--line:#d8e4dc;--paper:#fffdf8;--radius:16px}*{box-sizing:border-box}html{background:#f5f4ed}body{margin:0;color:var(--ink);font:16px/1.55 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.skip{position:absolute;left:12px;top:-80px;background:#fff;color:var(--ink);padding:10px 14px;border-radius:8px;z-index:2}.skip:focus{top:12px}.shell{width:min(760px,calc(100% - 32px));margin:0 auto;padding:24px 0 64px}.brand{display:inline-flex;align-items:center;gap:10px;color:var(--ink);font-weight:800;text-decoration:none}.mark{display:grid;place-items:center;width:36px;height:36px;border-radius:50%;background:var(--green);color:#fff;font-size:19px}.recipe{margin-top:24px;background:var(--paper);border:1px solid var(--line);border-radius:24px;padding:clamp(24px,6vw,52px);box-shadow:0 12px 36px rgba(24,51,41,.08)}.eyebrow{margin:0 0 8px;color:var(--green);font-size:.76rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase}h1{margin:0;font:800 clamp(2rem,8vw,3.6rem)/1.02 Georgia,serif;letter-spacing:-.035em}h2{margin:36px 0 12px;font-size:1.35rem}h3{margin:24px 0 8px;font-size:1.05rem}.meta{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 4px;color:var(--muted)}.meta span+span:before{content:"·";margin-right:8px}.source{color:var(--green);font-weight:700}.ingredients{padding-left:1.25rem}.ingredients li,.recipe-section li{margin:.55rem 0}.recipe-section ol{padding-left:1.4rem}.reader-notice{margin-top:20px;padding:18px;border:1px solid #ead8a8;border-radius:var(--radius);background:#fff9e8}.reader-notice h3{margin-top:0}.original{display:inline-flex;min-height:44px;align-items:center;margin-top:12px;color:var(--green);font-weight:800}.share{margin-top:32px;padding-top:28px;border-top:1px solid var(--line)}.share>p{color:var(--muted)}.actions{display:grid;gap:12px}.action{border:1px solid var(--line);border-radius:var(--radius);padding:16px;background:#fff}.action label{display:block;margin-bottom:8px;font-weight:750}.action-row{display:flex;gap:8px}.action input{min-width:0;flex:1;height:44px;border:1px solid #aebdb4;border-radius:10px;padding:0 12px;font:inherit}.action input:focus-visible,.action button:focus-visible,.original:focus-visible,.brand:focus-visible{outline:3px solid #e8a85c;outline-offset:3px}button{min-height:44px;border:0;border-radius:10px;padding:0 15px;background:var(--green);color:#fff;font:700 .95rem/1 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer}.secondary{background:var(--soft);color:var(--green)}.status{min-height:1.5em;margin:12px 0 0;color:var(--green);font-weight:700}.fine-print{margin:24px 0 0;color:var(--muted);font-size:.9rem}@media(max-width:560px){.shell{width:min(100% - 20px,760px);padding-top:12px}.recipe{padding:22px 18px;border-radius:18px}.action-row{align-items:stretch;flex-direction:column}.action-row button{width:100%}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+    :root{color-scheme:light;--ink:#183329;--muted:#5f6f67;--green:#126b4d;--soft:#eef8f1;--line:#d8e4dc;--paper:#fffdf8;--radius:16px}*{box-sizing:border-box}html{background:#f5f4ed}body{margin:0;color:var(--ink);font:16px/1.55 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.skip{position:absolute;left:12px;top:-80px;background:#fff;color:var(--ink);padding:10px 14px;border-radius:8px;z-index:2}.skip:focus{top:12px}.shell{width:min(760px,calc(100% - 32px));margin:0 auto;padding:24px 0 64px}.brand{display:inline-flex;align-items:center;gap:10px;color:var(--ink);font-weight:800;text-decoration:none}.mark{display:grid;place-items:center;width:36px;height:36px;border-radius:50%;background:var(--green);color:#fff;font-size:19px}.recipe{margin-top:24px;background:var(--paper);border:1px solid var(--line);border-radius:24px;padding:clamp(24px,6vw,52px);box-shadow:0 12px 36px rgba(24,51,41,.08)}.eyebrow{margin:0 0 8px;color:var(--green);font-size:.76rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase}h1{margin:0;font:800 clamp(2rem,8vw,3.6rem)/1.02 Georgia,serif;letter-spacing:-.035em}h2{margin:36px 0 12px;font-size:1.35rem}h3{margin:24px 0 8px;font-size:1.05rem}.meta{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 4px;color:var(--muted)}.meta span+span:before{content:"·";margin-right:8px}.source{color:var(--green);font-weight:700}.ingredients{padding-left:1.25rem}.ingredients li,.recipe-section li{margin:.55rem 0}.recipe-section ol{padding-left:1.4rem}.reader-notice{margin-top:20px;padding:18px;border:1px solid #ead8a8;border-radius:var(--radius);background:#fff9e8}.reader-notice h3{margin-top:0}.original{display:inline-flex;min-height:44px;align-items:center;margin-top:12px;color:var(--green);font-weight:800}.share{margin-top:32px;padding-top:28px;border-top:1px solid var(--line)}.share>p{color:var(--muted)}.actions{display:grid;gap:12px}.action{border:1px solid var(--line);border-radius:var(--radius);padding:16px;background:#fff}.action label{display:block;margin-bottom:8px;font-weight:750}.action-row{display:flex;gap:8px}.action input{min-width:0;flex:1;height:44px;border:1px solid #aebdb4;border-radius:10px;padding:0 12px;font:inherit}.action input:focus-visible,.action button:focus-visible,.original:focus-visible,.brand:focus-visible{outline:3px solid #e8a85c;outline-offset:3px}button{min-height:44px;border:0;border-radius:10px;padding:0 15px;background:var(--green);color:#fff;font:700 .95rem/1 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer}.secondary{background:var(--soft);color:var(--green)}.status{min-height:1.5em;margin:12px 0 0;color:var(--green);font-weight:700}.status.error{color:#9b2c2c}.fine-print{margin:24px 0 0;color:var(--muted);font-size:.9rem}@media(max-width:560px){.shell{width:min(100% - 20px,760px);padding-top:12px}.recipe{padding:22px 18px;border-radius:18px}.action-row{align-items:stretch;flex-direction:column}.action-row button{width:100%}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
   </style>
 </head>
 <body data-title="${encodedTitle}">
@@ -177,38 +177,7 @@ export function renderRecipeReader(content: RecipeReaderContent, readerUrl: stri
       <textarea id="recipe-text" hidden>${plainText}</textarea>
     </article>
   </main>
-  <script>
-    (() => {
-      const status = document.getElementById("reader-status");
-      const fullText = document.getElementById("recipe-text").value;
-      const title = document.body.dataset.title || "Recipe";
-      const shareText = title + "\\n" + window.location.href;
-      const setStatus = (message, error = false) => { status.textContent = message; status.style.color = error ? "#9b2c2c" : "#126b4d"; };
-      document.getElementById("copy-recipe").addEventListener("click", async () => {
-        try { await navigator.clipboard.writeText(fullText); setStatus("Clean recipe copied to your clipboard."); }
-        catch { setStatus("Your browser blocked clipboard access. Select the recipe text and copy it manually.", true); }
-      });
-      document.getElementById("email-form").addEventListener("submit", (event) => {
-        event.preventDefault();
-        const input = document.getElementById("email-recipients");
-        const recipients = [...new Set(input.value.split(/[;,\\n]/).map((value) => value.trim().toLowerCase()).filter(Boolean))];
-        const valid = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;
-        if (!recipients.length || recipients.length > 10 || recipients.some((recipient) => !valid.test(recipient))) { setStatus("Enter up to 10 valid email addresses.", true); input.focus(); return; }
-        setStatus("Email draft opened. Review it before sending.");
-        window.location.href = "mailto:" + recipients.map(encodeURIComponent).join(",") + "?subject=" + encodeURIComponent(title) + "&body=" + encodeURIComponent(shareText);
-      });
-      document.getElementById("text-form").addEventListener("submit", (event) => {
-        event.preventDefault();
-        const input = document.getElementById("text-recipient");
-        const raw = input.value.trim();
-        const digits = raw.replace(/\\D/g, "");
-        if (digits.length < 7 || digits.length > 15) { setStatus("Enter a valid phone number with 7 to 15 digits.", true); input.focus(); return; }
-        const recipient = raw.startsWith("+") ? "+" + digits : digits;
-        setStatus("Text draft opened. Review it before sending.");
-        window.location.href = "sms:" + encodeURIComponent(recipient) + "?&body=" + encodeURIComponent(shareText);
-      });
-    })();
-  </script>
+  <script src="/recipe-reader.js" defer></script>
 </body>
 </html>`;
 }

@@ -377,8 +377,9 @@ summary small { color: var(--muted); font-weight: 500; }
 .preference-check-grid button { min-height: 42px; border: 1px solid #cbd2cc; border-radius: var(--radius-control); background: white; color: var(--green-dark); cursor: pointer; font-size: 11px; font-weight: 800; }
 .preference-check-grid button.selected { border-color: var(--green); background: var(--green); color: white; }
 .security-card { display: grid; grid-template-columns: 48px 1fr; gap: 15px; }.security-card > div:first-child { width: 44px; height: 44px; border-radius: 50%; background: var(--mint); }.security-card h3 { margin-bottom: 6px; }.security-card p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.account-security-actions,.account-control-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 14px; }.account-security-actions a { color: var(--green); font-size: 11px; font-weight: 800; }.account-security-actions .text-button { width: auto; margin: 0; }
 .plan-row { display: flex; justify-content: space-between; align-items: center; gap: 22px; }.plan-row h3 { margin: 5px 0; }.plan-row p { margin: 0; color: var(--muted); font-size: 12px; }
-.danger-zone { display: flex; justify-content: space-between; align-items: center; }.danger-zone h3 { margin: 0; }
+.danger-zone { display: flex; justify-content: space-between; align-items: center; gap: 24px; }.danger-zone h3 { margin: 0; }.danger-zone p { max-width: 620px; margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }.account-control-actions { flex-shrink: 0; margin: 0; }.danger-button { min-height: 42px; border: 1px solid #a53737; border-radius: var(--radius-control); background: #fff7f7; color: #8c2424; padding: 10px 14px; font-size: 11px; font-weight: 800; cursor: pointer; }.danger-button:hover { background: #fce9e9; }.danger-button:disabled { cursor: not-allowed; opacity: .5; }
 .success-note { margin-left: 12px; color: var(--green); font-size: 11px; }
 .pricing-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .price-card { background: var(--paper); border: 1px solid #deddd4; border-radius: var(--radius-card); padding: 30px; }.price-card.featured { border: 2px solid var(--green); box-shadow: 0 16px 45px rgba(61,113,87,.12); }.price-card > span { color: var(--orange); font-size: 10px; letter-spacing: .12em; font-weight: 800; }.price-card h3 { margin: 15px 0 8px; font: 16px Inter, sans-serif; }.price-card h3 b { font: 38px Georgia, serif; color: var(--green-dark); }.price-card p { min-height: 40px; color: var(--muted); font-size: 12px; }.price-card button { width: 100%; min-height: 44px; border: 0; border-radius: var(--radius-control); background: var(--green); color: white; padding: 13px; font-weight: 800; cursor: pointer; }.checkout-note { text-align: center; padding: 12px; background: #fff4d8; color: #745b2d; font-size: 11px; }.back-button { margin-top: 18px; }
@@ -386,6 +387,7 @@ summary small { color: var(--muted); font-weight: 500; }
 .rating-modal { width: min(420px, 100%); position: relative; background: var(--paper); border-radius: var(--radius-card); padding: 30px; box-shadow: 0 25px 80px rgba(0,0,0,.25); }.rating-modal h3 { margin: 8px 0 24px; font-size: 27px; line-height: 1.08; }.rating-modal label { display: block; margin: 16px 0 4px; font-size: 11px; font-weight: 800; }.modal-close { position: absolute; top: 12px; right: 12px; border: 0; border-radius: 50%; width: 38px; height: 38px; background: transparent; cursor: pointer; font-size: 22px; }
 .stars { display: flex; gap: 3px; margin-bottom: 12px; }.stars button { border: 0; background: transparent; padding: 2px; color: #d99b37; font-size: 25px; cursor: pointer; }.rating-modal .primary:disabled { opacity: .45; cursor: not-allowed; }
 .auth-card { max-width: 560px; margin: 0 auto; }
+.auth-choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }.auth-choice-grid .primary,.auth-choice-grid .outline { width: 100%; }
 .auth-trust { display: grid; grid-template-columns: 46px 1fr; gap: 2px 13px; align-items: center; margin-bottom: 24px; padding: 15px; border-radius: var(--radius-control); background: #edf3ea; }
 .auth-trust > span { grid-row: 1 / 3; width: 42px; height: 42px; border-radius: 50%; background: white; }
 .auth-trust strong { font-size: 12px; }.auth-trust small { color: var(--muted); font-size: 10px; }
@@ -484,6 +486,7 @@ summary small { color: var(--muted); font-weight: 500; }
 .email-recipient-modal { position: relative; width: min(520px, 100%); padding: 30px; border-radius: var(--radius-card); background: var(--paper); box-shadow: 0 25px 80px rgba(0,0,0,.25); }
 .email-recipient-modal h3 { margin: 8px 0; font-size: 27px; line-height: 1.08; }.email-recipient-modal > p { margin: 0 0 18px; color: var(--muted); font-size: 11px; line-height: 1.55; }.email-recipient-modal > label { display: block; margin-bottom: 7px; font-size: 11px; font-weight: 800; }.email-recipient-modal textarea { width: 100%; min-height: 120px; resize: vertical; border: 1px solid #d8dbd5; border-radius: var(--radius-control); padding: 11px; line-height: 1.5; }.modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 16px; }.modal-actions .primary { width: auto; }
 .recipient-modal .field { margin-bottom: 12px; }.recipient-modal .field > label small { color: var(--muted); font-weight: 500; }
+.account-delete-modal .danger-button { width: auto; }.account-delete-modal > p { color: var(--muted); }
 .ingredient-report-modal { position: relative; width: min(540px, 100%); max-height: calc(100vh - 40px); overflow-y: auto; padding: 30px; border-radius: var(--radius-card); background: var(--paper); box-shadow: 0 25px 80px rgba(0,0,0,.25); }
 .ingredient-report-modal h3 { margin: 8px 0; font-size: 27px; line-height: 1.08; }.ingredient-report-modal > p { margin: 0 0 18px; color: var(--muted); font-size: 11px; line-height: 1.55; }.ingredient-report-modal form { display: grid; gap: 7px; }.ingredient-report-modal form > label { margin-top: 6px; font-size: 11px; font-weight: 800; }.ingredient-report-modal form > label small { color: var(--muted); font-weight: 500; }.ingredient-report-modal select,.ingredient-report-modal textarea { width: 100%; border: 1px solid #d8dbd5; border-radius: var(--radius-control); background: white; padding: 11px; }.ingredient-report-modal textarea { min-height: 100px; resize: vertical; line-height: 1.5; }
 
@@ -629,4 +632,16 @@ summary small { color: var(--muted); font-weight: 500; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   *, *::before, *::after { scroll-behavior: auto!important; transition-duration: .01ms!important; animation-duration: .01ms!important; animation-iteration-count: 1!important; }
+}
+
+.privacy-page { min-height: 100vh; background: var(--cream); color: var(--ink); }
+.privacy-header { display: flex; justify-content: space-between; align-items: center; min-height: 76px; padding: 16px max(5vw, 24px); border-bottom: 1px solid var(--line); background: var(--paper); }.privacy-header > a:last-child { color: var(--green); font-size: 12px; font-weight: 800; }
+.privacy-document { width: min(820px, calc(100% - 36px)); margin: 0 auto; padding: 60px 0 90px; }.privacy-document h1 { margin: 8px 0 5px; font: 500 clamp(42px, 7vw, 68px)/1 Georgia, serif; letter-spacing: -.035em; }.privacy-document h2 { margin: 42px 0 12px; font-size: 24px; line-height: 1.15; }.privacy-document p,.privacy-document li { color: #4f6057; font-size: 15px; line-height: 1.75; }.privacy-document li + li { margin-top: 8px; }.privacy-document strong { color: var(--ink); }.privacy-updated { margin: 0; font-size: 12px!important; }.privacy-lede { margin: 28px 0 0; padding: 22px 24px; border-left: 4px solid var(--green); border-radius: 0 var(--radius-control) var(--radius-control) 0; background: #edf3ea; color: var(--ink)!important; font-size: 17px!important; }
+.privacy-contact { margin-top: 48px; padding: clamp(22px, 5vw, 38px); border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--paper); }.privacy-contact h2 { margin-top: 0; }.privacy-request-form { display: grid; gap: 12px; }.privacy-request-form textarea { min-height: 130px; resize: vertical; }.privacy-request-form .primary { width: min(100%, 280px); }.privacy-request-status { margin: 0; color: var(--green)!important; font-weight: 800; }
+
+@media (max-width: 600px) {
+  .auth-choice-grid { grid-template-columns: 1fr; }
+  .privacy-header { align-items: flex-start; gap: 14px; flex-direction: column; }
+  .privacy-document { padding-top: 38px; }
+  .privacy-lede { padding: 18px; }
 }

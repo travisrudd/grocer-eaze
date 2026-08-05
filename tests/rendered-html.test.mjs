@@ -169,7 +169,10 @@ test("restores returning accounts and hardens passwordless sign-in", async () =>
 
   assert.match(page, /Returning households are restored automatically/);
   assert.match(page, /reloadPersonalData/);
-  assert.match(auth, /code: "NAME_REQUIRED"/);
+  assert.match(page, /Create account/);
+  assert.match(auth, /sendAccountNotFound/);
+  assert.match(auth, /intent === "signup"/);
+  assert.doesNotMatch(auth, /NAME_REQUIRED/);
   assert.match(auth, /auth_rate_limits/);
   assert.match(auth, /constantTimeEqual/);
   assert.match(api, /sec-fetch-site/);
@@ -321,13 +324,15 @@ test("retains prioritized nearby stores at the account level", async () => {
 });
 
 test("creates private clean-recipe readers for calendar links", async () => {
-  const [page, api, worker, reader, schema, migration] = await Promise.all([
+  const [page, api, worker, reader, readerScript, schema, migration, lifecycleMigration] = await Promise.all([
     source("app/page.tsx"),
     source("worker/api.ts"),
     source("worker/index.ts"),
     source("worker/recipe-reader.ts"),
+    source("public/recipe-reader.js"),
     source("db/schema.ts"),
     source("drizzle/0007_pale_scarlet_witch.sql"),
+    source("drizzle/0008_condemned_cargill.sql"),
   ]);
 
   assert.match(page, /fetch\("\/api\/recipe-readers"/);
@@ -347,8 +352,12 @@ test("creates private clean-recipe readers for calendar links", async () => {
   assert.match(reader, /Open email draft/);
   assert.match(reader, /Open text draft/);
   assert.match(reader, /View the original recipe and publisher notes/);
-  assert.match(reader, /Enter up to 10 valid email addresses/);
-  assert.match(reader, /7 to 15 digits/);
+  assert.match(reader, /recipe-reader\.js/);
+  assert.match(readerScript, /Enter up to 10 valid email addresses/);
+  assert.match(readerScript, /7 to 15 digits/);
+  assert.match(api, /90 \* 86_400_000/);
+  assert.match(api, /revoked_at IS NULL/);
+  assert.match(lifecycleMigration, /\+90 days/);
   assert.doesNotMatch(reader, /api\.resend\.com/);
 });
 
@@ -368,9 +377,33 @@ test("normalizes provider directions and escapes reader content", async () => {
   assert.match(html, /Test &lt;Dish&gt;/);
   assert.match(html, /Mix &amp; stir\./);
   assert.doesNotMatch(html, /<b>warm<\/b>/);
-  assert.match(html, /Clean recipe copied to your clipboard/);
-  const readerScript = html.match(/<script>([\s\S]*?)<\/script>/)?.[1] || "";
-  assert.doesNotThrow(() => new Function(readerScript));
+  assert.match(html, /recipe-reader\.js/);
+  assert.doesNotMatch(html, /<script>\s*\(\(\) =>/);
+});
+
+test("adds account privacy controls and limits alternate production exposure", async () => {
+  const [page, api, billing, privacy, sitemap, config, worker] = await Promise.all([
+    source("app/page.tsx"),
+    source("worker/api.ts"),
+    source("worker/billing.ts"),
+    source("app/privacy/page.tsx"),
+    source("app/sitemap.ts"),
+    source("wrangler.production.jsonc"),
+    source("worker/index.ts"),
+  ]);
+  assert.match(page, /Delete account/);
+  assert.match(page, /Revoke all shared recipe links/);
+  assert.match(page, /removeItem\(`grocer-eaze-active-plan:\$\{user\.id\}`\)/);
+  assert.match(api, /url\.pathname === "\/api\/account"/);
+  assert.match(api, /cancelStripeSubscription/);
+  assert.match(billing, /method: "POST" \| "DELETE"/);
+  assert.match(privacy, /We do not sell personal information/);
+  assert.match(sitemap, /grocer-eaze\.com\/privacy/);
+  assert.match(config, /"workers_dev": false/);
+  assert.match(config, /"preview_urls": false/);
+  assert.match(config, /"head_sampling_rate": 0\.1/);
+  assert.match(worker, /script-src-attr 'none'/);
+  assert.match(worker, /recipeReader \? "script-src 'self'"/);
 });
 
 test("recovers approved administrators after the hosting migration", async () => {

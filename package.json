@@ -18,7 +18,9 @@
     "test:unit": "node --test tests/rendered-html.test.mjs",
     "test:e2e": "playwright test",
     "ux:audit": "playwright test tests/accessibility-usability.spec.ts",
-    "quality": "npm run lint && npm run test",
+    "release:guard": "node scripts/release-guard.mjs",
+    "security:audit": "npm audit --omit=dev --audit-level=high",
+    "quality": "npm run lint && ./node_modules/.bin/tsc --noEmit --incremental false && npm run test && npm run release:guard && npm run security:audit",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },

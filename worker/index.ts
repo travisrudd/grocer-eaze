@@ -47,7 +47,7 @@ const worker = {
     }
 
     if (url.pathname.startsWith("/recipe/")) {
-      return withSecurityHeaders(await handleRecipeReaderPage(request, env));
+      return withSecurityHeaders(await handleRecipeReaderPage(request, env), true);
     }
 
     if (url.pathname === "/_vinext/image") {
@@ -65,13 +65,16 @@ const worker = {
   },
 };
 
-function withSecurityHeaders(response: Response) {
+function withSecurityHeaders(response: Response, recipeReader = false) {
   const secured = new Response(response.body, response);
-  secured.headers.set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://static.cloudflareinsights.com; form-action 'self'; upgrade-insecure-requests");
+  const scripts = recipeReader ? "script-src 'self'" : "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com";
+  secured.headers.set("Content-Security-Policy", `default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; ${scripts}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://static.cloudflareinsights.com; form-action 'self'; worker-src 'self' blob:; manifest-src 'self'; upgrade-insecure-requests`);
   secured.headers.set("X-Frame-Options", "DENY");
   secured.headers.set("X-Content-Type-Options", "nosniff");
   secured.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
   secured.headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=(self)");
+  secured.headers.set("Cross-Origin-Opener-Policy", "same-origin");
+  secured.headers.set("Cross-Origin-Resource-Policy", "same-site");
   secured.headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
   return secured;
 }

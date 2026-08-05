@@ -63,6 +63,8 @@ export const recipeReaders = sqliteTable("recipe_readers", {
   contentJson: text("content_json").notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
+  expiresAt: text("expires_at"),
+  revokedAt: text("revoked_at"),
 }, (table) => [
   uniqueIndex("recipe_readers_owner_recipe_idx").on(table.ownerId, table.recipeKey),
 ]);

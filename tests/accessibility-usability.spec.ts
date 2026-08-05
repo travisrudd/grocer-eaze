@@ -55,7 +55,8 @@ test("paid navigation directs signed-out visitors to a clear next step", async (
 
   await page.getByRole("button", { name: "Family" }).click();
   await expect(page.getByRole("heading", { name: "Sign in or create an account" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Continue with email" })).toBeDisabled();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Email me a sign-in code" })).toBeDisabled();
 });
 
 test("the recipe catalog loads progressively and filters remain usable", async ({ page }) => {
@@ -73,7 +74,9 @@ test("the recipe catalog loads progressively and filters remain usable", async (
     diets: ["gluten free", "Mediterranean"],
     extendedIngredients: [{ name: "fresh vegetables", aisle: "Produce", original: "2 cups fresh vegetables" }],
   }));
-  await page.route("**/api/recipes/search?*", async (route) => {
+  await page.route("**/api/recipes/search", async (route) => {
+    expect(route.request().method()).toBe("POST");
+    expect(new URL(route.request().url()).search).toBe("");
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ recipes }) });
   });
   await page.route("**/api/auth/me", async (route) => {
@@ -113,7 +116,9 @@ test("nearby stores can be added, reprioritized, removed, and retained through t
     if (route.request().method() === "PUT") { profileWrites += 1; await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ saved: true }) }); }
     else await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ profile: null }) });
   });
-  await page.route("**/api/stores/search?*", async (route) => {
+  await page.route("**/api/stores/search", async (route) => {
+    expect(route.request().method()).toBe("POST");
+    expect(new URL(route.request().url()).search).toBe("");
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ stores: [{ id: "osm-node-42", name: "Lakeview Market", address: "123 Clark St, Chicago", distanceMiles: 1.2, lat: "41.97", lon: "-87.66" }], center: { lat: "41.97", lon: "-87.66" } }) });
   });
 
@@ -155,7 +160,9 @@ test("school lunches stay separate and grocery totals remain editable", async ({
       { name: "herbs and pantry staples", aisle: "Pantry", original: "herbs and pantry staples" },
     ],
   }));
-  await page.route("**/api/recipes/search?*", async (route) => {
+  await page.route("**/api/recipes/search", async (route) => {
+    expect(route.request().method()).toBe("POST");
+    expect(new URL(route.request().url()).search).toBe("");
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ recipes }) });
   });
   await page.route("**/api/auth/me", async (route) => {
@@ -388,6 +395,7 @@ test("the clean recipe reader validates email and text recipients before opening
     instructions: [{ name: "", steps: ["Simmer until tender."] }], extractionStatus: "complete",
   }, "https://grocer-eaze.com/recipe/test");
   await page.goto(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  await page.addScriptTag({ path: "public/recipe-reader.js" });
 
   await page.getByRole("textbox", { name: "Email recipients" }).fill("not-an-email");
   await page.getByRole("button", { name: "Open email draft" }).click();
@@ -395,4 +403,39 @@ test("the clean recipe reader validates email and text recipients before opening
   await page.getByRole("textbox", { name: "Text recipient" }).fill("123");
   await page.getByRole("button", { name: "Open text draft" }).click();
   await expect(page.getByRole("status")).toHaveText("Enter a valid phone number with 7 to 15 digits.");
+});
+
+test("the privacy policy is accessible and its request form has a working result", async ({ page }) => {
+  let requestBody: Record<string, unknown> | null = null;
+  await page.route("**/api/privacy-request", async (route) => {
+    requestBody = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sent: true }) });
+  });
+  await page.goto("/privacy");
+  await expect(page.getByRole("heading", { name: "Privacy policy" })).toBeVisible();
+  await page.getByLabel("Email").fill("privacy@example.com");
+  await page.getByLabel("Request type").selectOption("Access my data");
+  await page.getByRole("button", { name: "Send privacy request" }).click();
+  await expect(page.getByRole("status")).toHaveText("Your request was sent to the Grocer-Eaze privacy contact.");
+  expect(requestBody).toMatchObject({ email: "privacy@example.com", requestType: "Access my data" });
+  const results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations.filter((violation) => ["serious", "critical"].includes(violation.impact || ""))).toEqual([]);
+});
+
+test("account security controls revoke links and protect a blocked deletion", async ({ page }) => {
+  await page.route("**/api/auth/me", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ user: {
+    id: "security-user", name: "Security User", email: "security@example.com", phone: "", role: "admin",
+    accessStatus: "active", complimentaryUntil: null, billingExempt: true, subscriptionStatus: null, subscriptionEndsAt: null, hasAccess: true,
+  } }) }));
+  await page.route("**/api/recipe-readers", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ revoked: true }) }));
+  await page.route("**/api/account", async (route) => route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "The last administrator cannot delete their account. Assign another administrator first." }) }));
+  await page.goto("/#account");
+  await expect(page.getByRole("heading", { name: "Welcome, Security User." })).toBeVisible();
+  await page.getByRole("button", { name: "Revoke all shared recipe links" }).click();
+  await expect(page.getByText("All previously shared clean-recipe links have been revoked.")).toBeVisible();
+  await page.getByRole("button", { name: "Delete account" }).click();
+  await page.getByLabel("Type DELETE to confirm").fill("DELETE");
+  await page.getByRole("button", { name: "Permanently delete account" }).click();
+  await expect(page.getByRole("alert")).toHaveText("The last administrator cannot delete their account. Assign another administrator first.");
+  await expect(page.getByRole("dialog", { name: "Delete your Grocer-Eaze account?" })).toBeVisible();
 });
