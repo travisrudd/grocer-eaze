@@ -358,10 +358,6 @@ export default function Home() {
   const [catalogBeforeSimilar, setCatalogBeforeSimilar] = useState<Meal[] | null>(null);
   const [recipeLoading, setRecipeLoading] = useState(false);
   const [recipeNotice, setRecipeNotice] = useState("");
-  const [importUrl, setImportUrl] = useState("");
-  const [importKind, setImportKind] = useState("Dinner");
-  const [importBusy, setImportBusy] = useState(false);
-  const [importStatus, setImportStatus] = useState("");
   const [plannerNotice, setPlannerNotice] = useState("");
   const [planHydrated, setPlanHydrated] = useState(false);
   const [authLoaded, setAuthLoaded] = useState(false);
@@ -1178,48 +1174,6 @@ export default function Home() {
       setRecipeNotice("More recipes are temporarily unavailable.");
     } finally {
       setRecipeLoading(false);
-    }
-  }
-
-  function webRecipeSearchUrl() {
-    const terms = [
-      recipeFilters.query.trim(),
-      effectiveGlutenFree && "gluten-free",
-      effectiveLowDairy && "low dairy",
-      mediterranean && "Mediterranean",
-      importKind === "School lunch" ? "simple kid-friendly school lunch" : importKind.toLowerCase(),
-      familyProteins.length ? familyProteins.join(" or ") : "",
-      familyAvoids.length ? `without ${familyAvoids.join(" or ")}` : "",
-      "recipe",
-    ].filter(Boolean).join(" ");
-    return `https://www.google.com/search?${new URLSearchParams({ q: terms })}`;
-  }
-
-  async function importRecipeUrl() {
-    if (!requireMembership()) return;
-    const value = importUrl.trim();
-    if (!/^https?:\/\//i.test(value)) {
-      setImportStatus("Paste a complete recipe page link beginning with http:// or https://.");
-      return;
-    }
-    setImportBusy(true); setImportStatus("Importing recipe details…");
-    try {
-      const response = await fetch("/api/recipes/import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: value }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "That recipe could not be imported.");
-      const meal = mapRecipe(data.recipe as Record<string, unknown>, recipeIdeas.length, importKind);
-      setRecipeIdeas((current) => [meal, ...current.filter((item) => item.sourceUrl !== meal.sourceUrl)]);
-      setVisibleRecipeCount((current) => Math.max(current, recipeBatchSize));
-      setImportUrl("");
-      setImportStatus(`${meal.title} was added to your recipe catalog.`);
-    } catch (error) {
-      setImportStatus(error instanceof Error ? error.message : "That recipe could not be imported.");
-    } finally {
-      setImportBusy(false);
     }
   }
 
@@ -2102,17 +2056,6 @@ export default function Home() {
           <summary><span>Why these recipes match your family</span><small>{members.length} member{members.length === 1 ? "" : "s"} included</small></summary>
           <div>{familyRuleDetails.map((item) => <p key={`catalog-${item.member}-${item.rule}`}><strong>{item.member}</strong><span>{item.rule}</span></p>)}</div>
         </details>}
-        <section className="recipe-import-panel" aria-labelledby="recipe-import-title">
-          <div><p className="mini-label">BRING YOUR OWN RECIPE</p><h4 id="recipe-import-title">Found something elsewhere?</h4><p>Search the web, then paste a recipe page link here. We’ll import its title, image, timing, and ingredients when the page provides standard recipe details.</p></div>
-          <div className="recipe-import-controls">
-            <label htmlFor="recipe-import-kind">Add to catalog as</label>
-            <select id="recipe-import-kind" value={importKind} onChange={(event) => setImportKind(event.target.value)}>{activeMealKinds.map((kind) => <option key={kind}>{kind}</option>)}</select>
-            <label className="recipe-url-field" htmlFor="recipe-import-url">Recipe page link<input id="recipe-import-url" type="url" placeholder="https://example.com/recipe" value={importUrl} onChange={(event) => { setImportUrl(event.target.value); setImportStatus(""); }} onKeyDown={(event) => { if (event.key === "Enter") void importRecipeUrl(); }} /></label>
-            <button className="outline" type="button" disabled={importBusy || !importUrl.trim()} onClick={importRecipeUrl}>{importBusy ? "Importing…" : "Import recipe"}</button>
-            <a className="web-recipe-search" href={webRecipeSearchUrl()} target="_blank" rel="noreferrer">Search the web ↗</a>
-          </div>
-          {importStatus && <p className="recipe-import-status" role="status" aria-live="polite">{importStatus}</p>}
-        </section>
         <details className="catalog-filter-panel" open>
           <summary><span>Filter recipes</span><small>{filteredRecipeIdeas.length} matches</small></summary>
           <div className="recipe-filters">

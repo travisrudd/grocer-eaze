@@ -581,63 +581,6 @@ function recipeJsonLdFromHtml(html: string) {
   return null;
 }
 
-function parseDuration(value: unknown) {
-  const match = String(value || "").match(/^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$/i);
-  return match ? Number(match[1] || 0) * 1440 + Number(match[2] || 0) * 60 + Number(match[3] || 0) : 0;
-}
-
-function jsonLdImage(value: unknown) {
-  if (typeof value === "string") return safeHttpUrl(value);
-  if (Array.isArray(value)) return jsonLdImage(value[0]);
-  if (value && typeof value === "object") return safeHttpUrl((value as Record<string, unknown>).url || (value as Record<string, unknown>).contentUrl);
-  return "";
-}
-
-async function importRecipe(request: Request, env: AppEnv) {
-  const body = await request.json() as { url?: string };
-  const input = isPublicRecipeUrl(body.url);
-  if (!input) return json({ error: "Enter a public recipe page link beginning with http:// or https://." }, 400);
-  try {
-    const { html, finalUrl } = await fetchRecipePage(input);
-    const recipeData = recipeJsonLdFromHtml(html);
-    if (!recipeData) return json({ error: "We couldn’t find structured recipe details on that page. Try another recipe link." }, 422);
-    const ingredientLines = Array.isArray(recipeData.recipeIngredient) ? recipeData.recipeIngredient.map(String).filter(Boolean) : [];
-    if (!ingredientLines.length) return json({ error: "That page names a recipe but does not provide an ingredient list we can import." }, 422);
-    const ingredientText = ingredientLines.join(" ");
-    const extendedIngredients = ingredientLines.map((original) => {
-      const name = original.replace(/^\s*[\d¼½¾⅓⅔⅛⅜⅝⅞.,/\-–—\s]+/, "").replace(/\([^)]*\)/g, "").trim() || original;
-      return { name, aisle: ingredientAisle(name), original };
-    }).filter((ingredient) => isConcreteIngredientName(ingredient.name));
-    if (!extendedIngredients.length) return json({ error: "That page does not provide specific ingredients we can safely add to a grocery list." }, 422);
-    const ready = parseDuration(recipeData.totalTime) || parseDuration(recipeData.prepTime) + parseDuration(recipeData.cookTime) || 40;
-    const yieldText = Array.isArray(recipeData.recipeYield) ? recipeData.recipeYield[0] : recipeData.recipeYield;
-    const servings = Math.max(1, Number(String(yieldText || "4").match(/\d+/)?.[0] || 4));
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(finalUrl));
-    const id = `import-${[...new Uint8Array(digest)].slice(0, 12).map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-    const descriptor = `${String(recipeData.keywords || "")} ${String(recipeData.recipeCuisine || "")} ${String(recipeData.recipeCategory || "")}`;
-    const recipe: Recipe = {
-      id,
-      title: String(recipeData.name || "Imported recipe").trim().slice(0, 200),
-      sourceName: new URL(finalUrl).hostname.replace(/^www\./, ""),
-      sourceUrl: finalUrl,
-      readyInMinutes: Math.min(1440, ready),
-      servings,
-      glutenFree: /gluten[- ]free/i.test(descriptor) || !glutenWords.test(ingredientText),
-      dairyFree: /dairy[- ]free|vegan/i.test(descriptor) || !dairyWords.test(ingredientText),
-      image: jsonLdImage(recipeData.image),
-      pricePerServing: Math.min(900, 250 + extendedIngredients.length * 18),
-      diets: /mediterranean/i.test(descriptor) ? ["Mediterranean"] : [],
-      extendedIngredients,
-      instructions: normalizeRecipeInstructions(recipeData.recipeInstructions),
-    };
-    await ensureSchema(env.DB);
-    await cacheRecipes(env.DB, [recipe], "import");
-    return json({ recipe });
-  } catch (error) {
-    return json({ error: error instanceof Error ? error.message : "That recipe could not be imported." }, 502);
-  }
-}
-
 type ReaderMealInput = {
   mealId?: unknown;
   recipeId?: unknown;
@@ -1107,7 +1050,7 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
     return json({ sent: true });
   }
 
-  const paidPaths = new Set(["/api/recipes/search", "/api/recipes/import", "/api/recipe-image", "/api/calendar", "/api/favorites", "/api/ratings", "/api/email"]);
+  const paidPaths = new Set(["/api/recipes/search", "/api/recipe-image", "/api/calendar", "/api/favorites", "/api/ratings", "/api/email"]);
   const paidRequest = paidPaths.has(url.pathname) || (url.pathname === "/api/recipe-readers" && request.method === "POST");
   if (paidRequest && !sessionUser) return json({ error: "Sign in and choose a membership to continue.", code: "PAYMENT_REQUIRED" }, 401);
   if (paidRequest && !hasProductAccess(sessionUser)) return json({ error: "An active membership or trial is required.", code: "PAYMENT_REQUIRED" }, 402);
@@ -1120,10 +1063,6 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
     const allowed = new Set(["q", "maxTime", "glutenFree", "lowDairy", "mediterranean", "excludeIngredients", "number", "schoolLunch", "offset"]);
     for (const [key, value] of Object.entries(body)) if (allowed.has(key)) searchUrl.searchParams.set(key, String(value).slice(0, key === "excludeIngredients" || key === "q" ? 1000 : 30));
     return searchRecipes(searchUrl, env);
-  }
-  if (url.pathname === "/api/recipes/import" && request.method === "POST") {
-    if (!await rateLimit(request, env, "recipe-import", 30, sessionUser!.id, 30)) return json({ error: "You’ve reached the recipe-import limit. Please wait a few minutes and try again." }, 429);
-    return importRecipe(request, env);
   }
   if (url.pathname === "/api/recipe-image" && request.method === "GET") return recipeImageResponse(url, env);
   if (url.pathname === "/api/recipe-readers" && request.method === "POST" && sessionUser) {

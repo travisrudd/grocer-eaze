@@ -64,7 +64,7 @@ test("supports location search controls and keeps recipe providers out of the fo
   assert.doesNotMatch(page, /recipeSourceLinks/);
 });
 
-test("combines a cached catalog, TheMealDB, and user-controlled web recipe imports", async () => {
+test("combines a cached catalog and TheMealDB without recipe imports", async () => {
   const [page, api, worker, schema] = await Promise.all([
     source("app/page.tsx"),
     source("worker/api.ts"),
@@ -77,11 +77,10 @@ test("combines a cached catalog, TheMealDB, and user-controlled web recipe impor
   assert.match(api, /themealdb\.com\/api\/json\/v2/);
   assert.match(api, /recipe_catalog/);
   assert.match(schema, /recipeCatalog/);
-  assert.match(api, /\/api\/recipes\/import/);
   assert.match(api, /application\\\/ld\\\+json/);
-  assert.match(page, /Search the web ↗/);
-  assert.match(page, /www\.google\.com\/search/);
-  assert.match(page, /Import recipe/);
+  assert.doesNotMatch(api, /\/api\/recipes\/import/);
+  assert.doesNotMatch(page, /BRING YOUR OWN RECIPE/);
+  assert.doesNotMatch(page, /Import recipe/);
   assert.doesNotMatch(api, /google\.com\/search[\s\S]*fetch/);
 });
 
