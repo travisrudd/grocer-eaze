@@ -29,6 +29,10 @@ jobs:
 
       - run: npm run lint
       - run: npm test
+      - run: ./node_modules/.bin/tsc --noEmit --incremental false
+      - run: npm run release:guard
+      - run: npm run security:audit
+      - run: npm run deploy:cloudflare:dry-run
 
       - name: Apply database migrations
         uses: cloudflare/wrangler-action@v3

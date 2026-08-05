@@ -17,10 +17,10 @@ function json(value: unknown, status = 200) {
   return Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
 }
 
-async function stripe(path: string, env: BillingEnv, values: Record<string, string>) {
+async function stripe(path: string, env: BillingEnv, values: Record<string, string>, method: "POST" | "DELETE" = "POST") {
   if (!env.STRIPE_SECRET_KEY) throw new Error("Payments are not connected yet.");
   const response = await fetch(`https://api.stripe.com/v1/${path}`, {
-    method: "POST",
+    method,
     headers: {
       Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
       "Content-Type": "application/x-www-form-urlencoded",
@@ -30,6 +30,11 @@ async function stripe(path: string, env: BillingEnv, values: Record<string, stri
   const data = await response.json() as Record<string, unknown>;
   if (!response.ok) throw new Error(String((data.error as { message?: string } | undefined)?.message || "Stripe could not complete that request."));
   return data;
+}
+
+export async function cancelStripeSubscription(subscriptionId: string, env: BillingEnv) {
+  if (!/^sub_[A-Za-z0-9]+$/.test(subscriptionId)) throw new Error("The billing subscription could not be verified.");
+  await stripe(`subscriptions/${encodeURIComponent(subscriptionId)}`, env, {}, "DELETE");
 }
 
 function hex(bytes: ArrayBuffer) {

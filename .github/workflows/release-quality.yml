@@ -36,11 +36,23 @@ jobs:
       - name: Build production site
         run: npm run build
 
+      - name: Check types
+        run: ./node_modules/.bin/tsc --noEmit --incremental false
+
+      - name: Check security and bundle budgets
+        run: npm run release:guard
+
+      - name: Audit production dependencies
+        run: npm run security:audit
+
       - name: Run product checks
         run: npm run test:unit
 
       - name: Audit accessibility and usability
         run: npm run ux:audit
+
+      - name: Validate Cloudflare package without publishing
+        run: npm run deploy:cloudflare:dry-run
 
       - name: Save failure evidence
         if: failure()

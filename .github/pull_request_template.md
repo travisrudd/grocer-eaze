@@ -9,6 +9,10 @@ Describe the user-facing change and the primary journey it affects.
 - [ ] 200% and 400% zoom/reflow checked for changed screens.
 - [ ] Loading, empty, success, validation, and service-error states checked.
 - [ ] No dead links, buttons, controls, or navigation destinations introduced.
+- [ ] Security guard, dependency audit, type check, and Cloudflare dry run pass.
+- [ ] Changed authentication, authorization, billing, deletion, and sharing edge cases are validated.
+- [ ] Client bundle budgets pass; changed screens have no material performance regression.
+- [ ] Production publish has explicit owner confirmation.
 
 For major interaction or layout changes:
 

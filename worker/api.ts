@@ -13,8 +13,8 @@ type AppEnv = {
   PEXELS_API_KEY?: string;
   THEMEALDB_API_KEY?: string;
 };
-import { getSessionUser, handleAuthRequest, hasProductAccess } from "./auth";
-import { handleBillingRequest } from "./billing";
+import { ensureAuthSchema, getSessionUser, handleAuthRequest, hasProductAccess, rateLimit } from "./auth";
+import { cancelStripeSubscription, handleBillingRequest } from "./billing";
 import { cleanRecipeText, normalizeRecipeInstructions, renderRecipeReader, type RecipeInstructionSection, type RecipeReaderContent } from "./recipe-reader";
 
 const preferredSources = ["allrecipes.com", "foodnetwork.com", "eatingwell.com", "seriouseats.com", "simplyrecipes.com"];
@@ -437,7 +437,7 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE INDEX IF NOT EXISTS recipe_ratings_owner_idx ON recipe_ratings(owner_id)"),
     db.prepare("CREATE TABLE IF NOT EXISTS recipe_catalog (id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_name TEXT NOT NULL, source_url TEXT NOT NULL, title TEXT NOT NULL, search_text TEXT NOT NULL, recipe_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE INDEX IF NOT EXISTS recipe_catalog_updated_idx ON recipe_catalog(updated_at)"),
-    db.prepare("CREATE TABLE IF NOT EXISTS recipe_readers (share_token TEXT PRIMARY KEY, owner_id TEXT NOT NULL, recipe_key TEXT NOT NULL, source_url TEXT NOT NULL, content_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS recipe_readers (share_token TEXT PRIMARY KEY, owner_id TEXT NOT NULL, recipe_key TEXT NOT NULL, source_url TEXT NOT NULL, content_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT, revoked_at TEXT)"),
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS recipe_readers_owner_recipe_idx ON recipe_readers(owner_id, recipe_key)"),
   ]);
 }
@@ -756,8 +756,9 @@ async function createRecipeReaders(request: Request, env: AppEnv, ownerId: strin
   if (!prepared.length) return json({ error: "These recipes do not include supported public source links." }, 422);
 
   const uniqueRecipes = [...new Map(prepared.map((recipe) => [recipe.recipeKey, recipe])).values()];
-  const existingResults = await env.DB.batch(uniqueRecipes.map((recipe) => env.DB.prepare("SELECT share_token, content_json FROM recipe_readers WHERE owner_id = ? AND recipe_key = ? LIMIT 1").bind(ownerId, recipe.recipeKey)));
+  const existingResults = await env.DB.batch(uniqueRecipes.map((recipe) => env.DB.prepare("SELECT share_token, content_json FROM recipe_readers WHERE owner_id = ? AND recipe_key = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) LIMIT 1").bind(ownerId, recipe.recipeKey, new Date().toISOString())));
   const now = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + 90 * 86_400_000).toISOString();
   const readers = uniqueRecipes.map((recipe, index) => {
     const existing = existingResults[index]?.results?.[0] as { share_token?: unknown; content_json?: unknown } | undefined;
     let content = recipe.content;
@@ -770,8 +771,8 @@ async function createRecipeReaders(request: Request, env: AppEnv, ownerId: strin
     }
     return { ...recipe, token: String(existing?.share_token || randomReaderToken()), content };
   });
-  await env.DB.batch(readers.map((reader) => env.DB.prepare("INSERT INTO recipe_readers(share_token, owner_id, recipe_key, source_url, content_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(owner_id, recipe_key) DO UPDATE SET source_url=excluded.source_url, content_json=excluded.content_json, updated_at=excluded.updated_at")
-    .bind(reader.token, ownerId, reader.recipeKey, reader.content.sourceUrl, JSON.stringify(reader.content), now, now)));
+  await env.DB.batch(readers.map((reader) => env.DB.prepare("INSERT INTO recipe_readers(share_token, owner_id, recipe_key, source_url, content_json, created_at, updated_at, expires_at, revoked_at) VALUES(?,?,?,?,?,?,?,?,NULL) ON CONFLICT(owner_id, recipe_key) DO UPDATE SET share_token=excluded.share_token, source_url=excluded.source_url, content_json=excluded.content_json, updated_at=excluded.updated_at, expires_at=excluded.expires_at, revoked_at=NULL")
+    .bind(reader.token, ownerId, reader.recipeKey, reader.content.sourceUrl, JSON.stringify(reader.content), now, now, expiresAt)));
   const tokensByRecipe = new Map(readers.map((reader) => [reader.recipeKey, reader.token]));
   return json({ readers: prepared.map((recipe) => ({ mealId: recipe.mealId, recipeId: recipe.recipeId, url: `${publicAppOrigin}/recipe/${tokensByRecipe.get(recipe.recipeKey)}` })) });
 }
@@ -789,7 +790,8 @@ export async function handleRecipeReaderPage(request: Request, env: AppEnv): Pro
   const token = url.pathname.match(/^\/recipe\/([a-f0-9]{64})\/?$/i)?.[1]?.toLowerCase();
   if (!token) return recipeReaderErrorPage("This clean recipe link is incomplete or invalid.");
   await ensureSchema(env.DB);
-  const row = await env.DB.prepare("SELECT content_json FROM recipe_readers WHERE share_token = ? LIMIT 1").bind(token).first();
+  await env.DB.prepare("DELETE FROM recipe_readers WHERE expires_at IS NOT NULL AND expires_at <= ?").bind(new Date().toISOString()).run();
+  const row = await env.DB.prepare("SELECT content_json FROM recipe_readers WHERE share_token = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) LIMIT 1").bind(token, new Date().toISOString()).first();
   if (!row?.content_json) return recipeReaderErrorPage("This clean recipe link is no longer available.");
   let stored: Record<string, unknown>;
   try { stored = JSON.parse(String(row.content_json)) as Record<string, unknown>; }
@@ -989,10 +991,26 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
   const sessionUser = await getSessionUser(request, env);
   if (url.pathname === "/api/health") return json({ ok: true });
   if (url.pathname === "/api/capabilities" && request.method === "GET") return json({});
-  if (url.pathname === "/api/location/search" && request.method === "GET") return locationLookup(url);
-  if (url.pathname === "/api/location/reverse" && request.method === "GET") return locationLookup(url, true);
+  if (["/api/location/search", "/api/location/reverse"].includes(url.pathname) && request.method === "POST") {
+    await ensureAuthSchema(env.DB);
+    if (!await rateLimit(request, env, "location-lookup", 60)) return json({ error: "Too many location searches. Please wait a few minutes and try again." }, 429);
+    let body: Record<string, unknown>;
+    try { body = JSON.parse(await requestTextWithinLimit(request, 8_192)) as Record<string, unknown>; }
+    catch { return json({ error: "Enter a valid location search." }, 400); }
+    const lookupUrl = new URL(url.pathname, url.origin);
+    if (url.pathname.endsWith("/search")) lookupUrl.searchParams.set("q", String(body.q || "").slice(0, 200));
+    else {
+      lookupUrl.searchParams.set("lat", String(body.lat || "").slice(0, 30));
+      lookupUrl.searchParams.set("lon", String(body.lon || "").slice(0, 30));
+    }
+    return locationLookup(lookupUrl, url.pathname.endsWith("/reverse"));
+  }
   if (url.pathname === "/api/accessibility-feedback" && request.method === "POST") {
-    const body = await request.json() as { name?: string; email?: string; details?: string; website?: string };
+    await ensureAuthSchema(env.DB);
+    if (!await rateLimit(request, env, "accessibility-feedback", 5)) return json({ error: "Too many reports were submitted. Please try again later." }, 429);
+    let body: { name?: string; email?: string; details?: string; website?: string };
+    try { body = JSON.parse(await requestTextWithinLimit(request, 16_384)) as typeof body; }
+    catch { return json({ error: "Enter valid feedback." }, 400); }
     if (body.website) return json({ sent: true });
     const name = String(body.name || "").trim().slice(0, 100);
     const email = String(body.email || "").trim().slice(0, 254);
@@ -1016,6 +1034,36 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
       }),
     });
     if (!sent.ok) return json({ error: "We couldn’t send your feedback. Please try again." }, 502);
+    return json({ sent: true });
+  }
+
+  if (url.pathname === "/api/privacy-request" && request.method === "POST") {
+    await ensureAuthSchema(env.DB);
+    if (!await rateLimit(request, env, "privacy-request", 5)) return json({ error: "Too many requests were submitted. Please try again later." }, 429);
+    let body: { name?: string; email?: string; requestType?: string; details?: string; website?: string };
+    try { body = JSON.parse(await requestTextWithinLimit(request, 16_384)) as typeof body; }
+    catch { return json({ error: "Enter a valid privacy request." }, 400); }
+    if (body.website) return json({ sent: true });
+    const name = cleanRecipeText(body.name, 100);
+    const email = String(body.email || "").trim().toLowerCase().slice(0, 254);
+    const requestType = ["Access my data", "Correct my data", "Delete my data", "Privacy question"].includes(String(body.requestType)) ? String(body.requestType) : "Privacy question";
+    const details = cleanRecipeText(body.details, 3000);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: "Enter a valid email address." }, 400);
+    if (!env.RESEND_API_KEY || !env.EMAIL_FROM) return json({ error: "Privacy request delivery is temporarily unavailable." }, 503);
+    const recipient = [env.INITIAL_ADMIN_EMAIL, ...(env.INITIAL_ADMIN_EMAILS || "").split(",")].map((value) => String(value || "").trim()).find(Boolean);
+    if (!recipient) return json({ error: "Privacy request delivery is temporarily unavailable." }, 503);
+    const sent = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json", "User-Agent": "Grocer-Eaze/1.0 (https://grocer-eaze.com)" },
+      body: JSON.stringify({
+        from: env.EMAIL_FROM,
+        to: [recipient],
+        reply_to: email,
+        subject: `Grocer-Eaze privacy request: ${requestType}`,
+        html: `<h1>${escapeHtml(requestType)}</h1><p><strong>From:</strong> ${escapeHtml(name || "Not provided")} (${escapeHtml(email)})</p><p>${escapeHtml(details || "No additional details provided.").replace(/\n/g, "<br>")}</p>`,
+      }),
+    });
+    if (!sent.ok) return json({ error: "We couldn’t send your request. Please try again." }, 502);
     return json({ sent: true });
   }
 
@@ -1059,17 +1107,79 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
     return json({ sent: true });
   }
 
-  const paidPaths = new Set(["/api/recipes/search", "/api/recipes/import", "/api/recipe-image", "/api/recipe-readers", "/api/calendar", "/api/favorites", "/api/ratings", "/api/email"]);
-  if (paidPaths.has(url.pathname) && !sessionUser) return json({ error: "Sign in and choose a membership to continue.", code: "PAYMENT_REQUIRED" }, 401);
-  if (paidPaths.has(url.pathname) && !hasProductAccess(sessionUser)) return json({ error: "An active membership or trial is required.", code: "PAYMENT_REQUIRED" }, 402);
-  if (url.pathname === "/api/recipes/search" && request.method === "GET") return searchRecipes(url, env);
-  if (url.pathname === "/api/recipes/import" && request.method === "POST") return importRecipe(request, env);
+  const paidPaths = new Set(["/api/recipes/search", "/api/recipes/import", "/api/recipe-image", "/api/calendar", "/api/favorites", "/api/ratings", "/api/email"]);
+  const paidRequest = paidPaths.has(url.pathname) || (url.pathname === "/api/recipe-readers" && request.method === "POST");
+  if (paidRequest && !sessionUser) return json({ error: "Sign in and choose a membership to continue.", code: "PAYMENT_REQUIRED" }, 401);
+  if (paidRequest && !hasProductAccess(sessionUser)) return json({ error: "An active membership or trial is required.", code: "PAYMENT_REQUIRED" }, 402);
+  if (url.pathname === "/api/recipes/search" && request.method === "POST") {
+    if (!await rateLimit(request, env, "recipe-search", 120, sessionUser!.id, 120)) return json({ error: "You’ve reached the recipe-search limit. Please wait a few minutes and try again." }, 429);
+    let body: Record<string, unknown>;
+    try { body = JSON.parse(await requestTextWithinLimit(request, 16_384)) as Record<string, unknown>; }
+    catch { return json({ error: "Enter a valid recipe search." }, 400); }
+    const searchUrl = new URL(url.pathname, url.origin);
+    const allowed = new Set(["q", "maxTime", "glutenFree", "lowDairy", "mediterranean", "excludeIngredients", "number", "schoolLunch", "offset"]);
+    for (const [key, value] of Object.entries(body)) if (allowed.has(key)) searchUrl.searchParams.set(key, String(value).slice(0, key === "excludeIngredients" || key === "q" ? 1000 : 30));
+    return searchRecipes(searchUrl, env);
+  }
+  if (url.pathname === "/api/recipes/import" && request.method === "POST") {
+    if (!await rateLimit(request, env, "recipe-import", 30, sessionUser!.id, 30)) return json({ error: "You’ve reached the recipe-import limit. Please wait a few minutes and try again." }, 429);
+    return importRecipe(request, env);
+  }
   if (url.pathname === "/api/recipe-image" && request.method === "GET") return recipeImageResponse(url, env);
-  if (url.pathname === "/api/recipe-readers" && request.method === "POST" && sessionUser) return createRecipeReaders(request, env, sessionUser.id);
+  if (url.pathname === "/api/recipe-readers" && request.method === "POST" && sessionUser) {
+    if (!await rateLimit(request, env, "recipe-reader-create", 30, sessionUser.id, 30)) return json({ error: "You’ve reached the clean-recipe link limit. Please try again later." }, 429);
+    return createRecipeReaders(request, env, sessionUser.id);
+  }
   if (url.pathname === "/api/calendar" && request.method === "POST") return calendarResponse(await request.json());
   if (!sessionUser) return json({ error: "Sign in to access household information." }, 401);
   const ownerId = sessionUser.id;
   await ensureSchema(env.DB);
+
+  if (url.pathname === "/api/recipe-readers" && request.method === "GET") {
+    const result = await env.DB.prepare("SELECT share_token, content_json, created_at, updated_at, expires_at FROM recipe_readers WHERE owner_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) ORDER BY updated_at DESC LIMIT 100").bind(ownerId, new Date().toISOString()).all();
+    return json({ readers: result.results.map((row) => {
+      let title = "Shared recipe";
+      try { title = cleanRecipeText((JSON.parse(String(row.content_json)) as Record<string, unknown>).title, 200) || title; } catch { /* Keep the generic title for malformed legacy content. */ }
+      return { token: row.share_token, title, createdAt: row.created_at, updatedAt: row.updated_at, expiresAt: row.expires_at };
+    }) });
+  }
+
+  if (url.pathname === "/api/recipe-readers" && request.method === "DELETE") {
+    await env.DB.prepare("UPDATE recipe_readers SET revoked_at = ?, updated_at = ? WHERE owner_id = ? AND revoked_at IS NULL").bind(new Date().toISOString(), new Date().toISOString(), ownerId).run();
+    return json({ revoked: true });
+  }
+
+  if (url.pathname === "/api/account" && request.method === "DELETE") {
+    let body: { confirmation?: string };
+    try { body = JSON.parse(await requestTextWithinLimit(request, 4_096)) as typeof body; }
+    catch { return json({ error: "Enter the deletion confirmation." }, 400); }
+    if (body.confirmation !== "DELETE") return json({ error: "Type DELETE to confirm permanent account deletion." }, 400);
+    const account = await env.DB.prepare("SELECT email, role, stripe_subscription_id, subscription_status FROM users WHERE id = ? LIMIT 1").bind(ownerId).first();
+    if (!account) return json({ error: "That account could not be found." }, 404);
+    if (String(account.role) === "admin") {
+      const administrators = await env.DB.prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'admin'").first();
+      if (Number(administrators?.count || 0) <= 1) return json({ error: "The last administrator cannot delete their account. Assign another administrator first." }, 409);
+    }
+    const subscriptionId = String(account.stripe_subscription_id || "");
+    const subscriptionStatus = String(account.subscription_status || "");
+    if (subscriptionId && !["canceled", "incomplete_expired"].includes(subscriptionStatus)) {
+      try { await cancelStripeSubscription(subscriptionId, env); }
+      catch { return json({ error: "We could not cancel the active billing subscription, so the account was not deleted. Please try again or use Manage billing first." }, 502); }
+    }
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM profiles WHERE owner_id = ?").bind(ownerId),
+      env.DB.prepare("DELETE FROM active_plans WHERE owner_id = ?").bind(ownerId),
+      env.DB.prepare("DELETE FROM favorites WHERE owner_id = ?").bind(ownerId),
+      env.DB.prepare("DELETE FROM family_members WHERE owner_id = ?").bind(ownerId),
+      env.DB.prepare("DELETE FROM recipe_ratings WHERE owner_id = ?").bind(ownerId),
+      env.DB.prepare("DELETE FROM recipe_readers WHERE owner_id = ?").bind(ownerId),
+      env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(ownerId),
+      env.DB.prepare("DELETE FROM auth_codes WHERE email = ?").bind(String(account.email)),
+      env.DB.prepare("DELETE FROM admin_audit_log WHERE admin_user_id = ? OR target_user_id = ?").bind(ownerId, ownerId),
+      env.DB.prepare("DELETE FROM users WHERE id = ?").bind(ownerId),
+    ]);
+    return Response.json({ deleted: true }, { headers: { "Cache-Control": "no-store", "Set-Cookie": "grocer_eaze_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0" } });
+  }
 
   if (url.pathname === "/api/active-plan") {
     if (request.method === "GET") {
@@ -1094,7 +1204,15 @@ export async function handleApiRequest(request: Request, env: AppEnv): Promise<R
     }
   }
 
-  if (url.pathname === "/api/stores/search" && request.method === "GET") return nearbyStoreLookup(url);
+  if (url.pathname === "/api/stores/search" && request.method === "POST") {
+    if (!await rateLimit(request, env, "store-lookup", 60, ownerId, 60)) return json({ error: "Too many store searches. Please wait a few minutes and try again." }, 429);
+    let body: Record<string, unknown>;
+    try { body = JSON.parse(await requestTextWithinLimit(request, 8_192)) as Record<string, unknown>; }
+    catch { return json({ error: "Enter a valid store search." }, 400); }
+    const storeUrl = new URL(url.pathname, url.origin);
+    for (const key of ["lat", "lon", "radius", "q"]) if (body[key] !== undefined) storeUrl.searchParams.set(key, String(body[key]).slice(0, key === "q" ? 120 : 30));
+    return nearbyStoreLookup(storeUrl);
+  }
 
   if (url.pathname === "/api/profile") {
     if (request.method === "GET") {

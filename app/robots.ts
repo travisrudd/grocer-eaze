@@ -5,7 +5,7 @@ export default function robots(): MetadataRoute.Robots {
     rules: {
       userAgent: "*",
       allow: "/",
-      disallow: ["/api/", "/signin-with-chatgpt", "/signout-with-chatgpt", "/callback"],
+      disallow: ["/api/", "/recipe/", "/signin-with-chatgpt", "/signout-with-chatgpt", "/callback"],
     },
     sitemap: "https://grocer-eaze.com/sitemap.xml",
     host: "https://grocer-eaze.com",

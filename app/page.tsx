@@ -342,12 +342,16 @@ export default function Home() {
   const [similarTo, setSimilarTo] = useState("");
   const [accountStatus, setAccountStatus] = useState("");
   const [user, setUser] = useState<AccountUser | null>(null);
-  const [authStep, setAuthStep] = useState<"email" | "details" | "code">("email");
+  const [authStep, setAuthStep] = useState<"choose" | "signin" | "signup" | "code">("choose");
+  const [authIntent, setAuthIntent] = useState<"signin" | "signup">("signin");
   const [authForm, setAuthForm] = useState({ name: "", email: "", phone: "", code: "" });
   const [authBusy, setAuthBusy] = useState(false);
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
   const [adminSearch, setAdminSearch] = useState("");
   const [billingBusy, setBillingBusy] = useState(false);
+  const [accountDeleteOpen, setAccountDeleteOpen] = useState(false);
+  const [accountDeleteText, setAccountDeleteText] = useState("");
+  const [accountDeleteBusy, setAccountDeleteBusy] = useState(false);
   const [recipeIdeas, setRecipeIdeas] = useState<Meal[]>([]);
   const [recipePage, setRecipePage] = useState(1);
   const [visibleRecipeCount, setVisibleRecipeCount] = useState(recipeBatchSize);
@@ -862,6 +866,8 @@ export default function Home() {
       ? "recipient"
       : ratingMeal
         ? "rating"
+        : accountDeleteOpen
+          ? "account-delete"
         : onboardingStep !== null
           ? "onboarding"
           : "";
@@ -884,6 +890,7 @@ export default function Home() {
         if (activeDialog === "ingredient-report") setIngredientReport(null);
         else if (activeDialog === "recipient") { setRecipientDraft(null); setRecipientError(""); }
         else if (activeDialog === "rating") setRatingMeal(null);
+        else if (activeDialog === "account-delete") { setAccountDeleteOpen(false); setAccountDeleteText(""); }
         else if (activeDialog === "onboarding") finishOnboarding();
         return;
       }
@@ -917,14 +924,13 @@ export default function Home() {
   async function startAuth() {
     setAuthBusy(true); setAccountStatus("");
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(authForm.email.trim())) { setAuthBusy(false); setAccountStatus("Enter a valid email address to continue."); return; }
-    if (authStep === "details" && !authForm.name.trim()) { setAuthBusy(false); setAccountStatus("Enter your name to create your account."); return; }
+    if (authIntent === "signup" && !authForm.name.trim()) { setAuthBusy(false); setAccountStatus("Enter your name to create your account."); return; }
     try {
-      const body = authStep === "details" ? { name: authForm.name, email: authForm.email, phone: authForm.phone } : { email: authForm.email };
+      const body = { intent: authIntent, name: authIntent === "signup" ? authForm.name : "", email: authForm.email, phone: authIntent === "signup" ? authForm.phone : "" };
       const result = await fetch("/api/auth/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const data = await result.json().catch(() => ({ error: "Email delivery is temporarily unavailable." }));
-      if (result.status === 409 && data.code === "NAME_REQUIRED") { setAuthStep("details"); setAccountStatus("This email is new. Add your name to finish creating your account."); return; }
       if (!result.ok) { setAccountStatus(data.error || "Could not send a code."); return; }
-      setAuthStep("code"); setAccountStatus(`We sent a six-digit code to ${authForm.email}.`);
+      setAuthStep("code"); setAccountStatus(`Check ${authForm.email} for the next secure sign-in step.`);
     } catch {
       setAccountStatus("Email delivery is temporarily unavailable. Please try again.");
     } finally {
@@ -944,7 +950,7 @@ export default function Home() {
       if (cloudPlan.plan) applySavedPlan(cloudPlan.plan);
       else applySavedPlan(window.localStorage.getItem(`grocer-eaze-active-plan:${me.user.id}`));
       await reloadPersonalData();
-      setAccountStatus(data.returning ? "Welcome back. Your household information has been restored." : "Your secure account is ready. Choose a plan to start your free trial.");
+      setAccountStatus("You’re signed in. Your household information has been restored when available.");
     } catch {
       setAccountStatus("That code could not be verified. Please try again.");
     } finally {
@@ -954,13 +960,37 @@ export default function Home() {
 
   async function signOut() {
     await fetch("/api/auth/signout", { method: "POST" });
+    if (user?.id) window.localStorage.removeItem(`grocer-eaze-active-plan:${user.id}`);
     setPlanStorageOwnerId("");
     setUser(null);
     window.location.replace("/#account");
   }
 
+  async function revokeRecipeLinks() {
+    setAccountStatus("");
+    const result = await fetch("/api/recipe-readers", { method: "DELETE" });
+    const data = await result.json().catch(() => ({}));
+    setAccountStatus(result.ok ? "All previously shared clean-recipe links have been revoked." : data.error || "Recipe links could not be revoked.");
+  }
+
+  async function deleteAccount() {
+    if (accountDeleteText !== "DELETE") return;
+    setAccountDeleteBusy(true); setAccountStatus("");
+    try {
+      const result = await fetch("/api/account", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmation: accountDeleteText }) });
+      const data = await result.json().catch(() => ({}));
+      if (!result.ok) { setAccountStatus(data.error || "Your account could not be deleted."); return; }
+      if (user?.id) window.localStorage.removeItem(`grocer-eaze-active-plan:${user.id}`);
+      window.localStorage.removeItem("grocer-eaze-active-plan");
+      window.localStorage.removeItem("grocer-eaze-owner-id");
+      window.location.replace("/#account");
+    } finally {
+      setAccountDeleteBusy(false);
+    }
+  }
+
   async function loadAdminUsers(query = adminSearch) {
-    const result = await fetch(`/api/admin/users?q=${encodeURIComponent(query)}`);
+    const result = await fetch("/api/admin/users", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: query }) });
     const data = await result.json();
     if (result.ok) setAdminUsers(data.users || []); else setAccountStatus(data.error || "Admin access required.");
   }
@@ -990,7 +1020,7 @@ export default function Home() {
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
       try {
-        const response = await fetch(`/api/location/search?q=${encodeURIComponent(query)}`, { signal: controller.signal });
+        const response = await fetch("/api/location/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: query }), signal: controller.signal });
         const data = await response.json();
         const results = data.results || [];
         setLocationResults(results);
@@ -1070,10 +1100,10 @@ export default function Home() {
     });
     try {
       const searches: Array<{ kind: string; request: Promise<Response> }> = [
-        { kind: "Dinner", request: fetch(`/api/recipes/search?${searchParams(dinnerQuery, minutes)}`) },
+        { kind: "Dinner", request: fetch("/api/recipes/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.fromEntries(searchParams(dinnerQuery, minutes))) }) },
       ];
-      if (lunchTarget) searches.push({ kind: "Lunch", request: fetch(`/api/recipes/search?${searchParams(lunchQuery, minutes)}`) });
-      if (schoolLunchTarget) searches.push({ kind: "School lunch", request: fetch(`/api/recipes/search?${searchParams(schoolQuery, "20")}&schoolLunch=true`) });
+      if (lunchTarget) searches.push({ kind: "Lunch", request: fetch("/api/recipes/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.fromEntries(searchParams(lunchQuery, minutes))) }) });
+      if (schoolLunchTarget) { const params = searchParams(schoolQuery, "20"); params.set("schoolLunch", "true"); searches.push({ kind: "School lunch", request: fetch("/api/recipes/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.fromEntries(params)) }) }); }
       const responses = await Promise.all(searches.map((search) => search.request));
       const payloads = await Promise.all(responses.map((response) => response.json()));
       const failedIndex = responses.findIndex((response) => !response.ok);
@@ -1130,11 +1160,12 @@ export default function Home() {
     const maxTimeFilter = recipeFilters.maxTime === "Any time" ? (maxTime.match(/\d+/)?.[0] || "60") : recipeFilters.maxTime;
     const providerExclusions = [...familyAvoids, ...(lowDairy ? ["cream cheese", "heavy cream"] : [])];
     try {
-      const response = await fetch(`/api/recipes/search?${new URLSearchParams({
+      const params = new URLSearchParams({
         q: query, maxTime: kind === "School lunch" ? "20" : maxTimeFilter, glutenFree: String(effectiveGlutenFree), lowDairy: String(effectiveLowDairy),
         mediterranean: String(mediterranean), excludeIngredients: providerExclusions.join(","), number: "24", offset: String(recipePage * 24),
         ...(kind === "School lunch" ? { schoolLunch: "true" } : {}),
-      })}`);
+      });
+      const response = await fetch("/api/recipes/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.fromEntries(params)) });
       const data = await response.json();
       if (!response.ok) { setRecipeNotice(data.error || "More recipes are temporarily unavailable."); return; }
       const incoming = (data.recipes || []).map((recipe: Record<string, unknown>, index: number) => mapRecipe(recipe, recipeIdeas.length + index, kind));
@@ -1195,10 +1226,11 @@ export default function Home() {
   async function findSimilar(meal: Meal) {
     setRecipeLoading(true); setRecipeNotice(`Finding recipes like ${meal.title}…`);
     try {
-      const response = await fetch(`/api/recipes/search?${new URLSearchParams({
+      const params = new URLSearchParams({
         q: meal.title, maxTime: String(meal.readyMinutes || 45), glutenFree: String(effectiveGlutenFree), lowDairy: String(effectiveLowDairy),
         mediterranean: String(mediterranean), excludeIngredients: familyAvoids.join(","), number: "30",
-      })}`);
+      });
+      const response = await fetch("/api/recipes/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.fromEntries(params)) });
       const data = await response.json();
       if (!response.ok) { setRecipeNotice(data.error || "Similar recipes are temporarily unavailable."); return; }
       const similar = (data.recipes || []).map((recipe: Record<string, unknown>, index: number) => mapRecipe(recipe, index, meal.kind));
@@ -1445,7 +1477,7 @@ export default function Home() {
     if (!navigator.geolocation) { setLocationStatus("Location is not supported by this browser."); return; }
     navigator.geolocation.getCurrentPosition(async ({ coords }) => {
       try {
-        const response = await fetch(`/api/location/reverse?lat=${coords.latitude}&lon=${coords.longitude}`);
+        const response = await fetch("/api/location/reverse", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat: coords.latitude, lon: coords.longitude }) });
         const data = await response.json(); const result = data.results?.[0];
         if (result) { setLocation(result.label); setLocationQuery(result.label); setLocationCoordinates({ lat: String(result.lat || coords.latitude), lon: String(result.lon || coords.longitude) }); setLocationStatus("Location updated."); }
       } catch { setLocationStatus("We couldn’t identify that location. You can type it instead."); }
@@ -1468,7 +1500,7 @@ export default function Home() {
     try {
       const params = new URLSearchParams({ q: location, radius: String(storeRadius) });
       if (locationCoordinates) { params.set("lat", locationCoordinates.lat); params.set("lon", locationCoordinates.lon); }
-      const response = await fetch(`/api/stores/search?${params}`);
+      const response = await fetch("/api/stores/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.fromEntries(params)) });
       const data = await response.json() as { stores?: StorePreference[]; center?: { lat?: string; lon?: string }; error?: string };
       if (!response.ok) throw new Error(data.error || "Nearby stores could not be loaded.");
       const selectedIds = new Set(preferredStores.map((store) => store.id));
@@ -2212,19 +2244,23 @@ export default function Home() {
       <div className="page-heading"><div><p className="eyebrow">PROFILE & SECURITY</p><h2>{user ? `Welcome, ${user.name}.` : "Sign in or create an account"}</h2><p>{user ? "Control your household, privacy, and plan." : "Use your email and a one-time code. Returning households are restored automatically."}</p></div></div>
       {!user ? <section className="settings-card auth-card">
         <div className="auth-trust"><span className="icon-centered" aria-hidden="true">🔒</span><strong>Secure passwordless sign-in</strong><small>Returning users only enter their email. New accounts add a name; phone is optional.</small></div>
-        {authStep === "email" ? <>
-          <div className="field"><label htmlFor="signup-email">Email</label><input id="signup-email" className="text-input" type="email" autoComplete="email" required value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} /></div>
-          <button className="primary" disabled={authBusy || !authForm.email.trim()} onClick={startAuth}>{authBusy ? "Checking email…" : "Continue with email"}</button>
-        </> : authStep === "details" ? <>
-          <div className="field"><label htmlFor="signup-email-confirmed">Email</label><input id="signup-email-confirmed" className="text-input" type="email" value={authForm.email} disabled /></div>
+        {authStep === "choose" ? <div className="auth-choice-grid">
+          <button className="primary" onClick={() => { setAuthIntent("signin"); setAuthStep("signin"); setAccountStatus(""); }}>Sign in</button>
+          <button className="outline" onClick={() => { setAuthIntent("signup"); setAuthStep("signup"); setAccountStatus(""); }}>Create account</button>
+        </div> : authStep === "signin" ? <>
+          <div className="field"><label htmlFor="signin-email">Email</label><input id="signin-email" className="text-input" type="email" autoComplete="email" required value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} /></div>
+          <button className="primary" disabled={authBusy || !authForm.email.trim()} onClick={startAuth}>{authBusy ? "Sending secure email…" : "Email me a sign-in code"}</button>
+          <button className="text-button" onClick={() => { setAuthStep("choose"); setAccountStatus(""); }}>Back</button>
+        </> : authStep === "signup" ? <>
           <div className="field"><label htmlFor="signup-name">Name</label><input id="signup-name" className="text-input" autoComplete="name" required value={authForm.name} onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })} /></div>
+          <div className="field"><label htmlFor="signup-email">Email</label><input id="signup-email" className="text-input" type="email" autoComplete="email" required value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} /></div>
           <div className="field"><label htmlFor="signup-phone">Phone <small>(optional)</small></label><input id="signup-phone" className="text-input" type="tel" autoComplete="tel" value={authForm.phone} onChange={(e) => setAuthForm({ ...authForm, phone: e.target.value })} /></div>
-          <button className="primary" disabled={authBusy || !authForm.name.trim()} onClick={startAuth}>{authBusy ? "Sending code…" : "Create account and send code"}</button>
-          <button className="text-button" onClick={() => { setAuthStep("email"); setAccountStatus(""); }}>Use a different email</button>
+          <button className="primary" disabled={authBusy || !authForm.name.trim() || !authForm.email.trim()} onClick={startAuth}>{authBusy ? "Sending code…" : "Create account and send code"}</button>
+          <button className="text-button" onClick={() => { setAuthStep("choose"); setAccountStatus(""); }}>Back</button>
         </> : <>
           <div className="field"><label htmlFor="verification-code">Six-digit verification code</label><input id="verification-code" className="text-input code-input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={authForm.code} onChange={(e) => setAuthForm({ ...authForm, code: e.target.value.replace(/\D/g, "") })} /></div>
           <button className="primary" disabled={authBusy || authForm.code.length !== 6} onClick={verifyAuth}>{authBusy ? "Verifying…" : "Verify and sign in"}</button>
-          <button className="text-button" onClick={() => { setAuthStep("email"); setAccountStatus(""); }}>Use a different email</button>
+          <button className="text-button" onClick={() => { setAuthStep(authIntent); setAccountStatus(""); }}>Use a different email</button>
         </>}
         {accountStatus && <p className="checkout-note" role="status">{accountStatus}</p>}
       </section> : <div className="settings-stack">
@@ -2234,7 +2270,7 @@ export default function Home() {
           <div className="two-col"><div className="field"><label htmlFor="profile-household">Household name</label><input id="profile-household" className="text-input" value={household} onChange={(e) => setHousehold(e.target.value)} /></div><div className="field"><label htmlFor="profile-email">Default recipe email</label><input id="profile-email" className="text-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div></div>
           <button className="outline" onClick={async () => { await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ householdName: household, people, location, preferences: profilePreferences }) }); setAccountStatus("Profile saved."); }}>Save profile</button>{accountStatus && <span className="success-note" role="status">{accountStatus}</span>}
         </section>
-        <section className="settings-card security-card"><div className="icon-centered" aria-hidden="true">🔒</div><div><h3>Security</h3><p>Your email is verified. Your session is stored in a secure, HTTP-only cookie, protected data is checked on the server, and sensitive service keys never reach your browser.</p></div></section>
+        <section className="settings-card security-card"><div className="icon-centered" aria-hidden="true">🔒</div><div><h3>Security & privacy</h3><p>Your email is verified. Your session is stored in a secure, HTTP-only cookie, protected data is checked on the server, and sensitive service keys never reach your browser.</p><div className="account-security-actions"><a href="/privacy">Read the privacy policy</a><button className="text-button" type="button" onClick={revokeRecipeLinks}>Revoke all shared recipe links</button></div></div></section>
         <section className="settings-card plan-row">
           <div>
             <span className="mini-label">ACCESS STATUS</span>
@@ -2243,7 +2279,7 @@ export default function Home() {
           </div>
           {user.subscriptionStatus ? <button className="primary compact" disabled={billingBusy} onClick={() => openBilling("portal")}>Manage billing</button> : user.role === "admin" ? null : <button className="primary compact" onClick={() => navigateTo("plans")}>View plans</button>}
         </section>
-        <section className="settings-card danger-zone"><h3>Account controls</h3><button className="outline" onClick={signOut}>Sign out</button></section>
+        <section className="settings-card danger-zone"><div><h3>Account controls</h3><p>Signing out clears this account’s saved meal-plan copy from this device. Deleting your account permanently removes your Grocer-Eaze profile and household data.</p></div><div className="account-control-actions"><button className="outline" onClick={signOut}>Sign out</button><button className="danger-button" onClick={() => { setAccountDeleteOpen(true); setAccountStatus(""); }}>Delete account</button></div></section>
       </div>}
     </div>}
 
@@ -2290,6 +2326,8 @@ export default function Home() {
 
     {ingredientReport && <div className="modal-backdrop" onClick={() => setIngredientReport(null)}><section className="ingredient-report-modal" role="dialog" aria-modal="true" aria-labelledby="ingredient-report-title" tabIndex={-1} onClick={(event) => event.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close ingredient report" onClick={() => setIngredientReport(null)}>×</button><span className="mini-label">REPORT A LIST ISSUE</span><h3 id="ingredient-report-title">Help us correct {ingredientReport.name}</h3><p>We’ll include the recipe source and returned value automatically. Your report goes securely to the Grocer-Eaze team.</p><form onSubmit={submitIngredientReport}><label htmlFor="ingredient-report-category">What looks wrong?</label><select id="ingredient-report-category" value={ingredientReportCategory} onChange={(event) => setIngredientReportCategory(event.target.value)}><option>Incorrect amount</option><option>Incorrect ingredient</option><option>Duplicate ingredient</option><option>Other</option></select><label htmlFor="ingredient-report-correction">Correct amount or value <small>(optional)</small></label><input id="ingredient-report-correction" className="text-input" value={ingredientReportCorrection} onChange={(event) => setIngredientReportCorrection(event.target.value)} maxLength={200} placeholder="e.g. 2 cups" /><label htmlFor="ingredient-report-details">Anything else? <small>(optional)</small></label><textarea id="ingredient-report-details" value={ingredientReportDetails} onChange={(event) => setIngredientReportDetails(event.target.value)} maxLength={1000} placeholder="Tell us what you expected to see." />{ingredientReportStatus && <p className="form-notice error" role="alert">{ingredientReportStatus}</p>}<div className="modal-actions"><button className="outline" type="button" onClick={() => setIngredientReport(null)}>Cancel</button><button className="primary compact" type="submit" disabled={ingredientReportBusy}>{ingredientReportBusy ? "Sending report…" : "Send report"}</button></div></form></section></div>}
 
+    {accountDeleteOpen && <div className="modal-backdrop" onClick={() => { setAccountDeleteOpen(false); setAccountDeleteText(""); }}><section className="email-recipient-modal account-delete-modal" role="dialog" aria-modal="true" aria-labelledby="account-delete-title" tabIndex={-1} onClick={(event) => event.stopPropagation()}><button className="modal-close icon-centered" aria-label="Close account deletion" onClick={() => { setAccountDeleteOpen(false); setAccountDeleteText(""); }}>×</button><span className="mini-label">PERMANENT ACTION</span><h3 id="account-delete-title">Delete your Grocer-Eaze account?</h3><p>This removes your profile, family preferences, meal plan, favorites, ratings, and shared recipe links. If you have an active Stripe subscription, Grocer-Eaze will cancel it before deleting the account. This cannot be undone.</p><div className="field"><label htmlFor="account-delete-confirmation">Type DELETE to confirm</label><input id="account-delete-confirmation" className="text-input" autoComplete="off" value={accountDeleteText} onChange={(event) => { setAccountDeleteText(event.target.value); setAccountStatus(""); }} /></div>{accountStatus && <p className="form-notice error" role="alert">{accountStatus}</p>}<div className="modal-actions"><button className="outline" type="button" onClick={() => { setAccountDeleteOpen(false); setAccountDeleteText(""); }}>Keep account</button><button className="danger-button" type="button" disabled={accountDeleteText !== "DELETE" || accountDeleteBusy} onClick={deleteAccount}>{accountDeleteBusy ? "Deleting securely…" : "Permanently delete account"}</button></div></section></div>}
+
     {onboardingStep !== null && <div className="onboarding-backdrop"><section className="onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" tabIndex={-1}>
       <button className="modal-close icon-centered" aria-label="Skip introduction" onClick={finishOnboarding}>×</button>
       <span className="mini-label">{onboardingSteps[onboardingStep].eyebrow}</span>
@@ -2301,6 +2339,6 @@ export default function Home() {
 
     {undoAction && <div className="undo-toast" role="status"><span>{undoAction.message}</span><button onClick={() => { undoAction.restore(); setUndoAction(null); }}>Undo</button><button className="undo-dismiss" onClick={() => setUndoAction(null)} aria-label="Dismiss notification">×</button></div>}
 
-    <footer className="site-footer"><span>Grocer•Eaze</span><p>Better food. Less waste.</p><div><button onClick={startOnboarding}>How it works</button><button onClick={() => navigateTo("plans")}>Plans</button><button onClick={() => navigateTo("account")}>Privacy & security</button><button aria-current={view === "accessibility" ? "page" : undefined} onClick={() => navigateTo("accessibility")}>Accessibility</button></div></footer>
+    <footer className="site-footer"><span>Grocer•Eaze</span><p>Better food. Less waste.</p><div><button onClick={startOnboarding}>How it works</button><button onClick={() => navigateTo("plans")}>Plans</button><a href="/privacy">Privacy</a><button onClick={() => navigateTo("account")}>Security</button><button aria-current={view === "accessibility" ? "page" : undefined} onClick={() => navigateTo("accessibility")}>Accessibility</button></div></footer>
   </div>;
 }
